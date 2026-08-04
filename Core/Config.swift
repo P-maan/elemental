@@ -104,8 +104,37 @@ struct Config: Codable, Equatable {
     /// Colour quantisation step; higher is chunkier.
     var poster: Double = 16
 
-    /// Glass relief strength, 0 flat to 1 pressed glass block.
-    var glassAmplify: Double = 0.3
+    // MARK: - Relief
+    //
+    // The mosaic is a wall of blocks extruded toward you by their own
+    // brightness. These six controls are its material and its light; they
+    // replace the old single `glassAmplify` bevel knob, whose key is simply
+    // ignored when an older config.json is read.
+
+    /// How far the blocks stand out of the wall, 0 flat to 1 deep.
+    var reliefDepth: Double = 0.5
+
+    /// Where the light comes from, in degrees. 0 is from the right and positive
+    /// turns anticlockwise, so -45 is up and to the left.
+    var lightAngle: Double = -45
+
+    /// How hard that light is, 0..1.
+    var lightIntensity: Double = 0.8
+
+    /// How far the view is displaced through the block. Glass finish only —
+    /// a flat tile is opaque and has nothing to transmit.
+    var refraction: Double = 0.3
+
+    /// Per-channel split of the refraction, giving a chromatic fringe where the
+    /// blocks lean hardest. Glass only.
+    var dispersion: Double = 0.15
+
+    /// Scatter of the transmitted image. Glass only.
+    var frost: Double = 0
+
+    /// Per-block jitter of height, tilt and rotation, so the wall is not
+    /// perfectly coursed. Applies to both finishes.
+    var splay: Double = 0.15
 
     /// Frame rate ceiling. The display link still paces to the panel; this only
     /// lowers it. Measured on an M1 Pro at 4112x2658: 60fps costs ~6% of one
@@ -155,9 +184,9 @@ struct Config: Codable, Equatable {
         var finish: MosaicFinish = .glass
         var gridRows: Int = 36
         var poster: Double = 16
-
-    /// Glass relief strength, 0 flat to 1 pressed glass block.
-    var glassAmplify: Double = 0.3
+        // Relief is deliberately NOT per-surface. It is the material the whole
+        // mosaic is made of, and three independent copies of six sliders is a
+        // worse answer than one wall that looks the same wherever it is drawn.
         var headingMode: HeadingMode = .custom
         var facingAz: Double = 180
         var scenePlaceName: String?
@@ -181,7 +210,6 @@ struct Config: Codable, Equatable {
         c.finish = style.finish
         c.gridRows = style.gridRows
         c.poster = style.poster
-        c.glassAmplify = style.glassAmplify
         c.headingMode = style.headingMode
         c.facingAz = style.facingAz
         c.scenePlaceName = style.scenePlaceName ?? scenePlaceName
@@ -327,7 +355,13 @@ struct Config: Codable, Equatable {
         state.finish = finish
         state.gridRows = gridRows
         state.poster = Float(poster)
-        state.glassAmplify = Float(glassAmplify)
+        state.reliefDepth = Float(reliefDepth)
+        state.lightAngle = Float(lightAngle)
+        state.lightIntensity = Float(lightIntensity)
+        state.refraction = Float(refraction)
+        state.dispersion = Float(dispersion)
+        state.frost = Float(frost)
+        state.splay = Float(splay)
     }
 }
 
@@ -374,7 +408,13 @@ extension Config {
         finish             = c.lenient(.finish, d.finish)
         gridRows           = c.lenient(.gridRows, d.gridRows)
         poster             = c.lenient(.poster, d.poster)
-        glassAmplify       = c.lenient(.glassAmplify, d.glassAmplify)
+        reliefDepth        = c.lenient(.reliefDepth, d.reliefDepth)
+        lightAngle         = c.lenient(.lightAngle, d.lightAngle)
+        lightIntensity     = c.lenient(.lightIntensity, d.lightIntensity)
+        refraction         = c.lenient(.refraction, d.refraction)
+        dispersion         = c.lenient(.dispersion, d.dispersion)
+        frost              = c.lenient(.frost, d.frost)
+        splay              = c.lenient(.splay, d.splay)
         maxFPS             = c.lenient(.maxFPS, d.maxFPS)
         motionSpeed        = c.lenient(.motionSpeed, d.motionSpeed)
         widgets            = c.lenient(.widgets, d.widgets)
@@ -400,7 +440,6 @@ extension Config.SurfaceStyle {
         finish          = c.lenient(.finish, d.finish)
         gridRows        = c.lenient(.gridRows, d.gridRows)
         poster          = c.lenient(.poster, d.poster)
-        glassAmplify    = c.lenient(.glassAmplify, d.glassAmplify)
         headingMode     = c.lenient(.headingMode, d.headingMode)
         facingAz        = c.lenient(.facingAz, d.facingAz)
         scenePlaceName  = try? c.decodeIfPresent(String.self, forKey: .scenePlaceName)

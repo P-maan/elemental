@@ -10,9 +10,10 @@ import simd
 // MARK: - GPU-facing uniforms
 //
 // Layout mirrors `struct Uniforms` in Scene.metal exactly. Every field is a
-// 4-byte scalar and the tail is padded to 176 bytes, so there are no vector
+// 4-byte scalar and the tail is padded to 224 bytes, so there are no vector
 // alignment rules to reason about on either side. If you add a field, add it
-// in both places and keep the total a multiple of 16.
+// in both places, in the SAME ORDER, and keep the total a multiple of 16.
+// A mismatch does not crash — it silently shifts every field after the seam.
 
 struct Uniforms {
     var cols: Float = 0, rows: Float = 0
@@ -44,8 +45,16 @@ struct Uniforms {
     var grime: Float = 0
     var steam: Float = 0
     var cloudLow: Float = 0, cloudMid: Float = 0, cloudHigh: Float = 0
-    var glassAmp: Float = 0
     var fogOn: Float = 0
+    // ---- relief block. Mirrored field-for-field in Scene.metal.
+    var depthAmt: Float = 0
+    var lightAngle: Float = 0
+    var lightInt: Float = 0
+    var refractAmt: Float = 0
+    var dispersAmt: Float = 0
+    var frostAmt: Float = 0
+    var splayAmt: Float = 0
+    var _pad0: Float = 0, _pad1: Float = 0
 }
 
 struct GPUBreather { var ax, ay, R, per, s1, s2, ph, ph2: Float }
@@ -377,8 +386,25 @@ struct SceneState {
     /// Mosaic colour quantisation step; higher is chunkier.
     var poster: Float = 16
 
-    /// How pronounced the glass relief is, 0 flat to 1 pressed-glass-block.
-    var glassAmplify: Float = 0.3
+    // ---- Relief. The mosaic is a wall of extruded blocks; these are its
+    // material and its light. See the RELIEF section of Scene.metal.
+
+    /// How far the blocks stand out of the wall, 0 flat to 1 deep.
+    var reliefDepth: Float = 0.5
+    /// Where the light comes from, degrees; 0 is from the right, positive
+    /// turns anticlockwise, so -45 is up and to the left.
+    var lightAngle: Float = -45
+    /// How hard that light is, 0..1.
+    var lightIntensity: Float = 0.8
+    /// How far the view is displaced through the block. Glass only.
+    var refraction: Float = 0.3
+    /// Per-channel split of that displacement — the chromatic fringe. Glass only.
+    var dispersion: Float = 0.15
+    /// Scatter of the transmitted image. Glass only.
+    var frost: Float = 0
+    /// Per-block jitter of height, tilt and rotation, so the courses are not
+    /// perfectly regular.
+    var splay: Float = 0.15
 
     /// Skip the detail passes (moon terminator, sharp stars).
     var lowFX: Bool = false

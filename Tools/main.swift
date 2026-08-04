@@ -331,7 +331,13 @@ state.facingAz = Float(num("facing", 180))
 state.headingMode = str("heading", "custom") == "dynamic" ? .dynamic : .custom
 state.gridRows = int("rows", 36)
 state.poster = Float(num("poster", 16))
-state.glassAmplify = Float(num("glass", 0.3))
+state.reliefDepth = Float(num("depth", 0.5))
+state.lightAngle = Float(num("lightangle", -45))
+state.lightIntensity = Float(num("light", 0.8))
+state.refraction = Float(num("refract", 0.3))
+state.dispersion = Float(num("disperse", 0.15))
+state.frost = Float(num("frost", 0))
+state.splay = Float(num("splay", 0.15))
 state.shape  = str("shape", "square") == "dot" ? .dot : .square
 state.finish = str("finish", "glass") == "flat" ? .flat : .glass
 state.lowFX  = args["lowfx"] != nil

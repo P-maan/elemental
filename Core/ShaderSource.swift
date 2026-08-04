@@ -52,8 +52,16 @@ struct Uniforms {
     float grime;               // dirt settled out of the air, 0..1
     float steam;               // condensation fogging the pane, 0..1
     float cloudLow, cloudMid, cloudHigh;   // cover by altitude, 0..1
-    float glassAmp;            // glass relief strength, 0..1
     float fogOn;               // observed fog, not inferred from the code
+    // ---- relief block (see PASS B). Mirrored field-for-field in SceneState.swift.
+    float depthAmt;            // block height scale, 0..1
+    float lightAngle;          // degrees; light direction in the screen plane
+    float lightInt;            // 0..1
+    float refractAmt;          // 0..1, glass only
+    float dispersAmt;          // 0..1, glass only
+    float frostAmt;            // 0..1, glass only
+    float splayAmt;            // 0..1
+    float _pad0, _pad1;        // keep the struct a multiple of 16 bytes (224)
 };
 
 // Rain is rasterised at this multiple of the cell grid in each axis.
@@ -920,14 +928,156 @@ inline int detailDepth(float contrast, float thresh, float SP, float minSubPx, i
     return clamp(wanted, 2, min(affordable, hardMax));
 }
 
+// ================================================================ RELIEF
+// The mosaic is a WALL OF BLOCKS, not a grid of tinted squares.
+//
+// Every cell is a square column extruded toward the viewer by a height taken
+// from its own luminance, so the scene's content — a cloud deck, the moon, a
+// streak of rain — physically embosses the wall instead of merely colouring it.
+// Three things make that read as geometry rather than as a bevel:
+//
+//   parallax    a cell off the frame centre is seen from an angle, so its base
+//               is displaced from its top and you see its SIDE. The lean grows
+//               with distance from centre, exactly as it does looking at a real
+//               wall, and it is what stops the effect reading as a gradient.
+//   flanks      the side faces are shaded from a single light direction, so one
+//               side of every proud block is bright and the opposite side dark.
+//   contact     where a block sits below its neighbour the crevice between them
+//               darkens. That is occlusion, not a darker fill.
+//
+// It is solved by RAYCASTING the height field rather than approximating it.
+// Blocks are constant-height columns on a unit grid, so the exact intersection
+// is a 2D DDA: one step per cell boundary the ray crosses. The camera sits
+// RELIEF_CAMD screen-widths away, which caps the lean at ~0.8 cells per unit
+// height, so the ray crosses at most two boundaries and the loop is bounded at
+// RELIEF_STEPS = 5 — typically breaking on the first or second. Every quantity
+// below is in CELL PITCHES, in both axes and in height.
+
+constant float RELIEF_MAX   = 0.85f;   // tallest block, in cell pitches
+constant float RELIEF_CAMD  = 0.62f;   // camera distance, in screen widths
+constant int   RELIEF_STEPS = 5;
+
+/// Stable per-cell noise in -0.5..0.5. Used for splay; must not vary with time
+/// or the whole wall shimmers.
+inline float cellJit(float2 ci, float salt) {
+    return fract(sin(dot(ci, float2(12.9898f, 78.233f)) + salt) * 43758.5453f) - 0.5f;
+}
+
+/// Height of one block, in cell pitches. Bright stands proud.
+///
+/// The 0.65 exponent lifts the bottom of the range: a night sky is nearly
+/// black, and a straight luminance mapping would flatten the wall to nothing
+/// the moment the sun set. Relief is the look; it should survive the dark.
+inline float cellHeight(texture2d<float> cells, sampler s, float2 ci,
+                        float cols, float rows, float hmax, float splay)
+{
+    float2 cc = clamp(ci, float2(0.0f), float2(cols - 1.0f, rows - 1.0f));
+    float  h  = powr(saturate(cells.sample(s, cc + 0.5f).a), 0.65f) * hmax;
+    // Splay unsettles the courses so the blocks are not a perfectly graded set.
+    if (splay > 0.001f) h *= 1.0f + cellJit(cc, 0.0f) * splay * 0.55f;
+    return max(h, 0.0f);
+}
+
+/// What the eye actually lands on at one pixel.
+struct Relief {
+    float2 g;        // grid position of the hit, in cell units
+    float2 cell;     // integer id of the block that was hit
+    float  h;        // that block's height
+    float  z;        // height at which the ray struck it
+    float2 lean;     // ray travel per unit height, outward from frame centre
+    bool   flank;    // true = side face, false = top face
+    int    axis;     // flank only: 0 = an x face, 1 = a y face
+    float2 nrm;      // flank only: outward normal in screen axes
+};
+
+inline Relief castRelief(texture2d<float> cells, sampler s, float2 g,
+                         float cols, float rows, float hmax, float splay)
+{
+    Relief r;
+    r.g = g; r.cell = floor(g); r.h = 0.0f; r.z = 0.0f;
+    r.lean = 0.0f; r.flank = false; r.axis = 0; r.nrm = 0.0f;
+    if (hmax <= 0.0005f) return r;
+
+    // The ray from the camera to this pixel's point on the back wall. At height
+    // z it is at g - lean*z, so marching DOWN from the top of the block layer
+    // walks outward from the frame centre. u = hmax - z is the march parameter.
+    float2 ctr  = float2(cols, rows) * 0.5f;
+    float2 lean = (g - ctr) / max(max(cols, rows) * RELIEF_CAMD, 1.0f);
+    r.lean = lean;
+
+    float2 p   = g - lean * hmax;          // where the ray enters the layer
+    float2 ci  = floor(p);
+    float2 stp = float2(lean.x >= 0.0f ? 1.0f : -1.0f, lean.y >= 0.0f ? 1.0f : -1.0f);
+    float  ivx = (abs(lean.x) > 1e-6f) ? 1.0f / abs(lean.x) : 1e9f;
+    float  ivy = (abs(lean.y) > 1e-6f) ? 1.0f / abs(lean.y) : 1e9f;
+    // u at which the next boundary on each axis is reached
+    float  ux  = abs((ci.x + max(stp.x, 0.0f)) - p.x) * ivx;
+    float  uy  = abs((ci.y + max(stp.y, 0.0f)) - p.y) * ivy;
+
+    float u = 0.0f, uHit = hmax, hHit = 0.0f;
+    float2 cHit = ci;
+    bool flank = false, done = false;
+    int axis = 0;
+
+    for (int i = 0; i < RELIEF_STEPS; ++i) {
+        float z0 = hmax - u;
+        float H  = cellHeight(cells, s, ci, cols, rows, hmax, splay);
+        // Entered this cell already below its top: we are looking at its side.
+        // Never on the first cell — there the ray starts at the very top of the
+        // layer, where the only possible contact is a full-height top face.
+        if (i > 0 && H >= z0) {
+            uHit = u; hHit = H; cHit = ci; flank = true; done = true; break;
+        }
+        float uNext = min(ux, uy);
+        bool  xNext = ux <= uy;
+        float uEnd  = min(uNext, hmax);
+        if (H >= hmax - uEnd) {            // the ray descends onto its top face
+            uHit = hmax - H; hHit = H; cHit = ci; flank = false; done = true; break;
+        }
+        if (uEnd >= hmax) {                // reached the back wall
+            uHit = hmax; hHit = H; cHit = ci; flank = false; done = true; break;
+        }
+        u = uNext;
+        if (xNext) { ci.x += stp.x; ux += ivx; axis = 0; }
+        else       { ci.y += stp.y; uy += ivy; axis = 1; }
+    }
+    if (!done) { uHit = hmax; hHit = 0.0f; cHit = floor(g); flank = false; }
+
+    r.g     = p + lean * uHit;
+    r.cell  = cHit;
+    r.h     = hHit;
+    r.z     = hmax - uHit;
+    r.flank = flank;
+    r.axis  = axis;
+    // The face you can see is the one pointing back toward the camera, i.e.
+    // against the direction of travel.
+    if (flank) r.nrm = (axis == 0) ? float2(-stp.x, 0.0f) : float2(0.0f, -stp.y);
+    return r;
+}
+
 // ================================================================ PASS B
 // Full-res presentation. Shape (square|dot) x finish (glass|flat), applied to
 // whichever grid a pixel turns out to belong to.
 
-/// Draw one mosaic cell of arbitrary size.
+/// Draw the face of one mosaic block.
+///
+/// `flank` says we are on a side face rather than the front. A flank has no
+/// grout, no bevel and no rim: it is the sheared wall of the block, and its
+/// entire appearance comes from the relief lighting applied by the caller.
+/// Drawing the front-face treatment there was what made an early version look
+/// like a bevel again — the edges of the extrusion picked up their own edges.
+///
+/// `rot` is the splay angle for this block, in radians. It turns the face
+/// outline inside the cell so a wall of blocks is not perfectly coursed.
 inline float3 styleCell(float3 col, float2 cuv, float cellPx, float lum,
-                        float phase, float time, int shape, int finish, float amp)
+                        float phase, float time, int shape, int finish,
+                        bool flank, float2 lightDir, float rot, float splay)
 {
+    if (rot != 0.0f) {
+        float cs = cos(rot), sn = sin(rot);
+        float2 d = cuv - 0.5f;
+        cuv = 0.5f + float2(d.x * cs - d.y * sn, d.x * sn + d.y * cs);
+    }
     if (shape == 1) {
         // ---- dots: SDF circle, radius from cell luminance (roomstand.py:2587)
         float ln = saturate(lum);
@@ -941,46 +1091,30 @@ inline float3 styleCell(float3 col, float2 cuv, float cellPx, float lum,
             col += hl * hl * 0.16f * m;
         }
     } else {
+        if (flank) return col;                 // side wall: no front-face detail
+
+        // Distance from the block's edge, in the rotated frame. Squares are
+        // tested this way rather than with four separate comparisons because it
+        // is what lets splay rotate the outline as one shape.
+        float2 d   = abs(cuv - 0.5f);
+        float  m   = max(d.x, d.y);            // 0 centre, 0.5 edge
+        float  in0 = 0.5f - 0.11f * splay;     // splayed blocks shrink slightly
+
         if (finish == 0) {
-            // Glass, with adjustable relief.
-            //
-            // At amp 0 this is the reference's flat one-pixel bevel. Turning it
-            // up widens the bevel, deepens the shadow and adds an inner frame,
-            // so each cell reads as a moulded block rather than a tinted square.
-            //
-            // The bevel width MUST stay a fraction of the cell. Deriving it
-            // purely from pixels let it exceed half the cell on a fine grid, at
-            // which point every pixel is bevel and the whole thing collapses
-            // into a checkerboard.
-            float onePx = 1.0f / cellPx;
-            float e = clamp(onePx * (1.0f + amp * 4.0f), onePx, 0.15f);
-            float lift = 0.10f + amp * 0.26f;
-            float sink = 0.24f + amp * 0.26f;
-
-            if (cuv.x < e || cuv.y < e)               col += lift;
-            if (cuv.x > 1.0f - e || cuv.y > 1.0f - e) col *= (1.0f - sink);
-
-            // The inner frame only exists if the cell is big enough to hold one.
-            if (amp > 0.28f && cellPx > 18.0f) {
-                float i0 = e * 1.7f, i1 = 1.0f - i0;
-                float lw = max(onePx, e * 0.45f);
-                bool onInner = (abs(cuv.x - i0) < lw) || (abs(cuv.y - i0) < lw)
-                            || (abs(cuv.x - i1) < lw) || (abs(cuv.y - i1) < lw);
-                if (onInner) {
-                    // Lit on the top-left sides, shadowed bottom-right: the
-                    // moulded step that makes glass block read as glass block.
-                    float side = (min(abs(cuv.x - i0), abs(cuv.y - i0))
-                                < min(abs(cuv.x - i1), abs(cuv.y - i1))) ? 1.0f : -1.0f;
-                    col += side * (amp - 0.28f) * 0.26f;
-                }
-                // Light pooling through the thickness of the block.
-                float lens = saturate(1.0f - length(cuv - 0.5f) * 2.4f);
-                col += lens * lens * (amp - 0.28f) * 0.13f;
+            // Glass: a one-pixel rim, lit on the side the light comes from and
+            // shadowed opposite. The relief now carries the moulding, so this
+            // is only the crisp arris along the top of the block.
+            float e = clamp(1.2f / max(cellPx, 1.0f), 0.02f, 0.14f);
+            if (m > in0 - e) {
+                float2 s = sign(cuv - 0.5f);
+                // Which edge are we on: the x one or the y one?
+                float2 n = (d.x > d.y) ? float2(s.x, 0.0f) : float2(0.0f, s.y);
+                col += dot(n, lightDir) * 0.16f;
             }
+            if (m > in0) col *= 0.72f;         // the block does not fill the cell
         } else {
-            // flat: grout gaps, no bevel
-            float gap = 0.08f;
-            if (cuv.x < gap || cuv.y < gap || cuv.x > 1.0f - gap || cuv.y > 1.0f - gap) col *= 0.42f;
+            // Flat: grout gaps, no rim. The relief supplies the depth.
+            if (m > in0 - 0.08f) col *= 0.42f;
         }
     }
     return col;
@@ -1009,11 +1143,65 @@ fragment float4 presentPass(VOut in [[stage_in]],
     // pixels, which is the same trade the vertical fit already makes.
     float2 SPv = float2(U.pixW / max(U.cols, 1.0f), U.pixH / max(U.rows, 1.0f));
     float  SP  = min(SPv.x, SPv.y);
+
+    // ---- Relief. Find which block this pixel is actually looking at, and
+    // where on it. Everything downstream — the cell colour, the detail passes,
+    // the styling — then runs on the block the eye lands on rather than the one
+    // that happens to sit under the pixel, which is the whole of the parallax.
+    float  hmax = U.depthAmt * RELIEF_MAX;
+    Relief rel  = castRelief(cells, nearestS, px / SPv, U.cols, U.rows, hmax, U.splayAmt);
+
+    // A flank hit lands exactly ON a cell boundary, where floor() is a coin
+    // toss and the grout test would fire. Push it a quarter-cell into the block
+    // it belongs to, across the axis that was crossed, so the cell id, the
+    // detail passes and the colour lookup all agree on which block this is.
+    float2 gS = rel.g;
+    if (rel.flank) {
+        float e = 0.25f + 0.5f * float(rel.g[rel.axis] > rel.cell[rel.axis] + 0.5f);
+        if (rel.axis == 0) gS.x = rel.cell.x + e; else gS.y = rel.cell.y + e;
+    }
+    px = clamp(gS, float2(0.0f), float2(U.cols, U.rows) - 1e-3f) * SPv;
+
     float2 cid = floor(px / SPv);
 
     float4 c   = cells.sample(nearestS, cid + 0.5f);
     float3 col = c.rgb;
     float  lum = c.a;
+
+    // ---- Looking THROUGH the block (glass only).
+    //
+    // A solid glass block is a short light pipe: what you see on its face is
+    // not the wall directly behind it but the wall a little way off along the
+    // view, and the further you are from the frame centre the further off it
+    // is. Refraction sets how far, dispersion splits that displacement per
+    // channel so edges fringe, and frost averages the neighbourhood so the
+    // transmitted image arrives scattered. All three are meaningless on a flat
+    // tile, which is opaque, so they are skipped there entirely.
+    if (U.finish == 0 && rel.h > 0.001f
+        && (U.refractAmt > 0.005f || U.frostAmt > 0.005f)) {
+        float2 base = float2(cid) + 0.5f + rel.lean * (U.refractAmt * rel.h * 3.0f);
+        float2 lim  = float2(U.cols, U.rows) - 0.5f;
+        float3 t;
+        if (U.dispersAmt > 0.005f) {
+            // Split along the view lean itself, so the fringe vanishes at the
+            // frame centre — where there is no angle, there is no dispersion.
+            float2 dv = normalize(rel.lean + 1e-6f) * (U.dispersAmt * 1.6f);
+            t = float3(cells.sample(nearestS, clamp(base + dv, 0.5f, lim)).r,
+                       cells.sample(nearestS, clamp(base,      0.5f, lim)).g,
+                       cells.sample(nearestS, clamp(base - dv, 0.5f, lim)).b);
+        } else {
+            t = cells.sample(nearestS, clamp(base, 0.5f, lim)).rgb;
+        }
+        if (U.frostAmt > 0.005f && U.lowfx < 0.5f) {
+            float f = U.frostAmt * 1.7f;       // must clear a whole cell to blur
+            float3 a = cells.sample(nearestS, clamp(base + float2( f, 0), 0.5f, lim)).rgb
+                     + cells.sample(nearestS, clamp(base + float2(-f, 0), 0.5f, lim)).rgb
+                     + cells.sample(nearestS, clamp(base + float2( 0, f), 0.5f, lim)).rgb
+                     + cells.sample(nearestS, clamp(base + float2( 0,-f), 0.5f, lim)).rgb;
+            t = mix(t, (t + a) * 0.2f, saturate(U.frostAmt * 1.3f));
+        }
+        col = t;
+    }
 
     DetailCell dc = coarseCell(px, cid, SPv);
     float phase = cellPhase(uint(cid.y * U.cols + cid.x));
@@ -1275,7 +1463,65 @@ fragment float4 presentPass(VOut in [[stage_in]],
         }
     }
 
-    col = styleCell(col, dc.uv, dc.size, lum, phase, U.time, U.shape, U.finish, U.glassAmp);
+    // ---- One light for the whole field.
+    //
+    // Screen axes, +y down. The angle is where the light comes FROM, measured
+    // the way a design tool's angle dial reads it: 0 from the right, positive
+    // turning anticlockwise, so the -45 the reference panel showed puts it up
+    // and to the left and lights the top-left flank of every proud block.
+    float la = U.lightAngle * (3.14159265f / 180.0f);
+    float2 L = float2(-cos(la), sin(la));
+    float  I = U.lightInt;
+
+    // On a flank, drop the across-axis coordinate to the middle of the face.
+    // A dot then extrudes as a cylinder rather than as a sliver of its own rim.
+    float2 suv = dc.uv;
+    if (rel.flank) { if (rel.axis == 0) suv.x = 0.5f; else suv.y = 0.5f; }
+
+    float rot = U.splayAmt * cellJit(rel.cell, 4.7f) * 0.22f;
+    col = styleCell(col, suv, dc.size, lum, phase, U.time, U.shape, U.finish,
+                    rel.flank, L, rot, U.splayAmt);
+
+    // ---- Relief shading. Front faces, side faces, and the crevices between.
+    if (hmax > 0.0005f) {
+        float shade = 1.0f;
+        if (rel.flank) {
+            // A side face is turned away from the viewer, so it is darker than
+            // the front even when lit; how much darker depends on whether it
+            // faces the light. This is the single strongest cue that these are
+            // blocks and not a bevel, which is why it is a straight lambert on
+            // the face normal rather than anything softened.
+            shade = 1.0f + I * (0.55f * dot(rel.nrm, L) - 0.42f);
+            // The bottom of a flank sits in the crevice and sees less sky.
+            float f = saturate(rel.z / max(rel.h, 1e-3f));
+            shade *= mix(1.0f - 0.45f * I, 1.0f, f * f);
+        } else {
+            // CONTACT OCCLUSION. A block lower than its neighbour is in a
+            // trench: the light that reaches its front face is cut by whatever
+            // stands over it. Darkening is proportional to how much higher the
+            // neighbour is and how close to it we are, so a flat stretch of
+            // wall gets none of it at all.
+            float2 cuv = clamp(rel.g - rel.cell, 0.0f, 1.0f);
+            float occ = 0.0f;
+            for (int k = 0; k < 4; ++k) {
+                float2 o = (k == 0) ? float2(-1, 0) : (k == 1) ? float2(1, 0)
+                         : (k == 2) ? float2(0, -1) : float2(0, 1);
+                float hn = cellHeight(cells, nearestS, rel.cell + o,
+                                      U.cols, U.rows, hmax, U.splayAmt);
+                float dh = hn - rel.h;
+                if (dh <= 0.0f) continue;
+                float2 e = 0.5f - o * (cuv - 0.5f);   // distance to that edge
+                float  d = (k < 2) ? e.x : e.y;
+                occ += saturate(dh / (hmax * 0.45f)) * (1.0f - smoothstep(0.0f, 0.6f, d));
+            }
+            shade *= 1.0f - saturate(occ) * 0.55f;
+            // Splay also tips the front face, so a wall of blocks catches the
+            // light unevenly instead of returning one flat value.
+            float2 tilt = float2(cellJit(rel.cell, 11.3f), cellJit(rel.cell, 29.1f));
+            shade *= 1.0f + I * dot(tilt, L) * U.splayAmt * 1.1f;
+        }
+        col *= max(shade, 0.0f);
+    }
 
     // Residual sheen while the pane is still wet — a whole-screen wash, so it
     // belongs here rather than in the instanced droplet pass.

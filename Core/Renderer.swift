@@ -484,7 +484,13 @@ final class ElementalRenderer {
         var hi = max(0, min(1, w.cloudHigh / 100))
         if lo + md + hi < 0.02 && w.cover > 2 { lo = max(0, min(1, w.cover / 100)) }
         u.cloudLow = lo; u.cloudMid = md; u.cloudHigh = hi
-        u.glassAmp = max(0, min(1, state.glassAmplify))
+        u.depthAmt   = max(0, min(1, state.reliefDepth))
+        u.lightAngle = state.lightAngle
+        u.lightInt   = max(0, min(1, state.lightIntensity))
+        u.refractAmt = max(0, min(1, state.refraction))
+        u.dispersAmt = max(0, min(1, state.dispersion))
+        u.frostAmt   = max(0, min(1, state.frost))
+        u.splayAmt   = max(0, min(1, state.splay))
         // Fog is observed, not read off the WMO code: model visibility is a
         // grid-box average and fog is famously not.
         u.fogOn = w.isFoggy ? 1 : 0

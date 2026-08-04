@@ -119,6 +119,50 @@ class Pane: NSViewController {
     func check(_ title: String, _ action: Selector) -> NSButton {
         NSButton(checkboxWithTitle: title, target: self, action: action)
     }
+
+    /// A slider with its value written out beside it, as a settings row.
+    ///
+    /// Six of the relief controls are the same shape, and building them by hand
+    /// six times is how the labels drift out of step with the sliders.
+    func slider(_ title: String, _ range: ClosedRange<Double>,
+                _ action: Selector, _ format: @escaping (Double) -> String) -> LabelledSlider {
+        let ls = LabelledSlider(range: range, format: format)
+        ls.slider.target = self; ls.slider.action = action
+        ls.container = row(title, ls.box)
+        return ls
+    }
+}
+
+/// Slider plus its read-out. `value` keeps the two in step in both directions.
+final class LabelledSlider {
+    let slider = NSSlider()
+    let label = NSTextField(labelWithString: "")
+    let box = NSStackView()
+    /// The full row, for showing and hiding.
+    var container: NSView!
+    private let format: (Double) -> String
+
+    init(range: ClosedRange<Double>, format: @escaping (Double) -> String) {
+        self.format = format
+        slider.minValue = range.lowerBound
+        slider.maxValue = range.upperBound
+        slider.widthAnchor.constraint(equalToConstant: 180).isActive = true
+        label.font = .monospacedDigitSystemFont(ofSize: 11, weight: .regular)
+        label.textColor = .secondaryLabelColor
+        label.widthAnchor.constraint(equalToConstant: 52).isActive = true
+        box.setViews([slider, label], in: .leading)
+        box.spacing = 8
+        box.alignment = .centerY
+    }
+
+    /// Rounded to two decimals so the stored config does not accumulate the
+    /// slider's float noise.
+    var value: Double {
+        get { (slider.doubleValue * 100).rounded() / 100 }
+        set { slider.doubleValue = newValue; label.stringValue = format(newValue) }
+    }
+
+    func refresh() { label.stringValue = format(value) }
 }
 
 // MARK: - General
@@ -135,8 +179,17 @@ final class GeneralPane: Pane {
     private var occludedCheck: NSButton!
     private var lowPowerCheck: NSButton!
     private var lockSyncCheck: NSButton!
-    private var glassSlider: NSSlider!
-    private var glassLabel: NSTextField!
+
+    // Relief. Six controls over one wall of blocks; `glassOnly` are the three
+    // that need something to transmit and so mean nothing on a flat tile.
+    private var depthS: LabelledSlider!
+    private var angleS: LabelledSlider!
+    private var lightS: LabelledSlider!
+    private var refractS: LabelledSlider!
+    private var dispersS: LabelledSlider!
+    private var frostS: LabelledSlider!
+    private var splayS: LabelledSlider!
+    private var glassOnly: [NSView] = []
 
     static let fpsChoices = [10, 15, 30, 60, 120]
     static let speedChoices: [(String, Double)] = [
@@ -155,20 +208,38 @@ final class GeneralPane: Pane {
                                     + "Finder reopens these settings."))
 
         stack.addArrangedSubview(divider())
-        stack.addArrangedSubview(section("Glass"))
-        glassSlider = NSSlider()
-        glassSlider.minValue = 0; glassSlider.maxValue = 1
-        glassSlider.target = self; glassSlider.action = #selector(changed)
-        glassSlider.widthAnchor.constraint(equalToConstant: 200).isActive = true
-        glassLabel = NSTextField(labelWithString: "")
-        glassLabel.font = .monospacedDigitSystemFont(ofSize: 11, weight: .regular)
-        glassLabel.textColor = .secondaryLabelColor
-        let gBox = NSStackView(views: [glassSlider, glassLabel]); gBox.spacing = 8
-        stack.addArrangedSubview(row("Relief", gBox))
-        stack.addArrangedSubview(note("How moulded each cell looks. Flat is the Pi's one-pixel bevel; at "
-                                    + "the top of the range cells become pressed glass blocks with an inner "
-                                    + "frame and light pooling through the thickness. The inner frame needs "
-                                    + "room, so it only appears on a coarse enough grid."))
+        stack.addArrangedSubview(section("Relief"))
+        let pct: (Double) -> String = { "\(Int(($0 * 100).rounded()))%" }
+
+        depthS = slider("Depth", 0...1, #selector(changed), pct)
+        stack.addArrangedSubview(depthS.container)
+        angleS = slider("Light angle", -180...180, #selector(changed)) { "\(Int($0.rounded()))°" }
+        stack.addArrangedSubview(angleS.container)
+        lightS = slider("Light", 0...1, #selector(changed), pct)
+        stack.addArrangedSubview(lightS.container)
+        splayS = slider("Splay", 0...1, #selector(changed), pct)
+        stack.addArrangedSubview(splayS.container)
+        stack.addArrangedSubview(note("Every cell is a block pushed out of the wall by its own brightness, "
+                                    + "so the sky's clouds and the moon emboss the mosaic instead of only "
+                                    + "colouring it. Depth is how far they stand out; the light angle and "
+                                    + "strength shade their side faces and the crevices between them; splay "
+                                    + "unsettles the courses so the wall is not perfectly regular."))
+
+        refractS = slider("Refraction", 0...1, #selector(changed), pct)
+        stack.addArrangedSubview(refractS.container)
+        dispersS = slider("Dispersion", 0...1, #selector(changed), pct)
+        stack.addArrangedSubview(dispersS.container)
+        frostS = slider("Frost", 0...1, #selector(changed), pct)
+        stack.addArrangedSubview(frostS.container)
+        let glassNote = note("Refraction is how far you see THROUGH each block, so what lands on its face "
+                           + "is the wall a little way behind — the further from the centre of the screen, "
+                           + "the further off. Dispersion splits that per colour and fringes the edges; "
+                           + "frost scatters it.")
+        stack.addArrangedSubview(glassNote)
+        // These three describe light passing through a block. A flat tile is
+        // opaque, so they are hidden rather than left sitting there doing
+        // nothing — a dead control is worse than a missing one.
+        glassOnly = [refractS.container, dispersS.container, frostS.container, glassNote]
 
         stack.addArrangedSubview(divider())
         stack.addArrangedSubview(section("Motion"))
@@ -214,16 +285,17 @@ final class GeneralPane: Pane {
         occludedCheck.state = c.renderWhenOccluded ? .on : .off
         lowPowerCheck.state = c.lowPowerOnBattery ? .on : .off
         lockSyncCheck.state = c.syncLockScreen ? .on : .off
-        glassSlider.doubleValue = c.glassAmplify
-        glassLabel.stringValue = Self.reliefName(c.glassAmplify)
-    }
-
-    static func reliefName(_ v: Double) -> String {
-        if v < 0.08 { return "Flat" }
-        if v < 0.30 { return "Subtle" }
-        if v < 0.55 { return "Moulded" }
-        if v < 0.80 { return "Deep" }
-        return "Glass block"
+        depthS.value = c.reliefDepth
+        angleS.value = c.lightAngle
+        lightS.value = c.lightIntensity
+        splayS.value = c.splay
+        refractS.value = c.refraction
+        dispersS.value = c.dispersion
+        frostS.value = c.frost
+        // The desktop's finish decides it: the lock screen and saver can differ,
+        // but this is one shared wall and the pane it lives on is the general one.
+        let glass = c.finish == .glass
+        for v in glassOnly { v.isHidden = !glass }
     }
 
     @objc private func loginToggled() {
@@ -250,8 +322,14 @@ final class GeneralPane: Pane {
         c.renderWhenOccluded = occludedCheck.state == .on
         c.lowPowerOnBattery = lowPowerCheck.state == .on
         c.syncLockScreen = lockSyncCheck.state == .on
-        c.glassAmplify = (glassSlider.doubleValue * 100).rounded() / 100
-        glassLabel.stringValue = Self.reliefName(c.glassAmplify)
+        c.reliefDepth = depthS.value
+        c.lightAngle = angleS.value.rounded()
+        c.lightIntensity = lightS.value
+        c.splay = splayS.value
+        c.refraction = refractS.value
+        c.dispersion = dispersS.value
+        c.frost = frostS.value
+        for s in [depthS, angleS, lightS, splayS, refractS, dispersS, frostS] { s?.refresh() }
         owner?.commit(c, from: self)
     }
 }
