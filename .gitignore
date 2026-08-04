@@ -1,0 +1,4 @@
+# Build output — build.sh writes the app, the saver and the CLI renderer here.
+build/
+
+.DS_Store

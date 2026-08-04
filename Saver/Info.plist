@@ -1,0 +1,20 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <key>CFBundleName</key>               <string>Elemental</string>
+  <key>CFBundleDisplayName</key>        <string>Elemental</string>
+  <key>CFBundleExecutable</key>         <string>Elemental</string>
+  <key>CFBundleIdentifier</key>         <string>com.prakritmaan.elemental.saver</string>
+  <key>CFBundlePackageType</key>        <string>BNDL</string>
+  <key>CFBundleShortVersionString</key> <string>0.1</string>
+  <key>CFBundleVersion</key>            <string>1</string>
+  <key>LSMinimumSystemVersion</key>     <string>14.0</string>
+  <key>NSHighResolutionCapable</key>    <true/>
+
+  <!-- Pinned with @objc(ElementalSaverView) on the class, so this resolves
+       without Swift name mangling. A mismatch here is one of the classic
+       causes of a screen saver loading and then showing grey. -->
+  <key>NSPrincipalClass</key>           <string>ElementalSaverView</string>
+</dict>
+</plist>
