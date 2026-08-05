@@ -32,6 +32,28 @@ final class LockStillExporter {
     private var texture: MTLTexture?
     private var size = CGSize(width: 1512, height: 982)
 
+    /// Everything after the Metal render happens here, never on the caller.
+    ///
+    /// The fourth bug this exporter has caused, and the worst-looking one: the
+    /// timer fires on the main runloop, which is also where CAMetalDisplayLink
+    /// drives the wallpaper. Encoding a full-screen PNG, writing it, handing it
+    /// to WallpaperAgent and mirroring it into the store took long enough that a
+    /// sample of the running app caught 548 frames inside the export against 33
+    /// actually animating. The wallpaper stopped dead for the duration and then
+    /// integrated the accumulated time in one step — a freeze and a jump, once a
+    /// minute. None of that work needs the main thread.
+    ///
+    /// Serial, so two exports can never interleave in the wallpaper store, and
+    /// so `currentURL` needs no lock: it is only ever touched from this queue.
+    private let exportQueue = DispatchQueue(label: "com.elemental.lockstill.export",
+                                            qos: .utility)
+
+    /// Main thread only. The texture is reused between exports, so a second
+    /// export must not start rendering into it while the first is still reading
+    /// it out on the queue. At one export a minute this should never trip; if it
+    /// does, skipping is right — the next frame is a minute away.
+    private var exporting = false
+
     /// A filename macOS has never seen before, every single time.
     ///
     /// This is the third attempt and the first correct one, so the history is
@@ -90,6 +112,7 @@ final class LockStillExporter {
 
     private func export(config: Config, astro: AstroState) {
         guard config.syncLockScreen, let renderer else { return }
+        guard !exporting else { return }
 
         if let main = NSScreen.main {
             let s = main.frame.size
@@ -153,6 +176,28 @@ final class LockStillExporter {
                                                  includeLoginBox: true)
         renderer.render(to: tex, waitForCompletion: true)
 
+        // Everything past here is bytes and files, not Metal, and none of it is
+        // fast. Hand it to the queue and let the display link have its thread
+        // back. NSScreen.screens is read here because it is AppKit state and
+        // belongs on the main thread; the screens themselves are only used as
+        // opaque handles for setDesktopImageURL.
+        let screens = NSScreen.screens
+        exporting = true
+        exportQueue.async { [weak self] in
+            guard let self else { return }
+            self.install(from: tex, width: w, height: h, screens: screens)
+            DispatchQueue.main.async { self.exporting = false }
+        }
+    }
+
+    /// Encode, write, install, mirror, sweep — all on `exportQueue`.
+    ///
+    /// The render has already completed (`waitForCompletion: true`) and the
+    /// `exporting` flag keeps anyone else off the texture, so reading it out
+    /// here is safe.
+    private func install(from tex: MTLTexture, width w: Int, height h: Int,
+                         screens: [NSScreen])
+    {
         guard let img = makeImage(from: tex, width: w, height: h) else { return }
         try? FileManager.default.createDirectory(at: Config.directory,
                                                  withIntermediateDirectories: true)
@@ -162,7 +207,7 @@ final class LockStillExporter {
         CGImageDestinationAddImage(dest, img, nil)
         guard CGImageDestinationFinalize(dest) else { return }
 
-        for screen in NSScreen.screens {
+        for screen in screens {
             try? NSWorkspace.shared.setDesktopImageURL(fileURL, for: screen, options: [:])
         }
         currentURL = fileURL
