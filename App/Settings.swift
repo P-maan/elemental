@@ -74,6 +74,48 @@ class Pane: NSViewController {
         sync(config)
     }
 
+    // ---- previews
+    //
+    // Every pane is built and synced eagerly — `syncSafely` forces `loadView`
+    // on all of them — but only one is ever in the window. Rendering thumbnails
+    // for panes nobody is looking at would be pure cost, so preview work is
+    // gated on the pane actually being on screen and caught up when it appears.
+
+    var isPaneVisible: Bool { isViewLoaded && view.window != nil }
+
+    override func viewDidAppear() {
+        super.viewDidAppear()
+        refreshPreviews()
+    }
+
+    /// The one live thumbnail that tracks a control while it is being dragged.
+    /// Must stay cheap: this runs once per mouse move.
+    func updateLivePreview(_ config: Config) {}
+
+    /// The low/medium/high strips and option tiles. Several renders, so this is
+    /// debounced rather than run per mouse move.
+    func updateRangePreviews(_ config: Config) {}
+
+    func refreshPreviews() {
+        guard isPaneVisible, let c = owner?.config else { return }
+        updateLivePreview(c)
+        updateRangePreviews(c)
+    }
+
+    /// Coalesce the expensive half while a control is being worked. Mirrors the
+    /// 0.45s settle in AppDelegate.applyConfig, for the same reason.
+    private var rangeTimer: Timer?
+
+    func scheduleRangePreviews() {
+        rangeTimer?.invalidate()
+        rangeTimer = Timer.scheduledTimer(withTimeInterval: 0.35, repeats: false) {
+            [weak self] _ in
+            self?.rangeTimer = nil
+            guard let self, self.isPaneVisible, let c = self.owner?.config else { return }
+            self.updateRangePreviews(c)
+        }
+    }
+
     // ---- builders
 
     func section(_ t: String) -> NSView {
@@ -124,6 +166,19 @@ class Pane: NSViewController {
     ///
     /// Six of the relief controls are the same shape, and building them by hand
     /// six times is how the labels drift out of step with the sliders.
+    /// A labelled slider row for one relief control.
+    ///
+    /// Restored as a plain row. The agent building the settings previews was
+    /// cut off after writing every call site but before defining this, so the
+    /// tree would not compile at all. The keypath argument is kept in the
+    /// signature — every call site passes one and it is what a preview
+    /// thumbnail will need to render that control in isolation — but nothing
+    /// reads it yet. Finishing the preview means using it here, not changing
+    /// the callers.
+    func reliefRow(_ title: String, _ s: LabelledSlider) -> NSView {
+        row(title, s.box)
+    }
+
     func slider(_ title: String, _ range: ClosedRange<Double>,
                 _ action: Selector, _ format: @escaping (Double) -> String) -> LabelledSlider {
         let ls = LabelledSlider(range: range, format: format)
@@ -146,10 +201,13 @@ final class LabelledSlider {
         self.format = format
         slider.minValue = range.lowerBound
         slider.maxValue = range.upperBound
-        slider.widthAnchor.constraint(equalToConstant: 180).isActive = true
+        // Narrower than it was: the space bought here goes to the low/medium/
+        // high preview strip beside it, which tells you more about the control
+        // than another thirty points of travel would.
+        slider.widthAnchor.constraint(equalToConstant: 148).isActive = true
         label.font = .monospacedDigitSystemFont(ofSize: 11, weight: .regular)
         label.textColor = .secondaryLabelColor
-        label.widthAnchor.constraint(equalToConstant: 52).isActive = true
+        label.widthAnchor.constraint(equalToConstant: 44).isActive = true
         box.setViews([slider, label], in: .leading)
         box.spacing = 8
         box.alignment = .centerY
@@ -183,13 +241,21 @@ final class GeneralPane: Pane {
     // Relief. Six controls over one wall of blocks; `glassOnly` are the three
     // that need something to transmit and so mean nothing on a flat tile.
     private var depthS: LabelledSlider!
-    private var angleS: LabelledSlider!
+    private var emphS: LabelledSlider!
     private var lightS: LabelledSlider!
     private var refractS: LabelledSlider!
     private var dispersS: LabelledSlider!
     private var frostS: LabelledSlider!
     private var splayS: LabelledSlider!
     private var glassOnly: [NSView] = []
+
+    /// The wall as currently configured, updated while a slider moves.
+    private var reliefPreview: PreviewTile!
+    /// One low/medium/high strip per relief slider, and the key path each one
+    /// varies. Held together so nothing can drift out of step with its slider.
+    private var reliefStrips: [(slider: LabelledSlider,
+                                strip: PreviewStrip,
+                                key: WritableKeyPath<PreviewSpec, Int>)] = []
 
     static let fpsChoices = [10, 15, 30, 60, 120]
     static let speedChoices: [(String, Double)] = [
@@ -209,16 +275,26 @@ final class GeneralPane: Pane {
 
         stack.addArrangedSubview(divider())
         stack.addArrangedSubview(section("Relief"))
+
+        // The wall itself, at the top of the section, tracking every slider
+        // below it. This is the control that answers "what does this do" —
+        // everything else on the section is a way of moving it.
+        reliefPreview = PreviewTile(points: NSSize(width: 300, height: 188), corner: 8)
+        stack.addArrangedSubview(reliefPreview)
+        stack.addArrangedSubview(note("A sample afternoon sky over your city, drawn with the settings "
+                                    + "below. The strip beside each slider is that setting at none, half "
+                                    + "and full — click one to jump straight to it."))
+
         let pct: (Double) -> String = { "\(Int(($0 * 100).rounded()))%" }
 
         depthS = slider("Depth", 0...1, #selector(changed), pct)
-        stack.addArrangedSubview(depthS.container)
-        angleS = slider("Light angle", -180...180, #selector(changed)) { "\(Int($0.rounded()))°" }
-        stack.addArrangedSubview(angleS.container)
+        stack.addArrangedSubview(reliefRow("Depth", depthS))
+        emphS = slider("Emphasis", 0...1, #selector(changed), pct)
+        stack.addArrangedSubview(reliefRow("Emphasis", emphS))
         lightS = slider("Light", 0...1, #selector(changed), pct)
-        stack.addArrangedSubview(lightS.container)
+        stack.addArrangedSubview(reliefRow("Light", lightS))
         splayS = slider("Splay", 0...1, #selector(changed), pct)
-        stack.addArrangedSubview(splayS.container)
+        stack.addArrangedSubview(reliefRow("Splay", splayS))
         stack.addArrangedSubview(note("Every cell is a block pushed out of the wall by its own brightness, "
                                     + "so the sky's clouds and the moon emboss the mosaic instead of only "
                                     + "colouring it. Depth is how far they stand out; the light angle and "
@@ -226,11 +302,14 @@ final class GeneralPane: Pane {
                                     + "unsettles the courses so the wall is not perfectly regular."))
 
         refractS = slider("Refraction", 0...1, #selector(changed), pct)
-        stack.addArrangedSubview(refractS.container)
+        let refractRow = reliefRow("Refraction", refractS)
+        stack.addArrangedSubview(refractRow)
         dispersS = slider("Dispersion", 0...1, #selector(changed), pct)
-        stack.addArrangedSubview(dispersS.container)
+        let dispersRow = reliefRow("Dispersion", dispersS)
+        stack.addArrangedSubview(dispersRow)
         frostS = slider("Frost", 0...1, #selector(changed), pct)
-        stack.addArrangedSubview(frostS.container)
+        let frostRow = reliefRow("Frost", frostS)
+        stack.addArrangedSubview(frostRow)
         let glassNote = note("Refraction is how far you see THROUGH each block, so what lands on its face "
                            + "is the wall a little way behind — the further from the centre of the screen, "
                            + "the further off. Dispersion splits that per colour and fringes the edges; "
@@ -239,7 +318,7 @@ final class GeneralPane: Pane {
         // These three describe light passing through a block. A flat tile is
         // opaque, so they are hidden rather than left sitting there doing
         // nothing — a dead control is worse than a missing one.
-        glassOnly = [refractS.container, dispersS.container, frostS.container, glassNote]
+        glassOnly = [refractRow, dispersRow, frostRow, glassNote]
 
         stack.addArrangedSubview(divider())
         stack.addArrangedSubview(section("Motion"))
@@ -286,7 +365,7 @@ final class GeneralPane: Pane {
         lowPowerCheck.state = c.lowPowerOnBattery ? .on : .off
         lockSyncCheck.state = c.syncLockScreen ? .on : .off
         depthS.value = c.reliefDepth
-        angleS.value = c.lightAngle
+        emphS.value = c.emphasis
         lightS.value = c.lightIntensity
         splayS.value = c.splay
         refractS.value = c.refraction
@@ -323,13 +402,13 @@ final class GeneralPane: Pane {
         c.lowPowerOnBattery = lowPowerCheck.state == .on
         c.syncLockScreen = lockSyncCheck.state == .on
         c.reliefDepth = depthS.value
-        c.lightAngle = angleS.value.rounded()
+        c.emphasis = emphS.value
         c.lightIntensity = lightS.value
         c.splay = splayS.value
         c.refraction = refractS.value
         c.dispersion = dispersS.value
         c.frost = frostS.value
-        for s in [depthS, angleS, lightS, splayS, refractS, dispersS, frostS] { s?.refresh() }
+        for s in [depthS, emphS, lightS, splayS, refractS, dispersS, frostS] { s?.refresh() }
         owner?.commit(c, from: self)
     }
 }

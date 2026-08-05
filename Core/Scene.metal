@@ -50,7 +50,7 @@ struct Uniforms {
     float fogOn;               // observed fog, not inferred from the code
     // ---- relief block (see PASS B). Mirrored field-for-field in SceneState.swift.
     float depthAmt;            // block height scale, 0..1
-    float lightAngle;          // degrees; light direction in the screen plane
+    float emphAmt;             // 0..1; how much height follows FEATURES over tone
     float lightInt;            // 0..1
     float refractAmt;          // 0..1, glass only
     float dispersAmt;          // 0..1, glass only
@@ -243,11 +243,26 @@ inline bool litSide(float dx, float dy, float r, float phase) {
 // thinner than one sub-cell — so a hard boolean turned it into a single black
 // square hanging off the limb, which reads as a dead pixel rather than as a
 // terminator. This gives the detail pass something it can fade across.
+//
+// It is a PERPENDICULAR distance, not a horizontal one. The terminator is the
+// half-ellipse x = r*cos(pi*f)*sqrt(1 - y^2/r^2), so it runs nearly vertically
+// across the middle of the disc and nearly horizontally at the cusps where it
+// meets the limb. Measuring straight along x therefore overstates the distance
+// by 1/cos(angle), and near the cusps that factor runs to thirty or more: the
+// coverage fraction below saturates a whole cell early, the edge stops bending
+// and the terminator ends as two straight vertical smears with the curve
+// missing from between them. Dividing by the gradient magnitude turns it back
+// into a true distance, so one law describes the edge all the way around and
+// the crescent keeps its points.
 inline float litDist(float dx, float dy, float r, float phase) {
     float f = (1.0f - cos(2.0f * M_PI_F * phase)) * 0.5f;
-    float chord = sqrt(max(0.0f, 1.0f - (dy * dy) / (r * r)));
-    float xt = r * cos(M_PI_F * f) * chord;
-    return (phase < 0.5f) ? (dx - xt) : (-xt - dx);
+    float c = cos(M_PI_F * f);
+    // Floored, because the gradient is 1/chord and the cusps are chord = 0.
+    float chord = sqrt(max(1.0e-3f, 1.0f - (dy * dy) / (r * r)));
+    float xt = r * c * chord;
+    float s  = (phase < 0.5f) ? (dx - xt) : (-xt - dx);
+    float gy = c * dy / (r * chord);              // d(terminator)/dy
+    return s * rsqrt(1.0f + gy * gy);
 }
 
 // ---- moon albedo map. The near side is tidally locked so the maria sit in
@@ -273,6 +288,52 @@ inline float moonSample(float nx, float ny) {
         if (d < 1.0f) v = min(v, 0.58f + 0.16f * d);   // seas, softened at the edge
     }
     return v * (0.60f + 0.40f * sqrt(sqrt(max(0.0f, 1.0f - rr))));  // limb darkening
+}
+
+// ---- Relative tone of one point on the moon's face, in units of "fully lit at
+// albedo 1". The lit face is the albedo; the shaded face is earthshine, which is
+// FLAT — it is Earth-light bounced onto ground the sun is not reaching, so the
+// maria do not show in it. That distinction is the whole reason this is one
+// function rather than an albedo term times a phase term: multiplying them
+// applies the albedo to the earthshine as well and drives the shaded limb to
+// black, which is a hole in the disc rather than the far side of a sphere.
+//
+// `earthRel` is earthshine over full-lit, which is not a constant: at a thin
+// crescent the lit face is dim and earthshine is nearly as bright, which is
+// exactly when you can see it in the sky.
+inline float moonTone(float v, float litF, float earthRel) {
+    return mix(earthRel, v, litF);
+}
+
+/// Luminance of the fully lit face at albedo 1, before cloud.
+///
+/// NOT proportional to the illuminated fraction, which is what it was. A half
+/// moon's lit half is as bright per unit area as a full moon's — what changes
+/// with phase is how MUCH of it there is, not how bright it is. Scaling the
+/// face by illum/100 made a crescent's lit sliver four times dimmer than a full
+/// moon's, which dropped it to within a few levels of earthshine and erased the
+/// terminator at exactly the phases where the terminator is the entire shape:
+/// a half moon came out as a uniformly bright disc with no phase visible at all.
+/// Some dependence is kept, because the real Moon does surge toward opposition.
+inline float moonLitRef(float illum, float moonDim) {
+    return (180.0f * (0.55f + 0.45f * saturate(illum / 100.0f)) + 20.0f) * moonDim;
+}
+
+/// Earthshine — sunlight off the Earth onto the moon's night side. Very nearly
+/// constant, and slightly BRIGHTER at crescent: Earth's phase seen from the
+/// Moon is the complement of the Moon's seen from here, which is why the old
+/// moon in the new moon's arms is a crescent phenomenon.
+inline float moonEarthRef(float illum, float moonDim) {
+    return (28.0f + 12.0f * (1.0f - saturate(illum / 100.0f))) * moonDim;
+}
+
+/// The two levels cellPass draws the moon at, as a ratio. Both passes derive it
+/// the same way from the same uniforms, so the detail pass is refining the
+/// coarse cell rather than guessing at it. Cloud transmission scales both and
+/// therefore cancels.
+inline float moonEarthRel(float illum, float covF) {
+    float dim = 1.0f - covF * 0.15f;
+    return moonEarthRef(illum, dim) / max(moonLitRef(illum, dim), 1e-3f);
 }
 
 // Map alt/az to screen using facing azimuth (roomstand.py:2352)
@@ -306,7 +367,24 @@ vertex VOut fullscreenVS(uint vid [[vertex_id]]) {
     return o;
 }
 
-fragment float4 cellPass(VOut in [[stage_in]],
+// Two targets. The colour is the mosaic; `aux` is how much of what is BEHIND
+// the cloud at this cell still reaches the eye — the same `seeThrough` the
+// bodies are attenuated by here.
+//
+// It has to be carried forward rather than recomputed, because presentPass runs
+// at full resolution and knows only geometry: where the moon is, not what is in
+// front of it. Without this the detail pass subdivides and re-shades a moon
+// sitting behind a solid overcast deck, punching a finely-tiled disc straight
+// through the cloud that is supposed to be covering it. Recomputing the three
+// cloud opacities there instead would be thirty lines of duplicated law that
+// has to stay in step with this pass forever; one channel of a 56x36 texture
+// costs nothing and cannot drift.
+struct CellOut {
+    float4 colour [[color(0)]];
+    float  aux    [[color(1)]];
+};
+
+fragment CellOut cellPass(VOut in [[stage_in]],
                          constant Uniforms  &U        [[buffer(0)]],
                          constant Breather  *breathers[[buffer(1)]],
                          constant Star      *stars    [[buffer(2)]],
@@ -318,7 +396,7 @@ fragment float4 cellPass(VOut in [[stage_in]],
 {
     int ix = int(in.pos.x), iy = int(in.pos.y);
     int COLS = int(U.cols), ROWS = int(U.rows);
-    if (ix >= COLS || iy >= ROWS) return float4(0);
+    if (ix >= COLS || iy >= ROWS) return CellOut{ float4(0), 1.0f };
 
     uint  idx   = uint(iy * COLS + ix);
     // Same per-axis pitch presentPass uses — see the note there. This pass has
@@ -499,7 +577,7 @@ fragment float4 cellPass(VOut in [[stage_in]],
     // 7% of the frame, whichever is larger — so every column feathers over the
     // same distance and adjacent transitions overlap into a soft fringe. It is
     // also allowed to continue BELOW eY, which is what removes the cut.
-    float lowAmt = 0.0f, lowD2 = 0.0f, lowK = 0.0f;
+    float lowAmt = 0.0f, lowD2 = 0.0f, lowK = 0.0f, lowThick = 0.0f;
     float eY = edgeArr[ix];
     float lowFeather = max(H * 0.07f, SPv.y * 3.0f);
     if (eY > 0.0f) {
@@ -509,16 +587,27 @@ fragment float4 cellPass(VOut in [[stage_in]],
         // fringe. Drives the shading below, so the deck still lightens toward
         // its edge rather than being a slab of one tone.
         lowD2 = saturate(1.0f - cyp / max(eY + lowFeather, 1.0f));
-        lowAmt = lowK * (0.45f + 0.55f * lowD2)
-               * min(1.0f, 0.35f + covF) * nightCloudDim;
+        // How much cloud is THERE, and how brightly it is painted, are two
+        // different quantities and only the second is a function of the hour.
+        lowThick = lowK * (0.45f + 0.55f * lowD2) * min(1.0f, 0.35f + covF);
+        lowAmt   = lowThick * nightCloudDim;
     }
 
     // How much of a body behind the cloud survives. Ice is thin and lets most
     // light through; a low deck is opaque and does not. This is what makes the
     // moon dim as cloud crosses it instead of punching through.
-    float occlusion = saturate(1.0f - (1.0f - highAmt * 0.22f)
-                                    * (1.0f - midAmt  * 0.78f)
-                                    * (1.0f - lowAmt  * 0.97f));
+    //
+    // The deck enters by its THICKNESS, not by the dimmed amount it is painted
+    // with. `nightCloudDim` takes a night deck down to 38% — correct for its
+    // colour, since an unlit cloud is dark, and completely wrong for what it
+    // hides: a cloud at midnight is exactly as opaque as the same cloud at
+    // noon. Occluding by the dimmed value meant a hundred per cent overcast at
+    // night still transmitted three quarters of the moon, so the wallpaper
+    // showed a blazing fully-detailed disc in a solidly covered sky — the moon
+    // asserting itself regardless of what was in front of it.
+    float occlusion = saturate(1.0f - (1.0f - highAmt  * 0.22f)
+                                    * (1.0f - midAmt   * 0.78f)
+                                    * (1.0f - lowThick * 0.97f));
     float seeThrough = 1.0f - occlusion;
 
     // Light that DOES get through scatters inside the cloud rather than
@@ -593,9 +682,8 @@ fragment float4 cellPass(VOut in [[stage_in]],
             // here, not L: at w = 1 the blend below is a straight assignment
             // and would throw any luminance away, which is what made every
             // moon cell come out the same flat white.
-            float moonLit = max(0.15f, U.moonIllum / 100.0f) * seeThrough;
             float v = moonSample(mx / moonR, my / moonR);
-            float k = saturate((180.0f * moonLit + 20.0f) * moonDim * v / 255.0f);
+            float k = saturate(moonLitRef(U.moonIllum, moonDim) * v / 255.0f);
 
             // ---- The phase is SUBTRACTED from the face, not cut out of it.
             //
@@ -624,13 +712,43 @@ fragment float4 cellPass(VOut in [[stage_in]],
 
             // Earthshine: sunlight off the Earth onto the moon's dark side. Real,
             // and faint — visible as a dim complete disc, never as black.
-            float earth = (14.0f + 16.0f * moonDim) * seeThrough;
+            //
+            // Raised from (14 + 16*dim). At 14 the shaded third of a gibbous
+            // moon landed within a couple of levels of the night sky around it,
+            // so it disappeared into it and what was left was the lit part
+            // alone: a tall sliver bounded by the terminator on one side and the
+            // limb on the other, which is why the moon read as a column and not
+            // as a disc. The disc has to be COMPLETE for the round limb to be
+            // the outline the eye picks up; the phase then divides a shape that
+            // is already there. Still a quarter of the lit face, so it reads as
+            // the far side of a sphere rather than as a flat grey coin.
+            float earth = moonEarthRef(U.moonIllum, moonDim);
 
-            w  = mix(0.30f, 1.0f, litF);
-            cr = mix( 96.0f, 236.0f * k, litF);
-            cg = mix(102.0f, 240.0f * k, litF);
-            cb = mix(124.0f, 252.0f * k, litF);
-            L  = mix(earth, 255.0f * k, litF);
+            // ---- The moon is BEHIND the cloud, so it contributes a FRACTION of
+            // this cell — it is not a full-strength disc that is dimmed and then
+            // painted over as well.
+            //
+            // It used to be both. The disc was scaled by seeThrough here and the
+            // cloud layers then composited over the result, and the two do not
+            // compose: under a solid deck seeThrough drove the colour to (0,0,0)
+            // while the weight stayed at 1, so the moon became a BLACK HOLE in
+            // the shape of the moon, and since the night deck only paints at
+            // about a third of an alpha, most of that hole survived it. The moon
+            // was still winning — just in the opposite direction.
+            //
+            // Weighting instead means seeThrough = 0 leaves the cell exactly as
+            // the sky drew it, and a deck hides the moon by covering nothing at
+            // all. Between the two the disc fades out through the cloud, which
+            // is what a moon behind thinning cloud actually does.
+            float mw = mix(0.42f, 1.0f, litF) * seeThrough;
+            float mL = mix(earth, 255.0f * k, litF);
+            if (mw > w) {
+                w  = mw;
+                cr = mix(106.0f, 236.0f * k, litF);
+                cg = mix(112.0f, 240.0f * k, litF);
+                cb = mix(136.0f, 252.0f * k, litF);
+            }
+            L = mix(L, max(L, mL), seeThrough);
         } else if (moonAbove) {
             // Halo. Through clear air it is a tight ring about one radius wide.
             // Through cloud it is not a ring at all — the medium spreads it over
@@ -862,7 +980,7 @@ fragment float4 cellPass(VOut in [[stage_in]],
     }
     g = round(g / U.posterQ) * U.posterQ;
 
-    return float4(clamp(g / 255.0f, 0.0f, 1.0f), lum / 255.0f);
+    return CellOut{ float4(clamp(g / 255.0f, 0.0f, 1.0f), lum / 255.0f), seeThrough };
 }
 
 // ================================================================ DETAIL
@@ -935,22 +1053,75 @@ inline int detailDepth(float contrast, float thresh, float SP, float minSubPx, i
 //               is displaced from its top and you see its SIDE. The lean grows
 //               with distance from centre, exactly as it does looking at a real
 //               wall, and it is what stops the effect reading as a gradient.
-//   flanks      the side faces are shaded from a single light direction, so one
-//               side of every proud block is bright and the opposite side dark.
+//   flanks      the side faces are shaded from wherever the light actually is —
+//               the sun, or the moon at night, at the screen position the scene
+//               already draws it at — so one side of every proud block is
+//               bright and the opposite side dark, and which side that is
+//               sweeps around as the day goes by.
 //   contact     where a block sits below its neighbour the crevice between them
 //               darkens. That is occlusion, not a darker fill.
 //
 // It is solved by RAYCASTING the height field rather than approximating it.
 // Blocks are constant-height columns on a unit grid, so the exact intersection
-// is a 2D DDA: one step per cell boundary the ray crosses. The camera sits
-// RELIEF_CAMD screen-widths away, which caps the lean at ~0.8 cells per unit
-// height, so the ray crosses at most two boundaries and the loop is bounded at
-// RELIEF_STEPS = 5 — typically breaking on the first or second. Every quantity
-// below is in CELL PITCHES, in both axes and in height.
+// is a 2D DDA: one step per cell boundary the ray crosses.
+//
+// The loop bound is not a guess. The camera sits RELIEF_CAMD screen-widths
+// away and the lean is normalised by the LONGER axis, so at the frame corner
+// |lean.x| + |lean.y| <= (cols + rows) / (2 * RELIEF_CAMD * max(cols, rows)),
+// which is 1.61 for a square grid and ~1.31 for a 16:10 one. Multiplied by the
+// deepest layer, RELIEF_MAX = 2 pitches, that is at most 3.2 boundary crossings
+// — four cells visited — so RELIEF_STEPS = 6 covers the very worst pixel of the
+// deepest setting with a step to spare. Every other pixel breaks far sooner:
+// the whole middle of the frame barely leans at all and finishes on the first
+// or second iteration. There is no unbounded march here.
+//
+// RELIEF_MAX is why the effect reads as blocks rather than as a bevel. A flank
+// is only as wide as lean * (this block's height - its neighbour's), and the
+// sky is a SMOOTH field: neighbouring cells differ by a few percent of the
+// range, so a layer under a pitch deep put every side face below a pixel and
+// the wall collapsed back into the tiles-with-a-rim look this replaces. At two
+// pitches the default depth of 0.5 makes a block exactly as deep as it is wide
+// — a cube — and the flanks are finally something you can see.
+//
+// Every quantity below is in CELL PITCHES, in both axes and in height.
 
-constant float RELIEF_MAX   = 0.85f;   // tallest block, in cell pitches
+constant float RELIEF_MAX   = 2.00f;   // tallest block, in cell pitches
 constant float RELIEF_CAMD  = 0.62f;   // camera distance, in screen widths
-constant int   RELIEF_STEPS = 5;
+constant int   RELIEF_STEPS = 6;
+
+// ---- Edge fit.
+//
+// The mosaic is built to tile the display exactly: whole cells, flush against
+// all four boundaries, no remainder anywhere (see the pitch note in PASS B).
+// Parallax breaks that on its own. The lean is linear in the distance from the
+// frame centre, so mapping a pixel to the block it actually sees is very nearly
+// a ZOOM about that centre — magnifying by 1/(1 - z/D) — and a zoom pushes the
+// outermost row and column off the edge of the frame. At eight rows that is
+// most of a cell gone on every side: the outer ranks came out as slivers of a
+// face, or as flank, which is exactly the fit the grid work was for.
+//
+// So the lean is damped to zero across the outermost cells and ramped back in
+// behind them, per axis. Inside the flush band the ray is straight, so a pixel
+// sees the block that is under it and the boundary at one cell in lands exactly
+// one cell in — the edge rank is whole and flush again by construction, at any
+// size and any row count.
+//
+// Damped rather than compensated by a counter-zoom, because a counter-zoom is
+// only exact for one height: every block leans by its OWN height, so the edge
+// would still be ragged wherever the outer cells happen to be tall (the moon at
+// the frame edge, a lightning cell). Damping is exact for every height at once.
+//
+// Extending the height field a cell beyond the frame was the other candidate.
+// It gives the outer blocks something to lean against, but it does not put them
+// back inside the frame — the zoom still crops them — so it fixes the flank and
+// not the fit. This does both: with no lean there is no flank to see.
+//
+// The ramp is wider than the band so the recovery is gradual; the derivative of
+// the mapping stays positive everywhere (it is 1 - z*d(lean)/dg, and d(lean)/dg
+// never exceeds 1/D, which is at most 0.4 at the coarsest usable grid), so the
+// warp can never fold.
+constant float RELIEF_EDGE  = 1.00f;   // cells held perfectly flush at each edge
+constant float RELIEF_RAMP  = 1.60f;   // cells over which the lean comes back
 
 /// Stable per-cell noise in -0.5..0.5. Used for splay; must not vary with time
 /// or the whole wall shimmers.
@@ -958,19 +1129,116 @@ inline float cellJit(float2 ci, float salt) {
     return fract(sin(dot(ci, float2(12.9898f, 78.233f)) + salt) * 43758.5453f) - 0.5f;
 }
 
-/// Height of one block, in cell pitches. Bright stands proud.
-///
-/// The 0.65 exponent lifts the bottom of the range: a night sky is nearly
-/// black, and a straight luminance mapping would flatten the wall to nothing
-/// the moment the sun set. Relief is the look; it should survive the dark.
-inline float cellHeight(texture2d<float> cells, sampler s, float2 ci,
-                        float cols, float rows, float hmax, float splay)
+// ================================================================ PASS H
+// The height field, one texel per cell, computed once per frame.
+//
+// It is its own pass for two reasons. The raycast asks for a height several
+// times per pixel — up to six along the ray, four more for the contact
+// occlusion — so anything more expensive than a single fetch is paid ten times
+// over at full resolution. And a height worth having is not a function of one
+// cell: it has to know what the cell's SURROUNDINGS are doing. At cols x rows
+// that neighbourhood costs nothing at all (a 60x36 grid is 2160 fragments, four
+// orders of magnitude less work than the frame it feeds).
+//
+// ---- What the height is FOR.
+//
+// Depth is emphasis, not texture. Straight luminance -> height gives every cell
+// a mild extrusion proportional to how bright it happens to be, which at
+// production density (36 rows) is a smooth field mapped to a smooth relief: a
+// gentle swell over the whole wall and nothing that reads as an object. The sky
+// IS smooth — that is what a sky is — so tone alone can never separate the moon
+// from the air around it.
+//
+// What separates them is PROMINENCE: how far a cell stands above its own
+// surroundings. A moon disc, the solar disc, a lightning cell, a lit rain
+// streak are all bright AND compact — locally far above their neighbourhood. A
+// sky gradient, however bright, is level with it everywhere. So the height is
+// driven by the excess over the local mean, measured at two scales so that a
+// feature is caught whether it is one cell across or eight:
+//
+//   near ring   ~1.6 cells — catches thin features and edges
+//   far ring    ~4.5 cells — clears the moon disc entirely (its radius is 3.6
+//               cells at any row count, since both it and the pitch scale with
+//               the frame's short side), so the middle of the disc registers as
+//               prominent rather than as level with itself
+//
+// The background keeps a reduced version of the old tonal height, so the wall
+// is still a wall — bricks, not a plane — and `emphAmt` at 0 restores the old
+// behaviour exactly.
+constant float2 RING[8] = {
+    float2( 1.0f,  0.0f), float2(-1.0f,  0.0f),
+    float2( 0.0f,  1.0f), float2( 0.0f, -1.0f),
+    float2( 0.707f, 0.707f), float2(-0.707f, 0.707f),
+    float2( 0.707f,-0.707f), float2(-0.707f,-0.707f)
+};
+
+fragment float4 heightPass(VOut in [[stage_in]],
+                           constant Uniforms &U     [[buffer(0)]],
+                           texture2d<float>   cells [[texture(0)]])
+{
+    constexpr sampler ns(coord::pixel, filter::nearest, address::clamp_to_edge);
+    float2 p = in.pos.xy;
+    if (p.x >= U.cols || p.y >= U.rows) return float4(0);
+
+    float l = saturate(cells.sample(ns, p).a);
+
+    // Local surround at two scales.
+    float m1 = 0.0f, m2 = 0.0f;
+    for (int k = 0; k < 8; ++k) {
+        m1 += cells.sample(ns, p + RING[k] * 1.6f).a;
+        m2 += cells.sample(ns, p + RING[k] * 4.5f).a;
+    }
+    m1 *= 0.125f; m2 *= 0.125f;
+
+    // How far this cell stands above its surroundings, at whichever scale sees
+    // it best. Never below zero: a cell in a hollow is not pushed further in,
+    // it simply has nothing to add.
+    float excess = max(max(l - m1, l - m2), 0.0f);
+    // 0.03 is under the cell-to-cell step of a smooth sky at 36 rows, so the sky
+    // stays out of it; 0.30 is comfortably inside the moon-against-night and
+    // disc-against-daylight contrasts, so those saturate.
+    float prom = smoothstep(0.03f, 0.30f, excess);
+    // Bright AND prominent is what should come forward. A dark speck against a
+    // darker surround is prominent too, and it should not tower.
+    //
+    // But this must not be PROPORTIONAL to brightness, which is what it was.
+    // A feature is one object at one distance, so its cells belong at one
+    // height; scaling their lift by their own tone gave the moon a height map
+    // of its own albedo, and at emphAsis 0.8 that is a quarter of a cell pitch
+    // of step between the highlands and the maria. The disc came out of the wall
+    // as a terraced heap of towers with walls between them, its silhouette
+    // broken by every block leaning by a different amount — which is most of why
+    // it stopped reading as a disc at all. The gate belongs at the BOTTOM of the
+    // range, where the dark speck it exists to stop actually lives; above that
+    // it should saturate and let the whole feature rise together.
+    float emph = prom * (0.10f + 0.90f * smoothstep(0.05f, 0.32f, l));
+
+    // The tonal height the wall had before any of this. The 0.65 exponent lifts
+    // the bottom of the range: a night sky is nearly black, and a straight
+    // luminance mapping would flatten the wall to nothing the moment the sun
+    // set. Relief is the look; it should survive the dark.
+    float base = powr(l, 0.65f);
+
+    // Emphasis presses the background down and lets features climb the room it
+    // frees. At emphAmt = 0 this is exactly `base`.
+    float flat = base * mix(1.0f, 0.42f, U.emphAmt);
+    float h    = flat + (1.0f - flat) * emph * U.emphAmt;
+
+    // Splay unsettles the courses so the blocks are not a perfectly graded set.
+    // It belongs here rather than at the point of use: the raycast has to see
+    // ONE height per cell, and re-deriving a jitter at every fetch is both
+    // wasted work and a chance for the DDA and the occlusion to disagree.
+    if (U.splayAmt > 0.001f) h *= 1.0f + cellJit(floor(p), 0.0f) * U.splayAmt * 0.55f;
+
+    return float4(saturate(h), 0.0f, 0.0f, 1.0f);
+}
+
+/// Height of one block, in cell pitches — a single fetch from PASS H.
+inline float cellHeight(texture2d<float> heights, sampler s, float2 ci,
+                        float cols, float rows, float hmax)
 {
     float2 cc = clamp(ci, float2(0.0f), float2(cols - 1.0f, rows - 1.0f));
-    float  h  = powr(saturate(cells.sample(s, cc + 0.5f).a), 0.65f) * hmax;
-    // Splay unsettles the courses so the blocks are not a perfectly graded set.
-    if (splay > 0.001f) h *= 1.0f + cellJit(cc, 0.0f) * splay * 0.55f;
-    return max(h, 0.0f);
+    return heights.sample(s, cc + 0.5f).r * hmax;
 }
 
 /// What the eye actually lands on at one pixel.
@@ -985,8 +1253,8 @@ struct Relief {
     float2 nrm;      // flank only: outward normal in screen axes
 };
 
-inline Relief castRelief(texture2d<float> cells, sampler s, float2 g,
-                         float cols, float rows, float hmax, float splay)
+inline Relief castRelief(texture2d<float> heights, sampler s, float2 g,
+                         float cols, float rows, float hmax)
 {
     Relief r;
     r.g = g; r.cell = floor(g); r.h = 0.0f; r.z = 0.0f;
@@ -998,6 +1266,12 @@ inline Relief castRelief(texture2d<float> cells, sampler s, float2 g,
     // walks outward from the frame centre. u = hmax - z is the march parameter.
     float2 ctr  = float2(cols, rows) * 0.5f;
     float2 lean = (g - ctr) / max(max(cols, rows) * RELIEF_CAMD, 1.0f);
+    // Hold the frame's outermost ranks flush — see the RELIEF_EDGE note. Per
+    // axis, so a cell on the left edge still leans vertically and one along the
+    // top still leans sideways; only the component that would push a block out
+    // of the frame is the one that is taken away.
+    float2 dEdge = min(g, float2(cols, rows) - g);
+    lean *= smoothstep(float2(RELIEF_EDGE), float2(RELIEF_EDGE + RELIEF_RAMP), dEdge);
     r.lean = lean;
 
     float2 p   = g - lean * hmax;          // where the ray enters the layer
@@ -1016,7 +1290,7 @@ inline Relief castRelief(texture2d<float> cells, sampler s, float2 g,
 
     for (int i = 0; i < RELIEF_STEPS; ++i) {
         float z0 = hmax - u;
-        float H  = cellHeight(cells, s, ci, cols, rows, hmax, splay);
+        float H  = cellHeight(heights, s, ci, cols, rows, hmax);
         // Entered this cell already below its top: we are looking at its side.
         // Never on the first cell — there the ray starts at the very top of the
         // layer, where the only possible contact is a full-height top face.
@@ -1054,6 +1328,13 @@ inline Relief castRelief(texture2d<float> cells, sampler s, float2 g,
 // Full-res presentation. Shape (square|dot) x finish (glass|flat), applied to
 // whichever grid a pixel turns out to belong to.
 
+/// Radius of a dot, in cell fractions. Shared by the mask and by the bead's
+/// lens, which have to agree on where the glass actually is.
+inline float dotRadius(float lum, float time, float phase) {
+    return (0.24f + saturate(lum) * 0.46f)
+         * (0.90f + 0.10f * sin(time * 0.9f + phase * 6.28f));
+}
+
 /// Draw the face of one mosaic block.
 ///
 /// `flank` says we are on a side face rather than the front. A flank has no
@@ -1066,7 +1347,8 @@ inline Relief castRelief(texture2d<float> cells, sampler s, float2 g,
 /// outline inside the cell so a wall of blocks is not perfectly coursed.
 inline float3 styleCell(float3 col, float2 cuv, float cellPx, float lum,
                         float phase, float time, int shape, int finish,
-                        bool flank, float2 lightDir, float rot, float splay)
+                        bool flank, float2 lightDir, float lightI, float rot,
+                        float splay, float depth)
 {
     if (rot != 0.0f) {
         float cs = cos(rot), sn = sin(rot);
@@ -1076,15 +1358,53 @@ inline float3 styleCell(float3 col, float2 cuv, float cellPx, float lum,
     if (shape == 1) {
         // ---- dots: SDF circle, radius from cell luminance (roomstand.py:2587)
         float ln = saturate(lum);
-        float dotR = (0.24f + ln * 0.46f) * (0.90f + 0.10f * sin(time * 0.9f + phase * 6.28f));
+        float dotR = dotRadius(lum, time, phase);
         float d = length(cuv - 0.5f);
         float aa = 0.5f / cellPx;                 // half-pixel feather, no aliasing
         float m = 1.0f - smoothstep(dotR - aa, dotR + aa, d);
-        col *= m;
-        if (finish == 0) {                        // glass dots pick up a lens highlight
-            float hl = saturate(1.0f - length(cuv - float2(0.38f, 0.36f)) / 0.30f);
-            col += hl * hl * 0.16f * m;
+
+        if (finish == 0) {
+            // ---- A glass dot is a BEAD, not a filled circle.
+            //
+            // It used to get a fixed highlight blob at (0.38, 0.36) and nothing
+            // else — no curvature, no light direction, no transmission — while
+            // the square got the whole glass treatment. That is why a dot read
+            // as a flat disc with a sticker on it.
+            //
+            // Everything here comes off one quantity: the sphere normal. The
+            // bead is a hemisphere of radius dotR standing on the cell, so at a
+            // point q cells from its centre the surface normal is
+            // (q, sqrt(1 - |q|^2)) — out of the screen at the crown, lying flat
+            // at the rim. Refraction through it is done by the caller, which has
+            // the cell texture; the rest is here.
+            float2 q  = (cuv - 0.5f) / max(dotR, 1e-3f);
+            float  rr = min(dot(q, q), 1.0f);
+            float3 n  = float3(q, sqrt(max(0.0f, 1.0f - rr)));
+
+            // The light is lifted out of the screen plane so the crown of a bead
+            // is never fully dark when the source is low: a real light in front
+            // of a wall still reaches the tops of what is on it.
+            float3 l3 = normalize(float3(lightDir, 0.62f));
+
+            // Curvature. One side of the bead faces the light and the other is
+            // turned away — this is what makes it round.
+            float diff = saturate(dot(n, l3));
+            col *= 1.0f + lightI * (0.62f * diff - 0.24f);
+
+            // The specular. Tight, and placed by the actual light direction, so
+            // the highlights across the wall all point at the sun rather than
+            // sitting in the same corner of every cell.
+            float3 hv = normalize(l3 + float3(0.0f, 0.0f, 1.0f));
+            float spec = powr(saturate(dot(n, hv)), 46.0f);
+            col += spec * (0.16f + 0.34f * lightI);
+
+            // Fresnel. Glass goes mirror-bright at grazing incidence, which is
+            // the bright ring around the edge of a real bead and the single
+            // cheapest cue that a thing is glass and not paint.
+            float fres = powr(1.0f - n.z, 3.6f);
+            col += fres * 0.13f * (0.35f + 0.65f * ln);
         }
+        col *= m;
     } else {
         if (flank) return col;                 // side wall: no front-face detail
 
@@ -1108,8 +1428,19 @@ inline float3 styleCell(float3 col, float2 cuv, float cellPx, float lum,
             }
             if (m > in0) col *= 0.72f;         // the block does not fill the cell
         } else {
-            // Flat: grout gaps, no rim. The relief supplies the depth.
-            if (m > in0 - 0.08f) col *= 0.42f;
+            // Flat: grout gaps, no rim.
+            //
+            // The grout YIELDS to the relief. A painted 0.08-cell dark band on
+            // all four sides of every tile is a much louder edge than a real
+            // crevice, and with depth up it was drawing a flat black lattice
+            // over the top of the geometry — the blocks were there and you
+            // could not see them for the grid. So the band narrows and lifts as
+            // the blocks come out of the wall, because by then the separation
+            // between them is being carried by their own side faces and the
+            // occlusion in the gaps. At depth 0 this is exactly the old flat
+            // tile, byte for byte.
+            float w = 0.08f * (1.0f - 0.72f * depth);
+            if (m > in0 - w) col *= mix(0.42f, 0.66f, depth);
         }
     }
     return col;
@@ -1120,7 +1451,9 @@ fragment float4 presentPass(VOut in [[stage_in]],
                             constant Star     *stars [[buffer(2)]],
                             texture2d<float>   cells [[texture(0)]],
                             texture2d<float>   glass [[texture(1)]],
-                            texture2d<float>   streakFine [[texture(2)]])
+                            texture2d<float>   streakFine [[texture(2)]],
+                            texture2d<float>   heights [[texture(3)]],
+                            texture2d<float>   cellAux [[texture(4)]])
 {
     constexpr sampler nearestS(coord::pixel, filter::nearest, address::clamp_to_edge);
 
@@ -1144,7 +1477,7 @@ fragment float4 presentPass(VOut in [[stage_in]],
     // the styling — then runs on the block the eye lands on rather than the one
     // that happens to sit under the pixel, which is the whole of the parallax.
     float  hmax = U.depthAmt * RELIEF_MAX;
-    Relief rel  = castRelief(cells, nearestS, px / SPv, U.cols, U.rows, hmax, U.splayAmt);
+    Relief rel  = castRelief(heights, nearestS, px / SPv, U.cols, U.rows, hmax);
 
     // A flank hit lands exactly ON a cell boundary, where floor() is a coin
     // toss and the grout test would fire. Push it a quarter-cell into the block
@@ -1174,18 +1507,47 @@ fragment float4 presentPass(VOut in [[stage_in]],
     // tile, which is opaque, so they are skipped there entirely.
     if (U.finish == 0 && rel.h > 0.001f
         && (U.refractAmt > 0.005f || U.frostAmt > 0.005f)) {
-        float2 base = float2(cid) + 0.5f + rel.lean * (U.refractAmt * rel.h * 3.0f);
+        // How far along the view the transmitted image is taken from. Bounded,
+        // because a block is a short light pipe and not a periscope: what you
+        // see on its face is the wall JUST behind it. Unbounded, the lean at the
+        // frame edge times a tall block times the dispersion split reached more
+        // than a whole cell, so a block on the moon's limb took its red from the
+        // disc and its blue from the night sky beyond it and came out as
+        // saturated cyan. Half a dozen of those scattered over the moon, and it
+        // is confetti rather than an object. 0.55 still crosses the boundary at
+        // 0.5, so the block genuinely shows its neighbour — it just cannot skip
+        // one. The two terms are scaled together, so the fringe keeps its
+        // proportion to the displacement instead of surviving alone.
+        float2 off   = rel.lean * (U.refractAmt * rel.h * 3.0f);
+        float  disp  = (U.dispersAmt > 0.005f) ? U.dispersAmt * 1.6f : 0.0f;
+        float  reach = length(off) + disp;
+        float  kr    = (reach > 0.55f) ? 0.55f / reach : 1.0f;
+        off *= kr; disp *= kr;
+
+        float2 base = float2(cid) + 0.5f + off;
         float2 lim  = float2(U.cols, U.rows) - 0.5f;
-        float3 t;
-        if (U.dispersAmt > 0.005f) {
+        float3 t = cells.sample(nearestS, clamp(base, 0.5f, lim)).rgb;
+        if (disp > 0.0f) {
             // Split along the view lean itself, so the fringe vanishes at the
             // frame centre — where there is no angle, there is no dispersion.
-            float2 dv = normalize(rel.lean + 1e-6f) * (U.dispersAmt * 1.6f);
-            t = float3(cells.sample(nearestS, clamp(base + dv, 0.5f, lim)).r,
-                       cells.sample(nearestS, clamp(base,      0.5f, lim)).g,
-                       cells.sample(nearestS, clamp(base - dv, 0.5f, lim)).b);
-        } else {
-            t = cells.sample(nearestS, clamp(base, 0.5f, lim)).rgb;
+            //
+            // Added as a bounded DIFFERENCE rather than taken as the channel
+            // outright. Dispersion is a coloured edge a few percent wide; taking
+            // whole channels from either side means that at a strong boundary —
+            // the moon's limb against a night sky — a block gets its red from
+            // the disc and its blue from the sky and comes out saturated cyan,
+            // which is not a fringe, it is a wrong block.
+            float2 dv = normalize(rel.lean + 1e-6f) * disp;
+            float dr = cells.sample(nearestS, clamp(base + dv, 0.5f, lim)).r - t.r;
+            float db = cells.sample(nearestS, clamp(base - dv, 0.5f, lim)).b - t.b;
+            // In 0..1 colour, so 0.05 is thirteen levels: a visible edge tint and
+            // nothing more. At 0.09 a coarse grid put a cyan band and a magenta
+            // band straight across the moon, because at twenty rows the split
+            // reaches out of the disc on one side and stays inside it on the
+            // other and the clamp was wide enough to carry the whole difference.
+            const float FR = 0.05f;
+            t.r += clamp(dr, -FR, FR);
+            t.b += clamp(db, -FR, FR);
         }
         if (U.frostAmt > 0.005f && U.lowfx < 0.5f) {
             float f = U.frostAmt * 1.7f;       // must clear a whole cell to blur
@@ -1207,92 +1569,107 @@ fragment float4 presentPass(VOut in [[stage_in]],
         float  moonR = min(W, H) * 0.10f;
 
         // ---- The moon.
+        //
         // Which cells are moon at all was settled by the coarse pass, so the
-        // limb stays as chunky as the rest of the grid. Here we only ask, per
-        // cell: does the surface vary across it? Flat highlands stay one chunk.
-        // A mare edge or the terminator running through a cell breaks it down,
-        // as far as that particular cell needs and no further.
+        // limb stays as chunky as the rest of the grid. This only redistributes
+        // tone INSIDE those cells. Three rules, and each one was a visible bug:
+        //
+        //  ONE SUB-LATTICE FOR THE WHOLE DISC. Depth used to come from
+        //  detailDepth() per cell, so with the affordable ceiling at four a
+        //  gibbous moon came out as a patchwork of 2x2, 3x3 and 4x4 blocks
+        //  according to how much albedo happened to vary in each. Mixed pitches
+        //  read as noise, not as a finer mosaic — the disc stopped being one
+        //  object. The moon is a single body and it gets a single grid.
+        //
+        //  THE DARK SIDE IS PART OF THE MOON. The old gate was
+        //  `... && litSide(centre)`, so refinement stopped dead at the
+        //  terminator: one side finely tiled, the other in whole coarse cells,
+        //  with the seam between them running down the middle of the disc.
+        //
+        //  ONE TONE MODEL, NOT TWO MULTIPLIED FACTORS, AND COMPRESSED. See
+        //  moonTone. The old code multiplied an albedo ratio by a terminator
+        //  ratio whose floor was 0.16, in LINEAR luminance, applied to a colour
+        //  that has already been through the tone ramp and blended with the sky.
+        //  A sub-cell just past the terminator inside a cell whose centre was
+        //  just before it came out at about a tenth of its neighbour: darker
+        //  than the night sky. Those are the near-black specks, and a whole
+        //  column of them where the terminator ran nearly vertically is the hard
+        //  black strip down one side.
         if (U.moonAlt > 0.0f && U.sunAlt < 0.0f) {
             float2 dcen = (cid + 0.5f) * SPv - moonP;
-            if (dot(dcen, dcen) < moonR * moonR && litSide(dcen.x, dcen.y, moonR, U.moonPhase)) {
-                float vCell = max(moonSample(dcen.x / moonR, dcen.y / moonR), 0.05f);
+            if (dot(dcen, dcen) < moonR * moonR) {
+                // How much of the moon is reaching the eye through the cloud.
+                // Two samples, and the difference between them matters:
+                //
+                //   at the disc's CENTRE, for how finely to subdivide. One
+                //   object, one sub-lattice — reading it per cell puts 4x4
+                //   blocks where the deck happens to be thin and 2x2 beside them
+                //   where it is not, and a patchwork of pitches is the exact
+                //   noise this pass is supposed to avoid.
+                //
+                //   at THIS cell, for how strongly to modulate. That is what
+                //   lets the moon dissolve into the deck locally, a ragged edge
+                //   of cloud eating into the disc rather than a switch thrown
+                //   over the whole of it.
+                float2 mcid  = clamp(floor(moonP / SPv), float2(0.0f),
+                                     float2(U.cols, U.rows) - 1.0f);
+                float  mVisC = saturate(cellAux.sample(nearestS, mcid + 0.5f).r);
+                float  mVis  = saturate(cellAux.sample(nearestS, cid + 0.5f).r);
+                float  detail = smoothstep(0.22f, 0.72f, mVis);
 
-                // Sample the source at the cell's corners. Corners outside the
-                // disc fall back to the centre value, so the limb does not
-                // register false contrast and split for no reason.
-                float lo = vCell, hi = vCell;
-                bool litAll = true, litAny = false;
-                for (int k = 0; k < 4; ++k) {
-                    float2 cp = (cid + float2(float(k & 1), float((k >> 1) & 1))) * SPv - moonP;
-                    float v = (dot(cp, cp) <= moonR * moonR)
-                            ? moonSample(cp.x / moonR, cp.y / moonR) : vCell;
-                    lo = min(lo, v); hi = max(hi, v);
-                    bool l = litSide(cp.x, cp.y, moonR, U.moonPhase);
-                    litAll = litAll && l; litAny = litAny || l;
-                }
-                // A terminator crossing the cell is maximum contrast: that edge
-                // carries the entire phase, so it always earns a breakdown.
-                float contrast = (litAny && !litAll) ? 1.0f : (hi - lo);
+                // Blended, not switched. Depth falls back toward the coarse cell
+                // as the cloud thickens, and the modulation is faded out with it
+                // — so the moment a depth step changes the modulation either side
+                // of it is already near zero and the change cannot be seen. Thin
+                // cloud therefore gives a partly-detailed moon rather than a
+                // detailed one that pops off when the cloud crosses a threshold.
+                // The depth curve sits ABOVE the strength curve on purpose. A
+                // split cell shows its sub-lattice through the styling whether
+                // it is modulated or not, so the sub-grid has to be gone before
+                // the modulation is — otherwise a moon hidden behind a deck
+                // still prints a finer grain of tiles into the cloud, which is
+                // the same "the moon is drawn regardless" bug wearing a
+                // different hat.
+                // 8 px, not the 4 the other features use. The glass rim is
+                // 1.2 px wide and clamped at 0.14 of a cell, so below about 9 px
+                // a sub-cell is MORE rim than face: the moon stops being tiles
+                // and becomes graph paper, which is a large part of what "mixed
+                // blocky cells" looks like on a smaller display.
+                int affordable = min(4, int(floor(SP / 8.0f)));
+                int depth = int(round(mix(1.0f, float(max(affordable, 1)),
+                                          smoothstep(0.30f, 0.80f, mVisC))));
+                depth = clamp(depth, 1, 4);
 
-                int depth = detailDepth(contrast, 0.05f, SP, 4.0f, 6);
                 if (depth > 1) {
+                    float earthRel = moonEarthRel(U.moonIllum, U.covF);
+                    float vCell   = max(moonSample(dcen.x / moonR, dcen.y / moonR), 0.05f);
+                    float litCell = saturate(
+                        0.5f + litDist(dcen.x, dcen.y, moonR, U.moonPhase) / max(SP, 1.0f));
+                    float toneCell = moonTone(vCell, litCell, earthRel);
+
                     dc = splitCell(px, SPv, depth);
                     float2 ds = (dc.id + 0.5f) * dc.sizev - moonP;
                     // Sub-cells outside the disc inherit the parent wholesale, so
                     // a limb cell stays one full square and the outline gains no
-                    // resolution. They must also skip the terminator test below:
-                    // outside the disc the chord collapses to zero, every such
-                    // sub-cell reads as unlit, and the limb turns black.
-                    bool subInside = dot(ds, ds) <= moonR * moonR;
-                    float vSub = subInside ? moonSample(ds.x / moonR, ds.y / moonR) : vCell;
-                    // Brightness as a RATIO against what the coarse cell already
-                    // used, so a split cell averages back to what was there. That
-                    // is what leaves no seam against an unsplit neighbour.
-                    float ratio = vSub / vCell;
-                    if (subInside) {
-                        // The coarse cell already carries a coverage-blended
-                        // terminator, so this has to be the RATIO of the
-                        // sub-cell's coverage to the cell's — not an absolute
-                        // darkening, which would apply the phase twice. Being a
-                        // ratio is also what makes a split cell average back to
-                        // the unsplit one, so there is no seam against a
-                        // neighbour that did not subdivide.
-                        //
-                        // This is the "bit by bit" part: the cell says roughly
-                        // how much of it is in shadow, and the subdivision says
-                        // where inside it the edge actually runs.
+                    // resolution: the limb keeps the coarse grid's chunkiness,
+                    // which is the look.
+                    if (dot(ds, ds) <= moonR * moonR) {
+                        float vSub   = max(moonSample(ds.x / moonR, ds.y / moonR), 0.05f);
                         float litSub = saturate(
-                            0.5f + litDist(ds.x, ds.y, moonR, U.moonPhase)
-                                 / max(dc.size, 1.0f));
-                        float litCell = saturate(
-                            0.5f + litDist(dcen.x, dcen.y, moonR, U.moonPhase)
-                                 / max(SP, 1.0f));
-                        ratio *= mix(0.16f, 1.0f, litSub)
-                               / max(mix(0.16f, 1.0f, litCell), 1e-3f);
+                            0.5f + litDist(ds.x, ds.y, moonR, U.moonPhase) / max(dc.size, 1.0f));
+                        // A ratio, so a split cell averages back to the unsplit
+                        // one and leaves no seam against a neighbour that did not
+                        // split. The 0.55 power is the tone ramp's compression
+                        // read backwards: `col` is not linear light, so a linear
+                        // ratio applied to it overshoots — that is what turned a
+                        // 3:1 tone step into a 10:1 pixel step.
+                        float toneSub = moonTone(vSub, litSub, earthRel);
+                        float ratio = powr(clamp(toneSub / max(toneCell, 1e-3f),
+                                                 0.06f, 4.0f), 0.55f);
+                        ratio = mix(1.0f, ratio, detail);
+                        col *= ratio;
+                        lum *= ratio;
                     }
-                    if (false) {
-                        // Darken by how much dark side is actually THERE, not by
-                        // which side of the line the centre fell on.
-                        //
-                        // The dark crescent is bounded by two curves, the
-                        // terminator and the limb, and near a gibbous phase they
-                        // run together — the crescent is a hairline. Testing
-                        // against the terminator alone means every sub-cell along
-                        // the limb registers as "past the line" and gets the full
-                        // treatment, which is the speckled ring: a 0.1%-wide
-                        // feature rendered three pixels thick.
-                        //
-                        // Distance past the terminator AND distance inside the
-                        // limb, whichever is smaller, is the local width of the
-                        // crescent. Measured against the sub-cell, that is the
-                        // fraction of it that is genuinely unlit.
-                        float sd = litDist(ds.x, ds.y, moonR, U.moonPhase);
-                        float ld = moonR - length(ds);
-                        float dark = saturate(min(-sd, ld) / max(dc.size, 1.0f));
-                        ratio *= mix(1.0f, 0.16f, dark);
-                    }
-                    col *= ratio;
-                    lum *= ratio;
                     phase = cellPhase(uint(dc.id.y * U.cols * float(depth) + dc.id.x));
                 }
             }
@@ -1458,24 +1835,131 @@ fragment float4 presentPass(VOut in [[stage_in]],
         }
     }
 
-    // ---- One light for the whole field.
+    // ---- The light is the sky's own.
     //
-    // Screen axes, +y down. The angle is where the light comes FROM, measured
-    // the way a design tool's angle dial reads it: 0 from the right, positive
-    // turning anticlockwise, so the -45 the reference panel showed puts it up
-    // and to the left and lights the top-left flank of every proud block.
-    float la = U.lightAngle * (3.14159265f / 180.0f);
-    float2 L = float2(-cos(la), sin(la));
-    float  I = U.lightInt;
+    // There is no light-angle control any more, and there should never have been
+    // one: the scene already contains its light sources, projected to screen
+    // positions by the same astroXY the sun and moon discs are drawn with. A
+    // slider can only ever disagree with them — set it to "up and to the left"
+    // and the blocks are lit from the upper left at dawn, at noon and at
+    // midnight, while the sun visibly crosses the frame the other way.
+    //
+    // So the direction is measured to the body itself. Screen axes, +y down, and
+    // in this projection altitude runs UP the frame (y = (1 - alt/85) * H): a
+    // body on the horizon sits at the bottom edge and one overhead at the top.
+    // A block at dawn is therefore lit from below and from the side the sun has
+    // risen on, and by noon from straight above — the shading sweeps around
+    // through the day on its own, and it is the real sun's own arc that it
+    // sweeps with.
+    //
+    // Taken to the BLOCK's centre, not the pixel's, so one face is lit as one
+    // face. It is a point on the screen rather than a direction at infinity,
+    // which is right for a projected dome: blocks near the sun turn their inner
+    // flanks toward it, and the pattern radiates from where the sun actually is.
+    //
+    // A source is weighted by how high it stands and how bright it is, and the
+    // two are BLENDED, never switched between — at twilight the light rolls
+    // over from the sun to the moon across a few degrees of altitude instead of
+    // jumping direction between two frames.
+    float2 hereP = (rel.cell + 0.5f) * SPv;
+    float2 sunSP  = astroXY(U.sunAlt,  U.sunAz,  U.facingAz, U.pixW, U.pixH);
+    float2 moonSP = astroXY(U.moonAlt, U.moonAz, U.facingAz, U.pixW, U.pixH);
+    float2 dS = sunSP - hereP, dM = moonSP - hereP;
+
+    // From part way through civil twilight to a few degrees up. A smoothstep
+    // rather than a ramp because it is the ENDS that matter: a linear weight
+    // arrives at zero with its full slope, and a light that stops turning all at
+    // once at a particular altitude is the hard switch this is meant to avoid.
+    // The sun still owns the direction for a while after it has set — that is
+    // what a sunset is — so the low end sits below the horizon.
+    float wSun  = smoothstep(-8.0f, 4.0f, U.sunAlt);
+    // The moon is a weak source and it only gets to light anything once the sun
+    // has given up the sky. Illumination matters: a crescent lights very little.
+    float wMoon = smoothstep(-1.0f, 8.0f, U.moonAlt)
+                * (0.15f + 0.85f * saturate(U.moonIllum / 100.0f))
+                * 0.85f * (1.0f - wSun);
+
+    // Right ON a body the direction to it is undefined, and neighbouring blocks
+    // would take wildly different ones — the disc would come out speckled. So a
+    // source stops being directional for the two or three blocks it covers,
+    // which is also the truth of it: you cannot be lit from the side by
+    // something you are inside.
+    float lenS = length(dS), lenM = length(dM);
+    wSun  *= smoothstep(0.0f, 2.5f * SP, lenS);
+    wMoon *= smoothstep(0.0f, 2.5f * SP, lenM);
+
+    // A faint overhead bias, so a moonless night is lit from the zenith rather
+    // than from an undefined direction — with no body up there is no direction
+    // to measure, and a normalize() of nothing is a discontinuity.
+    float2 Lv = dS / max(lenS, 1e-3f) * wSun
+              + dM / max(lenM, 1e-3f) * wMoon
+              + float2(0.0f, -1.0f) * 0.06f;
+    float2 L  = Lv / max(length(Lv), 1e-4f);
+
+    // Intensity stays a control. What the sky decides is how much of it is
+    // DIRECTIONAL: with nothing up, and under thick cloud, the light arrives
+    // from everywhere at once and the flanks separate less.
+    float srcW = saturate(wSun + wMoon);
+    float I    = U.lightInt * mix(0.45f, 1.0f, srcW) * (1.0f - U.covF * 0.35f);
 
     // On a flank, drop the across-axis coordinate to the middle of the face.
     // A dot then extrudes as a cylinder rather than as a sliver of its own rim.
     float2 suv = dc.uv;
     if (rel.flank) { if (rel.axis == 0) suv.x = 0.5f; else suv.y = 0.5f; }
 
+    // ---- Looking THROUGH the bead (glass dots).
+    //
+    // The block-level transmission above displaces the whole cell by the view
+    // lean, which is what a slab of glass does. A sphere does more than that:
+    // its surface is curved, so the displacement varies ACROSS the bead — none
+    // at the crown, where you look straight through, and swinging outward at the
+    // rim, where the surface is steep. That varying displacement is what makes a
+    // bead magnify and invert what is behind it instead of merely offsetting it,
+    // and it is the difference between a glass ball and a tinted disc.
+    //
+    // Dispersion splits it per channel along the same normal, so the fringe
+    // appears at the rim and vanishes at the crown, exactly where a real bead
+    // puts it. Frost scatters what arrives. Both are skipped on a flat finish,
+    // which has nothing to transmit, and outside the bead, which is empty cell.
+    if (U.shape == 1 && U.finish == 0
+        && (U.refractAmt > 0.005f || U.frostAmt > 0.005f)) {
+        float  dr = dotRadius(lum, U.time, phase);
+        float2 q  = (suv - 0.5f) / max(dr, 1e-3f);
+        float  rr = dot(q, q);
+        if (rr < 1.0f) {
+            // Sphere normal, and the scale of the bead relative to a whole cell
+            // — a subdivided bead is smaller and must bend light less.
+            float2 n  = q * sqrt(saturate(1.0f - rr * 0.55f));
+            float  sz = dc.size / max(SP, 1e-3f);
+            float2 lim = float2(U.cols, U.rows) - 0.5f;
+            float2 base = float2(cid) + 0.5f + n * (U.refractAmt * 2.1f * sz);
+            float3 t;
+            if (U.dispersAmt > 0.005f) {
+                float2 dv = n * (U.dispersAmt * 1.1f * sz);
+                t = float3(cells.sample(nearestS, clamp(base + dv, 0.5f, lim)).r,
+                           cells.sample(nearestS, clamp(base,      0.5f, lim)).g,
+                           cells.sample(nearestS, clamp(base - dv, 0.5f, lim)).b);
+            } else {
+                t = cells.sample(nearestS, clamp(base, 0.5f, lim)).rgb;
+            }
+            if (U.frostAmt > 0.005f && U.lowfx < 0.5f) {
+                float f = U.frostAmt * 1.7f;
+                float3 a = cells.sample(nearestS, clamp(base + float2( f, 0), 0.5f, lim)).rgb
+                         + cells.sample(nearestS, clamp(base + float2(-f, 0), 0.5f, lim)).rgb
+                         + cells.sample(nearestS, clamp(base + float2( 0, f), 0.5f, lim)).rgb
+                         + cells.sample(nearestS, clamp(base + float2( 0,-f), 0.5f, lim)).rgb;
+                t = mix(t, (t + a) * 0.2f, saturate(U.frostAmt * 1.3f));
+            }
+            // Weighted toward the rim: the crown of a bead shows what is directly
+            // behind it, so forcing the transmitted colour there would only make
+            // the cell disagree with itself.
+            col = mix(col, t, saturate(0.35f + 0.65f * rr));
+        }
+    }
+
     float rot = U.splayAmt * cellJit(rel.cell, 4.7f) * 0.22f;
     col = styleCell(col, suv, dc.size, lum, phase, U.time, U.shape, U.finish,
-                    rel.flank, L, rot, U.splayAmt);
+                    rel.flank, L, I, rot, U.splayAmt, U.depthAmt);
 
     // ---- Relief shading. Front faces, side faces, and the crevices between.
     if (hmax > 0.0005f) {
@@ -1501,8 +1985,8 @@ fragment float4 presentPass(VOut in [[stage_in]],
             for (int k = 0; k < 4; ++k) {
                 float2 o = (k == 0) ? float2(-1, 0) : (k == 1) ? float2(1, 0)
                          : (k == 2) ? float2(0, -1) : float2(0, 1);
-                float hn = cellHeight(cells, nearestS, rel.cell + o,
-                                      U.cols, U.rows, hmax, U.splayAmt);
+                float hn = cellHeight(heights, nearestS, rel.cell + o,
+                                      U.cols, U.rows, hmax);
                 float dh = hn - rel.h;
                 if (dh <= 0.0f) continue;
                 float2 e = 0.5f - o * (cuv - 0.5f);   // distance to that edge

@@ -175,14 +175,28 @@ final class WeatherService {
             ].joined(separator: ",")),
             // Convection lives in the hourly block. CAPE and lifted index are
             // what let a storm flash at a believable rate instead of on a timer.
+            //
+            // Cloud, pressure and temperature are fetched as a SERIES rather
+            // than a point, because a front is a sequence: cirrus hours ahead,
+            // the deck thickening and the barometer falling before anything
+            // falls out of it. A single hour cannot express "the grey clouds
+            // come over, THEN it gets dark, THEN it rains".
             .init(name: "hourly", value: [
                 "cape", "lifted_index", "convective_inhibition",
                 "freezing_level_height", "boundary_layer_height",
                 "snow_depth", "precipitation_probability",
+                "cloud_cover", "cloud_cover_low", "pressure_msl", "temperature_2m",
             ].joined(separator: ",")),
             // 15-minute nowcast: the freshest slot overrides current precip and
             // code, so a shower that just started shows up now, not in 10 min.
+            // The window either side of now is what makes the TIME STRUCTURE of
+            // the precipitation measurable — one unbroken run is frontal, three
+            // separate bursts are scattered showers.
             .init(name: "minutely_15", value: "precipitation,rain,snowfall,weather_code"),
+            .init(name: "past_minutely_15", value: "8"),      // two hours behind
+            .init(name: "forecast_minutely_15", value: "16"), // four hours ahead
+            .init(name: "past_hours", value: "3"),
+            .init(name: "forecast_hours", value: "6"),
             .init(name: "daily", value: "uv_index_max"),
             .init(name: "timezone", value: "auto"),
             .init(name: "forecast_days", value: "1"),

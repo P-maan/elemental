@@ -107,18 +107,22 @@ struct Config: Codable, Equatable {
     // MARK: - Relief
     //
     // The mosaic is a wall of blocks extruded toward you by their own
-    // brightness. These six controls are its material and its light; they
+    // brightness. These controls are its material and its light; they
     // replace the old single `glassAmplify` bevel knob, whose key is simply
     // ignored when an older config.json is read.
 
     /// How far the blocks stand out of the wall, 0 flat to 1 deep.
     var reliefDepth: Double = 0.5
 
-    /// Where the light comes from, in degrees. 0 is from the right and positive
-    /// turns anticlockwise, so -45 is up and to the left.
-    var lightAngle: Double = -45
+    /// How much a block's height follows FEATURES rather than plain tone. At 0
+    /// height is straight cell luminance, which on a smooth sky gives a smooth
+    /// swell and nothing that reads as an object; at 1 the sky presses flat and
+    /// the moon, the sun and lightning stand right out of the wall.
+    var emphasis: Double = 0.8
 
-    /// How hard that light is, 0..1.
+    /// How hard the light is, 0..1. WHERE it comes from is not a setting: the
+    /// blocks are lit by the sun and the moon, from the screen positions they
+    /// are actually drawn at.
     var lightIntensity: Double = 0.8
 
     /// How far the view is displaced through the block. Glass finish only —
@@ -151,6 +155,37 @@ struct Config: Codable, Equatable {
     /// these the way it lands on the dock. macOS will not tell us where widgets
     /// are, so they are configured rather than detected.
     var widgets: [WidgetRect] = []
+
+    // MARK: - Weather on the desktop
+    //
+    // The wallpaper draws BEHIND the dock, the widgets and the menu bar, so
+    // weather that lands on one of them shows in the space around it: spray
+    // thrown up off the lip, a wet band along the top edge, snow lying on it,
+    // frost blooming out of it. Each is opt-out on its own, because which of
+    // them you want marked is a matter of taste and of what your desktop
+    // actually looks like — a hidden dock has no lip to wet.
+
+    /// Let weather mark the dock.
+    var wetDock: Bool = true
+
+    /// Let weather mark the desktop widgets listed in `widgets`.
+    var wetWidgets: Bool = true
+
+    /// Let weather mark the menu bar. Off by default: it is the one strip that
+    /// is always there whatever you are doing, and water on it reads as a UI
+    /// glitch rather than as weather.
+    var wetMenuBar: Bool = false
+
+    /// How strongly weather marks the furniture, 0 none to 1 full. Separate
+    /// from the switches so it can be dialled back rather than turned off.
+    var furnitureWetness: Double = 1.0
+
+    /// The pane itself: droplets clinging, running and beading on the screen as
+    /// though you were looking through a window. Off leaves the sky alone.
+    var paneWater: Bool = true
+
+    /// How strongly water marks the pane, 0 none to 1 full.
+    var paneWaterAmount: Double = 1.0
 
     /// Keep drawing while the desktop is completely covered.
     ///
@@ -356,7 +391,7 @@ struct Config: Codable, Equatable {
         state.gridRows = gridRows
         state.poster = Float(poster)
         state.reliefDepth = Float(reliefDepth)
-        state.lightAngle = Float(lightAngle)
+        state.reliefEmphasis = Float(emphasis)
         state.lightIntensity = Float(lightIntensity)
         state.refraction = Float(refraction)
         state.dispersion = Float(dispersion)
@@ -409,7 +444,7 @@ extension Config {
         gridRows           = c.lenient(.gridRows, d.gridRows)
         poster             = c.lenient(.poster, d.poster)
         reliefDepth        = c.lenient(.reliefDepth, d.reliefDepth)
-        lightAngle         = c.lenient(.lightAngle, d.lightAngle)
+        emphasis           = c.lenient(.emphasis, d.emphasis)
         lightIntensity     = c.lenient(.lightIntensity, d.lightIntensity)
         refraction         = c.lenient(.refraction, d.refraction)
         dispersion         = c.lenient(.dispersion, d.dispersion)
@@ -418,6 +453,12 @@ extension Config {
         maxFPS             = c.lenient(.maxFPS, d.maxFPS)
         motionSpeed        = c.lenient(.motionSpeed, d.motionSpeed)
         widgets            = c.lenient(.widgets, d.widgets)
+        wetDock            = c.lenient(.wetDock, d.wetDock)
+        wetWidgets         = c.lenient(.wetWidgets, d.wetWidgets)
+        wetMenuBar         = c.lenient(.wetMenuBar, d.wetMenuBar)
+        furnitureWetness   = c.lenient(.furnitureWetness, d.furnitureWetness)
+        paneWater          = c.lenient(.paneWater, d.paneWater)
+        paneWaterAmount    = c.lenient(.paneWaterAmount, d.paneWaterAmount)
         renderWhenOccluded = c.lenient(.renderWhenOccluded, d.renderWhenOccluded)
         lowPowerOnBattery  = c.lenient(.lowPowerOnBattery, d.lowPowerOnBattery)
         lock               = c.lenient(.lock, d.lock)

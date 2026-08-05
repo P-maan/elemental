@@ -44,6 +44,18 @@ struct Observation {
     var coverHigh: Float = 0       // above 20,000 ft
     var coverTotal: Float = 0
 
+    /// Height of the lowest BROKEN or OVERCAST layer, metres AGL. -1 when the
+    /// sky is clear or only scattered — there is no ceiling then, which is a
+    /// different fact from a high one.
+    ///
+    /// This is the single most useful number in a METAR that the engine was
+    /// throwing away. A ceiling is a measurement of where the cloud actually is,
+    /// and cloud base height is most of what decides whether an overcast reads
+    /// as a high grey lid or a low oppressive one.
+    var ceiling: Float = -1
+    /// Base of the lowest layer of any amount, metres AGL. -1 when clear.
+    var lowestBase: Float = -1
+
     var visibility: Float = 12000  // metres
     var temperature: Float = 20
     var dewPoint: Float = 10
@@ -55,10 +67,31 @@ struct Observation {
     var raining = false
     var snowing = false
     var thundering = false
+    /// FG only. Mist is a separate, much milder thing and gets its own flag.
     var fog = false
     var haze = false
     /// -1 light, 0 moderate, +1 heavy. Only meaningful while precipitating.
     var intensity: Int = 0
+
+    // The rest of the present-weather vocabulary. METAR already distinguishes
+    // convective from stratiform precipitation — SHRA is a rain SHOWER, RA is
+    // continuous rain — and already distinguishes water droplets from dry
+    // aerosol. Decoding only "is it raining" threw away a free, measured
+    // classification of exactly the thing the scene needs to draw.
+    var showery = false        // SH descriptor: convective, cellular
+    var continuousPrecip = false // RA/SN/DZ with no SH descriptor
+    var drizzle = false        // DZ
+    var freezing = false       // FZ descriptor
+    var hail = false           // GR hail, GS small hail / snow pellets
+    var icePellets = false     // PL
+    var blowingSnow = false    // BLSN / DRSN
+    var squall = false         // SQ
+    var mist = false           // BR — 1–5km in saturated air
+    var dust = false           // DU / SA / PO / SS / DS
+    var smoke = false          // FU
+    /// VC — visible from the field, not occurring at it. A shower you can see
+    /// across the valley is not a shower on your window.
+    var vicinity = false
 
     var raw = ""
 
@@ -84,14 +117,26 @@ struct Observation {
     var summary: String {
         var wx: [String] = []
         if thundering { wx.append("thunder") }
-        if raining    { wx.append(intensity > 0 ? "heavy rain" : intensity < 0 ? "light rain" : "rain") }
-        if snowing    { wx.append("snow") }
+        if squall     { wx.append("squall") }
+        if raining {
+            let str = intensity > 0 ? "heavy" : intensity < 0 ? "light" : "moderate"
+            let what = drizzle ? "drizzle" : hail ? "hail" : icePellets ? "ice pellets"
+                     : freezing ? "freezing rain" : "rain"
+            wx.append("\(str) \(showery ? "shower of " : "")\(what)")
+        }
+        if snowing    { wx.append(showery ? "snow shower" : "snow") }
+        if blowingSnow { wx.append("blowing snow") }
         if fog        { wx.append("fog") }
-        if haze       { wx.append("haze") }
+        if mist       { wx.append("mist") }
+        if smoke      { wx.append("smoke") }
+        if dust       { wx.append("dust") }
+        else if haze  { wx.append("haze") }
+        if vicinity   { wx.append("(in vicinity)") }
         if wx.isEmpty { wx.append("no precip") }
-        return String(format: "%@ %.0fkm %.0fmin ago | cloud %.0f%% (lo %.0f mid %.0f hi %.0f) | vis %.1fkm | %@",
+        return String(format: "%@ %.0fkm %.0fmin ago | cloud %.0f%% (lo %.0f mid %.0f hi %.0f) ceil %@ | vis %.1fkm | %@",
                       stationId, distanceKm, age / 60,
                       coverTotal, coverLow, coverMid, coverHigh,
+                      ceiling < 0 ? "none" : String(format: "%.0fm", ceiling),
                       visibility / 1000, wx.joined(separator: ", "))
     }
 }
@@ -187,16 +232,24 @@ enum ObservationService {
             }
         }
         var lo: Float = 0, mid: Float = 0, hi: Float = 0
+        var ceilingFt = Float.greatestFiniteMagnitude
+        var lowestFt = Float.greatestFiniteMagnitude
         for l in layers {
             let cover = (l["cover"] as? String) ?? ""
             let p = pct(cover)
             guard p > 0 else { continue }
             // A vertical-visibility report has no base; treat it as ground level.
             let base = (l["base"] as? NSNumber)?.floatValue ?? 0
+            lowestFt = min(lowestFt, base)
+            // "Ceiling" in aviation means the lowest layer of BKN or more —
+            // the height at which the sky is effectively closed over you.
+            if p >= 75 { ceilingFt = min(ceilingFt, base) }
             if base < 6500        { lo  = max(lo,  p) }
             else if base < 20000  { mid = max(mid, p) }
             else                  { hi  = max(hi,  p) }
         }
+        o.ceiling = ceilingFt < .greatestFiniteMagnitude ? ceilingFt * 0.3048 : -1
+        o.lowestBase = lowestFt < .greatestFiniteMagnitude ? lowestFt * 0.3048 : -1
         o.coverTotal = max(lo, max(mid, hi))
         o.coverLow   = lo
         o.coverMid   = max(0, mid - lo)
@@ -210,6 +263,14 @@ enum ObservationService {
     /// FG fog, BR mist, HZ haze, FU smoke, DU/SA dust and sand. "VC" means "in
     /// the vicinity" — visible from the field but not at it, so it is read as
     /// weather nearby rather than weather here.
+    /// A METAR group is `[intensity][descriptor][phenomenon]`, and the
+    /// DESCRIPTOR is the part that was being thrown away. `SH` means shower —
+    /// convective, cellular, brief. `FZ` means the drops are supercooled and
+    /// will glaze whatever they land on. `BL` and `DR` mean the snow is not
+    /// falling, it is being picked back up off the ground. `TS` means an
+    /// observer heard thunder. Those are measurements of morphology, made by a
+    /// person or an instrument at a known point, and they are worth more than
+    /// anything this program can derive from a grid-box average.
     private static func decodePresentWeather(_ s: String, into o: inout Observation) {
         guard !s.isEmpty else { return }
         let up = s.uppercased()
@@ -218,20 +279,55 @@ enum ObservationService {
             // Vicinity: something is going on, but not over the station. Keep
             // the haze/fog reading but do not claim it is raining here.
             let vicinity = t.hasPrefix("VC")
-            if vicinity { t.removeFirst(2) }
+            if vicinity { t.removeFirst(2); o.vicinity = true }
             if t.hasPrefix("-") { o.intensity = -1; t.removeFirst() }
             else if t.hasPrefix("+") { o.intensity = 1; t.removeFirst() }
 
+            // ---- descriptors
+            let shower = t.contains("SH")
+            let freezing = t.contains("FZ")
+            let blowing = t.contains("BL") || t.contains("DR")
+
+            // ---- phenomena
+            let rainLike = t.contains("RA")
+            let drizzleLike = t.contains("DZ")
+            let snowLike = t.contains("SN") || t.contains("SG") || t.contains("IC")
+            let hailLike = t.contains("GR") || t.contains("GS")
+            let pelletLike = t.contains("PL")
+
             if t.contains("TS") { o.thundering = !vicinity }
+            if t.contains("SQ") { o.squall = !vicinity }
             if !vicinity {
-                if t.contains("RA") || t.contains("DZ") { o.raining = true }
-                if t.contains("SN") || t.contains("SG") || t.contains("IC") { o.snowing = true }
-                if t.contains("GR") || t.contains("GS") || t.contains("PL") { o.raining = true }
+                if rainLike || drizzleLike { o.raining = true }
+                if snowLike { o.snowing = blowing ? o.snowing : true }
+                if hailLike || pelletLike { o.raining = true }
                 if t.contains("UP") { o.raining = true }     // unidentified precipitation
+
+                if drizzleLike { o.drizzle = true }
+                if hailLike { o.hail = true }
+                if pelletLike { o.icePellets = true }
+                if freezing && (rainLike || drizzleLike) { o.freezing = true }
+                if blowing && snowLike { o.blowingSnow = true }
+
+                // Shower against continuous. Only meaningful for something that
+                // is actually falling, and blowing snow is neither.
+                let falling = rainLike || drizzleLike || snowLike || hailLike || pelletLike
+                if falling && !blowing {
+                    if shower { o.showery = true } else { o.continuousPrecip = true }
+                }
             }
-            if t.contains("FG") || t.contains("BR") { o.fog = true }
-            if t.contains("HZ") || t.contains("FU") || t.contains("DU")
-                || t.contains("SA") || t.contains("PY") { o.haze = true }
+            // VCSH / VCTS deliberately set nothing beyond `vicinity`: convection
+            // in sight is worth knowing about for the gust front and is worth
+            // nothing at all as a claim about this window.
+
+            // ---- obscurations. Water droplets and dry aerosol are different
+            // substances and are kept apart.
+            if t.contains("FG") { o.fog = true }
+            if t.contains("BR") { o.mist = true }
+            if t.contains("FU") { o.smoke = true; o.haze = true }
+            if t.contains("DU") || t.contains("SA") || t.contains("PO")
+                || t.contains("SS") || t.contains("DS") { o.dust = true; o.haze = true }
+            if t.contains("HZ") || t.contains("PY") { o.haze = true }
         }
     }
 
@@ -289,9 +385,34 @@ extension WeatherState {
             gusts       = max(gusts, o.gusts)
             windDir     = o.windDir
             observedFog = o.fog
+            observedMist = o.mist
+            observedDryHaze = o.haze
+            // A measured cloud base, which the model does not report at all.
+            // -1 stays -1: "no ceiling" is a fact, not a missing value.
+            ceiling = o.ceiling
+        }
+
+        // What is in sight but not here. Useful for the gust front, which is by
+        // definition the part of a storm that arrives before the storm does.
+        if o.distanceKm <= Self.cloudReachKm {
+            observedVicinity = o.vicinity
         }
 
         if o.distanceKm <= Self.precipReachKm {
+            // The observer's own morphology and form. Recorded in both
+            // directions: "not showery" is as useful as "showery", because it
+            // is what stops a wall of monsoon CAPE from turning a steady
+            // frontal band into an imaginary squall.
+            let falling = o.raining || o.snowing
+            observedShowery    = falling ? o.showery : false
+            observedContinuous = falling ? o.continuousPrecip : false
+            observedDrizzle    = falling ? o.drizzle : false
+            observedFreezing   = falling ? o.freezing : false
+            observedHail       = falling ? o.hail : false
+            observedIcePellets = falling ? o.icePellets : false
+            observedSquall     = o.squall
+            observedBlowingSnow = o.blowingSnow
+
             if !o.raining && !o.snowing {
                 // Nothing is falling. Say so, in every field the scene reads —
                 // clearing only `rain` still leaves `precipitation` driving the
@@ -302,7 +423,16 @@ extension WeatherState {
                 // Only raise the model's number to the category's floor, never
                 // lower it: the model's millimetres are the better estimate of
                 // how hard, the observation is the better answer to whether.
-                let floor: Float = o.intensity > 0 ? 4.0 : o.intensity < 0 ? 0.25 : 1.2
+                //
+                // Written in mm/HOUR and converted to whatever window
+                // `precipitation` is currently accumulating over. Light,
+                // moderate and heavy rain are conventionally under 2.5, 2.5 to
+                // 7.6, and over 7.6 mm/h; at the usual 15-minute nowcast window
+                // these come out as the same 0.25 / 1.2 / 4.0 the scene was
+                // tuned against, and stay right when there is no nowcast and
+                // the number is an hourly total instead.
+                let perHour: Float = o.intensity > 0 ? 16 : o.intensity < 0 ? 1.0 : 4.8
+                let floor = perHour * max(15, precipWindow) / 60
                 if o.snowing { snow = max(snow, floor * 0.6) }
                 if o.raining { rain = max(rain, floor) }
                 precipitation = max(precipitation, max(rain, snow))

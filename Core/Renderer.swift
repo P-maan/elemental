@@ -22,11 +22,20 @@ final class ElementalRenderer {
     let device: MTLDevice
     private let queue: MTLCommandQueue
     private var cellPS: MTLRenderPipelineState!
+    private var heightPS: MTLRenderPipelineState!
     private var presentPS: MTLRenderPipelineState!
     private var glassPS: MTLRenderPipelineState!
 
     /// Pass A target: one texel per mosaic cell.
     private var cellTex: MTLTexture?
+    /// Pass H target: the relief height of each cell, same grid as cellTex.
+    /// Its own pass because the raycast reads a height ten times per pixel and
+    /// a good height needs to see a cell's neighbourhood — see PASS H.
+    private var heightTex: MTLTexture?
+    /// Pass A's second target: how much of what is behind the cloud still gets
+    /// through, per cell. The full-res pass knows where the moon is but not what
+    /// is in front of it; this is what tells it.
+    private var auxTex: MTLTexture?
     /// Per-cell water lookup for the presentation pass.
     private var glassTex: MTLTexture?
     /// Rain rasterised per cell, so streaks can lean with the wind.
@@ -73,6 +82,32 @@ final class ElementalRenderer {
     private var sceneTime: Double = 0
     private var lastFrameHost: CFTimeInterval = 0
     private var haveClock = false
+
+    /// Set by `markIdle()` and cleared by the frame that follows it. This is
+    /// the ONLY thing that makes a gap count as an idle.
+    ///
+    /// It used to be inferred from the length of the gap — anything over a
+    /// second was treated as a wake — and that inference is what turned every
+    /// hiccup into the stall-and-jump this file exists to avoid. A busy run
+    /// loop produces gaps of exactly the same size as a short occlusion, so
+    /// the two are indistinguishable by duration and have to be told apart by
+    /// someone who knows: the host that stopped asking for frames.
+    private var idleAnnounced = false
+
+    /// Longest interval one frame may advance the scene by.
+    ///
+    /// The procedural clock has no external referent — nothing outside this
+    /// renderer knows what `sceneTime` reads — so dropping a stalled interval
+    /// is invisible, while replaying it inside a single frame is precisely the
+    /// jump. Astronomy is not on this clock: the sun and moon come from
+    /// `state.astro`, which is wall-clock and stays correct across any gap.
+    private static let maxFrameStep: Double = 0.1
+
+    /// Scene seconds after which `Float(sceneTime)` is coarse enough to show.
+    /// The fastest term in the shader runs at 1.7 rad/s; at 2^18 seconds a
+    /// Float step is 1/32 s, i.e. 0.05 rad, which is still well under a frame.
+    /// Past that it grows, so the clock is rebased at the next idle.
+    private static let clockRebaseAfter: Double = 262_144
 
     /// Supplies astronomy for an arbitrary instant. Set by whichever host owns
     /// this renderer. Required for wake playback — without it the renderer has
@@ -151,7 +186,16 @@ final class ElementalRenderer {
         cellDesc.vertexFunction = library.makeFunction(name: "fullscreenVS")
         cellDesc.fragmentFunction = library.makeFunction(name: "cellPass")
         cellDesc.colorAttachments[0].pixelFormat = .rgba16Float
+        // Attachment 1: per-cell cloud transmission, for the full-res pass. See
+        // the CellOut note in Scene.metal.
+        cellDesc.colorAttachments[1].pixelFormat = .r16Float
         cellPS = try device.makeRenderPipelineState(descriptor: cellDesc)
+
+        let heightDesc = MTLRenderPipelineDescriptor()
+        heightDesc.vertexFunction = library.makeFunction(name: "fullscreenVS")
+        heightDesc.fragmentFunction = library.makeFunction(name: "heightPass")
+        heightDesc.colorAttachments[0].pixelFormat = .r16Float
+        heightPS = try device.makeRenderPipelineState(descriptor: heightDesc)
 
         let presentDesc = MTLRenderPipelineDescriptor()
         presentDesc.vertexFunction = library.makeFunction(name: "fullscreenVS")
@@ -208,6 +252,18 @@ final class ElementalRenderer {
         d.storageMode = .private
         cellTex = device.makeTexture(descriptor: d)
 
+        let h = MTLTextureDescriptor.texture2DDescriptor(
+            pixelFormat: .r16Float, width: sim.cols, height: sim.rows, mipmapped: false)
+        h.usage = [.renderTarget, .shaderRead]
+        h.storageMode = .private
+        heightTex = device.makeTexture(descriptor: h)
+
+        let ax = MTLTextureDescriptor.texture2DDescriptor(
+            pixelFormat: .r16Float, width: sim.cols, height: sim.rows, mipmapped: false)
+        ax.usage = [.renderTarget, .shaderRead]
+        ax.storageMode = .private
+        auxTex = device.makeTexture(descriptor: ax)
+
         let g = MTLTextureDescriptor.texture2DDescriptor(
             pixelFormat: .rgba32Float, width: sim.cols, height: sim.rows, mipmapped: false)
         g.usage = [.shaderRead]
@@ -243,23 +299,60 @@ final class ElementalRenderer {
             return (Float(sceneTime), step, 0)
         }
         let now = CACurrentMediaTime()
-        if !haveClock { lastFrameHost = now; haveClock = true }
-        let elapsed = max(0, now - lastFrameHost)
+        if !haveClock {
+            // First frame of this renderer's life. There is no previous frame
+            // to measure against, so there is no gap and nothing to catch up.
+            lastFrameHost = now
+            haveClock = true
+            idleAnnounced = false
+        }
+        // The true wall gap since the last frame we DREW. `markIdle` no longer
+        // touches `lastFrameHost`, so this reads correctly whether we stopped
+        // on purpose or the run loop simply took the time away from us.
+        let gap = max(0, now - lastFrameHost)
         lastFrameHost = now
 
-        // Coming back from an idle: rebase the origin so the Float we hand the
-        // shader stays small and exact. Invisible, because nothing was drawing.
-        if elapsed > 1.0 { sceneTime = 0 }
-        // Real elapsed time still governs the idle gap and the wake replay;
-        // only the scene's own clock is scaled.
-        let scaled = elapsed * motionSpeed
-        sceneTime += scaled
-        return (Float(sceneTime), Float(min(0.1, scaled)), Float(elapsed))
+        let wasIdle = idleAnnounced
+        idleAnnounced = false
+
+        // Rebase the origin only across an announced idle — a moment when
+        // nothing was on screen — and only once the Float handed to the shader
+        // has actually gone coarse. Rebasing restarts every drift term in the
+        // scene at once, so doing it while anyone is looking is a jump; doing
+        // it on every hiccup, which is what this used to do, is the bug.
+        //
+        // The simulation holds absolute timestamps off this clock (the next
+        // lightning strike, the next shooting star). Left alone across a
+        // rebase they sit far in the future and simply stop firing until the
+        // clock climbs back to meet them, which is hours. Re-seeding anchors
+        // them to the new origin.
+        if wasIdle && gap > 1.0 && sceneTime > Self.clockRebaseAfter {
+            sceneTime = 0
+            sim.seed(now: 0)
+        }
+
+        // One frame advances the scene by at most one frame's worth, however
+        // long the frame took to arrive.
+        let step = min(Self.maxFrameStep, gap * motionSpeed)
+        sceneTime += step
+        // A gap is only reported as an idle when a host said so. Everything
+        // downstream that catches up — the wake replay and the integrator
+        // fast-forward — keys off this, and neither should ever fire because
+        // the main thread was busy.
+        return (Float(sceneTime), Float(step), wasIdle ? Float(gap) : 0)
     }
 
     /// Call when the renderer stops being asked for frames, so the next frame
-    /// knows how long the gap was.
-    func markIdle() { haveClock = false }
+    /// knows the gap was deliberate rather than a stall.
+    func markIdle() {
+        idleAnnounced = true
+        // A replay describes a gap that has now been superseded by a longer
+        // one. Finishing it after the fact would replay the wrong interval,
+        // and leaving it in flight pins `isPlayingBack` true — which makes the
+        // host stop pushing astronomy, so the sky would stop for good.
+        playback = nil
+        isPlayingBack = false
+    }
 
     /// The scene is now somewhere else. Drops anything still falling from the
     /// old sky, and leaves the water already on the glass alone.
@@ -278,7 +371,7 @@ final class ElementalRenderer {
 
     private func beginPlaybackIfNeeded(gap: Double) {
         guard playbackOnWake, astroProvider != nil, playback == nil,
-              gap >= Self.playbackMinGap else { return }
+              gap.isFinite, gap >= Self.playbackMinGap else { return }
         // Longer gaps earn a longer replay, but sub-linearly — a night away
         // should not take four times as long to replay as an afternoon.
         let ceiling = max(0.8, playbackMaxSeconds)
@@ -357,6 +450,9 @@ final class ElementalRenderer {
         aDesc.colorAttachments[0].texture = cellTex
         aDesc.colorAttachments[0].loadAction = .dontCare
         aDesc.colorAttachments[0].storeAction = .store
+        aDesc.colorAttachments[1].texture = auxTex
+        aDesc.colorAttachments[1].loadAction = .dontCare
+        aDesc.colorAttachments[1].storeAction = .store
         if let e = cmd.makeRenderCommandEncoder(descriptor: aDesc) {
             e.setRenderPipelineState(cellPS)
             e.setFragmentBuffer(uniformBuf,  offset: 0, index: 0)
@@ -371,6 +467,23 @@ final class ElementalRenderer {
             e.endEncoding()
         }
 
+        // ---- Pass H: per-cell relief height. A handful of thousand fragments,
+        // so the neighbourhood analysis behind the emphasis curve is free here
+        // and would not be at full resolution.
+        if let heightTex {
+            let hDesc = MTLRenderPassDescriptor()
+            hDesc.colorAttachments[0].texture = heightTex
+            hDesc.colorAttachments[0].loadAction = .dontCare
+            hDesc.colorAttachments[0].storeAction = .store
+            if let e = cmd.makeRenderCommandEncoder(descriptor: hDesc) {
+                e.setRenderPipelineState(heightPS)
+                e.setFragmentBuffer(uniformBuf, offset: 0, index: 0)
+                e.setFragmentTexture(cellTex, index: 0)
+                e.drawPrimitives(type: .triangle, vertexStart: 0, vertexCount: 3)
+                e.endEncoding()
+            }
+        }
+
         // ---- Pass B (+C): full-res presentation
         let bDesc = MTLRenderPassDescriptor()
         bDesc.colorAttachments[0].texture = target
@@ -383,6 +496,8 @@ final class ElementalRenderer {
             e.setFragmentTexture(cellTex, index: 0)
             e.setFragmentTexture(glassTex, index: 1)
             e.setFragmentTexture(streakFineTex, index: 2)
+            e.setFragmentTexture(heightTex, index: 3)
+            e.setFragmentTexture(auxTex, index: 4)
             e.drawPrimitives(type: .triangle, vertexStart: 0, vertexCount: 3)
 
             // Superseded: water is now drawn inside presentPass, in-theme and
@@ -412,7 +527,12 @@ final class ElementalRenderer {
     private func uploadUniforms(sec: Float, clock: (sec: Float, dt: Float, wasIdle: Float)) {
         // ---- heading
         let target = state.headingTarget
-        if smoothedFacing.isNaN {
+        // A non-finite target would poison the easing permanently: NaN spreads
+        // into `smoothedFacing`, and from there into every angle the shader
+        // derives from it, with no way back. Hold the last good heading.
+        if !target.isFinite {
+            // nothing to ease toward
+        } else if smoothedFacing.isNaN {
             smoothedFacing = target                    // first frame: no swing
         } else {
             // Shortest way round the compass, so 350 -> 10 goes forward through
@@ -485,7 +605,7 @@ final class ElementalRenderer {
         if lo + md + hi < 0.02 && w.cover > 2 { lo = max(0, min(1, w.cover / 100)) }
         u.cloudLow = lo; u.cloudMid = md; u.cloudHigh = hi
         u.depthAmt   = max(0, min(1, state.reliefDepth))
-        u.lightAngle = state.lightAngle
+        u.emphAmt    = max(0, min(1, state.reliefEmphasis))
         u.lightInt   = max(0, min(1, state.lightIntensity))
         u.refractAmt = max(0, min(1, state.refraction))
         u.dispersAmt = max(0, min(1, state.dispersion))

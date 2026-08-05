@@ -28,14 +28,71 @@ struct Surface {
     var kind: Kind
 
     var top: Float { y }
+    var bottom: Float { y + h }
     var left: Float { x }
     var right: Float { x + w }
+
+    /// Does this thing have a visible underside for water to hang off?
+    ///
+    /// The dock sits on the bottom edge of the display, so what runs off its
+    /// underside runs off the screen. A widget or the menu bar has pane below
+    /// it, and that is where a drip line forms.
+    func hasUnderside(screenHeight H: Float) -> Bool { bottom < H - 1 }
 
     /// Does a point fall within this surface's horizontal span?
     func spans(_ px: Float) -> Bool { px >= x && px <= x + w }
 }
 
 enum Furniture {
+
+    /// Which desktop elements weather is allowed to mark, and how hard.
+    ///
+    /// The engine reads this rather than `Config` directly, so the simulation
+    /// stays free of file I/O and the screen saver — which cannot read
+    /// Application Support at all — still gets a complete, correct answer.
+    struct Options: Equatable {
+        var dock = true
+        var widgets = true
+        var menuBar = false
+        /// The whole looking-through-a-window layer: beads, runs, pooling.
+        var paneWater = true
+        /// 0 none, 1 full.
+        var furniture: Float = 1
+        var pane: Float = 1
+
+        init() {}
+        init(_ c: Config) {
+            dock      = c.wetDock
+            widgets   = c.wetWidgets
+            menuBar   = c.wetMenuBar
+            paneWater = c.paneWater
+            furniture = max(0, min(1, Float(c.furnitureWetness)))
+            pane      = max(0, min(1, Float(c.paneWaterAmount)))
+        }
+    }
+
+    /// The options in force. Hosts may assign this whenever the config changes;
+    /// `poll()` below keeps it current on its own if they never do.
+    static var options = Options()
+
+    private static var optionsLoadedAt: TimeInterval = -1e9
+    private static var configStamp: Date?
+
+    /// Pick up an edited config without the host having to push one.
+    ///
+    /// A stat every few seconds, and a decode only when the file has actually
+    /// changed — so the common case, which is that nothing changed, costs one
+    /// syscall a minute of wall-clock time and no allocation. Called from the
+    /// simulation's step, which is the one place that runs in every host.
+    static func poll(now: TimeInterval) {
+        guard now - optionsLoadedAt > 5 || optionsLoadedAt < 0 else { return }
+        optionsLoadedAt = now
+        let stamp = (try? Config.fileURL.resourceValues(forKeys: [.contentModificationDateKey]))?
+            .contentModificationDate
+        guard optionsLoadedAt < 0 || stamp != configStamp else { return }
+        configStamp = stamp
+        options = Options(Config.load())
+    }
 
     /// Desktop furniture for a screen: the menu bar and the dock.
     static func desktop(screen: NSScreen, widgets: [WidgetRect] = []) -> [Surface] {
@@ -46,9 +103,20 @@ enum Furniture {
 
         var out: [Surface] = []
 
-        // Deliberately NOT the menu bar. Water interacting with it looks wrong —
-        // it reads as a UI glitch rather than weather, and it is the one strip
-        // that is always present regardless of what you are doing.
+        // The menu bar is opt-IN and off by default. Water interacting with it
+        // reads as a UI glitch rather than as weather, and it is the one strip
+        // that is always present regardless of what you are doing — but on a
+        // desk where the dock is hidden it is the only lip there is, so the
+        // choice belongs to the user rather than to this file.
+        //
+        // Modelled from the top of the screen down, so its UNDERSIDE is the
+        // interesting edge: nothing can land on a strip flush with the top of
+        // the display, but water that has run over it hangs off the bottom lip
+        // and drips, which is what an eave does.
+        let topInset = Float(f.maxY - v.maxY) * scale
+        if options.menuBar && topInset > 1 {
+            out.append(Surface(x: 0, y: 0, w: W, h: topInset, kind: .menuBar))
+        }
 
         // Dock. visibleFrame gives the thickness exactly; the extent along its
         // edge comes from how many tiles it is holding.
@@ -68,19 +136,22 @@ enum Furniture {
             min(available * 0.96, items * (tile * scale * 1.09) + tile * scale)
         }
 
-        switch orientation {
+        switch options.dock ? orientation : "off" {
         case "left" where leftInset > 1:
             let h = span(along: H)
             out.append(Surface(x: 0, y: (H - h) / 2, w: leftInset, h: h, kind: .dock))
         case "right" where rightInset > 1:
             let h = span(along: H)
             out.append(Surface(x: W - rightInset, y: (H - h) / 2, w: rightInset, h: h, kind: .dock))
+        case "off":
+            break                                       // dock opted out
         default:
             if bottomInset > 1 {
                 let w = span(along: W)
                 out.append(Surface(x: (W - w) / 2, y: H - bottomInset, w: w, h: bottomInset, kind: .dock))
             }
         }
+        guard options.widgets else { return out }
         // Desktop widgets. macOS does not publish their positions, so these
         // come from config — populated by hand today, and the place a
         // screenshot-derived detector would write to later.
