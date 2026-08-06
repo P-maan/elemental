@@ -69,6 +69,19 @@ class Pane: NSViewController {
     var title_: String { "" }
     var symbol: String { "gearshape" }
 
+    /// The pinned area above the scroller. Empty and zero-height until a pane
+    /// puts something in it.
+    ///
+    /// The preview used to be the first card in the scrolling column, which put
+    /// it off the top of the window the moment you scrolled down to reach the
+    /// control you wanted to drag — and the preview matters MOST while that
+    /// control is moving. So it is parented outside the scroll view instead.
+    /// Nothing about how previews render or cache changes; this is only where
+    /// the view hangs.
+    private let headerHost = NSVisualEffectView()
+    private let headerContent = NSStackView()
+    private var headerCollapse: NSLayoutConstraint!
+
     override func loadView() {
         stack.orientation = .vertical
         // Cards are stretched to the pane width by `addCard`, one explicit
@@ -106,15 +119,77 @@ class Pane: NSViewController {
         backdrop.blendingMode = .behindWindow
         backdrop.state = .followsWindowActiveState
         backdrop.translatesAutoresizingMaskIntoConstraints = false
+
+        // ---- the pinned header
+        //
+        // Its own material and a hairline under it, so it reads as a header
+        // rather than as content that failed to scroll.
+        headerHost.material = .headerView
+        headerHost.blendingMode = .withinWindow
+        headerHost.state = .followsWindowActiveState
+        headerHost.translatesAutoresizingMaskIntoConstraints = false
+
+        headerContent.orientation = .horizontal
+        headerContent.alignment = .centerY
+        headerContent.spacing = 16
+        headerContent.translatesAutoresizingMaskIntoConstraints = false
+
+        let hairline = NSBox()
+        hairline.boxType = .separator
+        hairline.translatesAutoresizingMaskIntoConstraints = false
+
+        headerHost.addSubview(headerContent)
+        headerHost.addSubview(hairline)
+
+        backdrop.addSubview(headerHost)
         backdrop.addSubview(scroll)
+
+        // Collapsed until `installHeader` puts something in it. A pane with no
+        // preview then looks exactly as it did before.
+        headerCollapse = headerHost.heightAnchor.constraint(equalToConstant: 0)
+        headerCollapse.isActive = true
+
         NSLayoutConstraint.activate([
-            scroll.topAnchor.constraint(equalTo: backdrop.topAnchor),
+            headerHost.topAnchor.constraint(equalTo: backdrop.topAnchor),
+            headerHost.leadingAnchor.constraint(equalTo: backdrop.leadingAnchor),
+            headerHost.trailingAnchor.constraint(equalTo: backdrop.trailingAnchor),
+
+            headerContent.topAnchor.constraint(equalTo: headerHost.topAnchor, constant: 14),
+            headerContent.bottomAnchor.constraint(equalTo: headerHost.bottomAnchor, constant: -14),
+            headerContent.leadingAnchor.constraint(equalTo: headerHost.leadingAnchor,
+                                                   constant: UI.paneInset),
+            headerContent.trailingAnchor.constraint(lessThanOrEqualTo: headerHost.trailingAnchor,
+                                                    constant: -UI.paneInset),
+
+            hairline.leadingAnchor.constraint(equalTo: headerHost.leadingAnchor),
+            hairline.trailingAnchor.constraint(equalTo: headerHost.trailingAnchor),
+            hairline.bottomAnchor.constraint(equalTo: headerHost.bottomAnchor),
+
+            // The scroller takes everything below it. Its content is laid out
+            // against its own bounds, so the header cannot eat the last card —
+            // no content inset is involved.
+            scroll.topAnchor.constraint(equalTo: headerHost.bottomAnchor),
             scroll.leadingAnchor.constraint(equalTo: backdrop.leadingAnchor),
             scroll.trailingAnchor.constraint(equalTo: backdrop.trailingAnchor),
             scroll.bottomAnchor.constraint(equalTo: backdrop.bottomAnchor),
         ])
         view = backdrop
         build()
+    }
+
+    /// Pin `v` above the scroller, with `caption` beside it.
+    ///
+    /// Beside rather than under: the header's height is the one thing that has
+    /// to stay in hand — everything it takes comes out of the controls on a
+    /// short window — and a wide window has room to spare horizontally. So the
+    /// picture sets the height and the words fill the space next to it.
+    func installHeader(_ v: NSView, caption: String) {
+        headerCollapse.isActive = false
+        headerContent.addArrangedSubview(v)
+        let cap = captionLabel(caption, width: 300)
+        cap.translatesAutoresizingMaskIntoConstraints = false
+        cap.widthAnchor.constraint(lessThanOrEqualToConstant: 340).isActive = true
+        headerContent.addArrangedSubview(cap)
     }
 
     /// Subclasses populate `stack` here, through `addCard`.
@@ -221,20 +296,17 @@ class Pane: NSViewController {
     /// The scene this pane's previews should draw. Subclasses override.
     func heroSpec(_ config: Config) -> PreviewSpec? { nil }
 
-    /// Put a hero at the top of the pane, centred, over its caption.
+    /// Put a hero in the pane's pinned header, with its caption beside it.
+    ///
+    /// Drawn smaller than the render is: still 800x500 pixels of scene (one
+    /// shared renderer, one cache entry) shown at 320x200 points, because the
+    /// header's height comes straight out of the space the controls have on a
+    /// short window. A preview you can see while you drag the slider beats a
+    /// bigger one you cannot.
     func installHero(_ caption: String) {
-        let h = HeroPreview()
+        let h = HeroPreview(points: HeroPreview.pinnedPoints)
         hero = h
-        let cap = captionLabel(caption, width: HeroPreview.points.width)
-        cap.alignment = .center
-        let col = NSStackView(views: [h, cap])
-        col.orientation = .vertical
-        col.alignment = .centerX
-        col.spacing = 8
-        col.translatesAutoresizingMaskIntoConstraints = false
-        // Centred in the pane whatever the window width, without stretching the
-        // render — see ScenePreview.large.
-        addCard(centred(col))
+        installHeader(h, caption: caption)
     }
 
     // ---- relief strips
@@ -321,14 +393,18 @@ class Pane: NSViewController {
 
 /// Slider plus its read-out. `value` keeps the two in step in both directions.
 final class LabelledSlider {
-    let slider = NSSlider()
+    /// Supplied rather than made here, so a pane can hand in a `DetentSlider`
+    /// and get the same row with haptics on it.
+    let slider: NSSlider
     let label = NSTextField(labelWithString: "")
     let box = NSStackView()
     /// The full row, for showing and hiding.
     var container: NSView!
     private let format: (Double) -> String
 
-    init(range: ClosedRange<Double>, format: @escaping (Double) -> String) {
+    init(range: ClosedRange<Double>, format: @escaping (Double) -> String,
+         slider: NSSlider = NSSlider()) {
+        self.slider = slider
         self.format = format
         slider.minValue = range.lowerBound
         slider.maxValue = range.upperBound
@@ -374,6 +450,8 @@ final class GeneralPane: Pane {
     private var dispersS: LabelledSlider!
     private var frostS: LabelledSlider!
     private var splayS: LabelledSlider!
+    private var riseS: LabelledSlider!
+    private var iconPicker: AppIconPicker!
     /// The whole glass card. These three describe light passing THROUGH a
     /// block; a flat tile is opaque, so on flat the card goes away rather than
     /// sitting there doing nothing. A dead control is worse than a missing one.
@@ -403,6 +481,13 @@ final class GeneralPane: Pane {
         emphS = slider("Emphasis", 0...1, #selector(changed), pct)
         lightS = slider("Light", 0...1, #selector(changed), pct)
         splayS = slider("Splay", 0...1, #selector(changed), pct)
+        // No strip for this one. The three tiles under every other relief
+        // slider show what the setting looks like, and what this setting looks
+        // like is three identical pictures — it is a rate, and a still cannot
+        // hold one. A caption is the honest control here.
+        riseS = slider("Rise", 0...1, #selector(changed)) {
+            $0 < 0.005 ? "instant" : String(format: "%.1fs", 0.08 + $0 * $0 * 2.4)
+        }
 
         let relief = Card("Relief", symbol: "cube")
         relief.add(captionLabel("Every cell is a block pushed out of the wall by its own brightness, so "
@@ -411,9 +496,13 @@ final class GeneralPane: Pane {
         relief.add(reliefRow("Emphasis", emphS, \.emphasis))
         relief.add(reliefRow("Light", lightS, \.light))
         relief.add(reliefRow("Splay", splayS, \.splay))
+        relief.add(riseS.container)
         relief.note("Depth is how far the blocks stand out. Emphasis decides whether they follow "
                   + "features or plain tone. Light shades their side faces and the crevices between "
                   + "them. Splay unsettles the courses so the wall is not perfectly regular.")
+        relief.note("Rise is the one that moves: how long a block takes to grow or sink to a new "
+                  + "height as the sky changes, rather than being at it in the next frame. Instant "
+                  + "is how it behaved before.")
         addCard(relief)
 
         // ---- glass
@@ -440,6 +529,21 @@ final class GeneralPane: Pane {
         startup.note("Elemental has no Dock icon. Launching it again from Spotlight or Finder reopens "
                    + "these settings.")
         addCard(startup)
+
+        // ---- icon
+        iconPicker = AppIconPicker()
+        iconPicker.onPick = { [weak self] style in
+            guard let self, var c = self.owner?.config else { return }
+            c.appIcon = style
+            self.iconPicker.select(style)
+            self.owner?.commit(c, from: self)
+        }
+        let icon = Card("Icon", symbol: "app.badge")
+        icon.add(iconPicker)
+        icon.note("Which mark Elemental wears in Finder, Spotlight and its own alerts. Mark is the "
+                + "default. The choice is applied as a custom icon on the app bundle, so it does not "
+                + "touch anything inside it that is code-signed.")
+        addCard(icon)
 
         // ---- motion
         fpsPop = popup(Self.fpsChoices.map { "\($0) fps" }, #selector(changed))
@@ -485,10 +589,12 @@ final class GeneralPane: Pane {
         occludedCheck.state = c.renderWhenOccluded ? .on : .off
         lowPowerCheck.state = c.lowPowerOnBattery ? .on : .off
         lockSyncCheck.state = c.syncLockScreen ? .on : .off
+        iconPicker.select(c.appIcon)
         depthS.value = c.reliefDepth
         emphS.value = c.emphasis
         lightS.value = c.lightIntensity
         splayS.value = c.splay
+        riseS.value = c.reliefRise
         refractS.value = c.refraction
         dispersS.value = c.dispersion
         frostS.value = c.frost
@@ -526,10 +632,11 @@ final class GeneralPane: Pane {
         c.emphasis = emphS.value
         c.lightIntensity = lightS.value
         c.splay = splayS.value
+        c.reliefRise = riseS.value
         c.refraction = refractS.value
         c.dispersion = dispersS.value
         c.frost = frostS.value
-        for s in [depthS, emphS, lightS, splayS, refractS, dispersS, frostS] { s?.refresh() }
+        for s in [depthS, emphS, lightS, splayS, riseS, refractS, dispersS, frostS] { s?.refresh() }
         // Cheap now, expensive later — the split that keeps the window smooth.
         updateLivePreview(c)
         scheduleRangePreviews()
@@ -810,115 +917,12 @@ final class SurfacePane: Pane {
     }
 }
 
-// MARK: - Weather on the desktop
+// MARK: - Elements
 //
-// The wallpaper draws BEHIND the dock, the widgets and the menu bar, so weather
-// that lands on one of them shows in the space around it. Which of them you
-// want marked is a matter of taste and of what your desktop actually looks like
-// — a hidden dock has no lip to wet — so each is opt-out on its own. Until now
-// there was no UI for any of it.
-//
-// The picture here is a drawn schematic rather than a render: see the note on
-// FurnitureDiagram for why a thumbnail cannot answer this question and why
-// borrowing the global the engine reads would disturb the live wallpaper.
-
-final class WaterPane: Pane {
-
-    override var title_: String { "Weather" }
-    override var symbol: String { "cloud.rain" }
-
-    private var diagram: FurnitureDiagram!
-    private var dockCheck: NSButton!
-    private var widgetsCheck: NSButton!
-    private var menuBarCheck: NSButton!
-    private var furnitureS: LabelledSlider!
-    private var paneCheck: NSButton!
-    private var paneS: LabelledSlider!
-    private var furnitureRows: [NSView] = []
-    private var paneRows: [NSView] = []
-
-    override func build() {
-        diagram = FurnitureDiagram()
-        let cap = captionLabel("Highlighted parts of your screen are the ones weather is allowed to mark.",
-                               width: 240)
-        cap.alignment = .center
-        let col = NSStackView(views: [diagram, cap])
-        col.orientation = .vertical
-        col.alignment = .centerX
-        col.spacing = 8
-        col.translatesAutoresizingMaskIntoConstraints = false
-        addCard(centred(col))
-
-        let pct: (Double) -> String = { "\(Int(($0 * 100).rounded()))%" }
-
-        dockCheck = check("Dock", #selector(changed))
-        widgetsCheck = check("Desktop widgets", #selector(changed))
-        menuBarCheck = check("Menu bar", #selector(changed))
-        furnitureS = slider("Strength", 0...1, #selector(changed), pct)
-        furnitureRows = [furnitureS.container]
-
-        let furniture = Card("Weather on your desktop furniture", symbol: "macwindow")
-        furniture.add(captionLabel("Rain, spray and snow can gather around the edges of the things on "
-                                 + "your screen — a wet band along the lip of the dock, snow lying on "
-                                 + "a widget, frost blooming out from the menu bar."))
-        furniture.add(dockCheck)
-        furniture.add(widgetsCheck)
-        furniture.add(menuBarCheck)
-        furniture.add(furnitureS.container)
-        furniture.note("The menu bar is off by default: it is the one strip that is always there "
-                     + "whatever you are doing, and water on it reads as a UI glitch rather than as "
-                     + "weather. Strength dials the whole effect back without turning it off.")
-        addCard(furniture)
-
-        paneCheck = check("Water on the screen itself", #selector(changed))
-        paneS = slider("Strength", 0...1, #selector(changed), pct)
-        paneRows = [paneS.container]
-
-        let pane = Card("Water on the glass", symbol: "drop.degreesign")
-        pane.add(captionLabel("Droplets clinging, running and beading on the screen, as though you were "
-                            + "looking at the sky through a window."))
-        pane.add(paneCheck)
-        pane.add(paneS.container)
-        pane.note("Turning this off leaves the sky alone entirely.")
-        addCard(pane)
-    }
-
-    override func sync(_ c: Config) {
-        dockCheck.state = c.wetDock ? .on : .off
-        widgetsCheck.state = c.wetWidgets ? .on : .off
-        menuBarCheck.state = c.wetMenuBar ? .on : .off
-        furnitureS.value = c.furnitureWetness
-        paneCheck.state = c.paneWater ? .on : .off
-        paneS.value = c.paneWaterAmount
-        redraw(c)
-    }
-
-    private func redraw(_ c: Config) {
-        diagram.wetDock = c.wetDock
-        diagram.wetWidgets = c.wetWidgets
-        diagram.wetMenuBar = c.wetMenuBar
-        diagram.wetPane = c.paneWater
-        diagram.furniture = CGFloat(c.furnitureWetness)
-        diagram.pane = CGFloat(c.paneWaterAmount)
-        // A strength slider with nothing switched on has nothing to strengthen.
-        UI.setHidden(furnitureRows, !(c.wetDock || c.wetWidgets || c.wetMenuBar))
-        UI.setHidden(paneRows, !c.paneWater)
-    }
-
-    @objc private func changed() {
-        guard var c = owner?.config else { return }
-        c.wetDock = dockCheck.state == .on
-        c.wetWidgets = widgetsCheck.state == .on
-        c.wetMenuBar = menuBarCheck.state == .on
-        c.furnitureWetness = furnitureS.value
-        c.paneWater = paneCheck.state == .on
-        c.paneWaterAmount = paneS.value
-        furnitureS.refresh()
-        paneS.refresh()
-        redraw(c)
-        owner?.commit(c, from: self)
-    }
-}
+// The pane that owns the furniture on your screen — where it is, and what
+// weather is allowed to do to it — lives in ElementsPane.swift. It replaces the
+// old Weather pane, which had the same switches but no way to say where the
+// things being switched actually were.
 
 // MARK: - Location
 //
@@ -1041,9 +1045,24 @@ final class LocationPane: Pane, NSSearchFieldDelegate, NSTableViewDataSource, NS
         detectedLabel.stringValue = c.place.map {
             "\($0.name)   \(String(format: "%.3f", $0.latitude)), \(String(format: "%.3f", $0.longitude))"
         } ?? "Not set"
-        let have = c.place != nil
-        locationButton.isEnabled = !have
-        locationButton.title = have ? "Location Detected" : "Use Location Services"
+        // The recovery path has to stay reachable.
+        //
+        // This was `isEnabled = (c.place == nil)`: the button switched itself
+        // off the moment any place was stored and read "Location Detected"
+        // forever after. That is the one state in which it is most needed — a
+        // stored place is what you have when location worked ONCE and then
+        // stopped, which for an ad-hoc signed build is after every rebuild. The
+        // user was told location was working while the app had no grant at all
+        // and no way to ask for one.
+        //
+        // So: enabled whenever a fresh fix could actually help. Only a live,
+        // authorised, currently-followed location earns the passive label.
+        let blocked = owner?.delegate?.locationBlocked ?? false
+        let following = c.place != nil && c.isShowingDetectedPlace && !blocked
+        locationButton.isEnabled = !following
+        locationButton.title = following ? "Location Detected"
+                             : (c.place == nil ? "Use Location Services"
+                                               : "Update My Location")
 
         countLabel.stringValue = c.isPlaceListFull
             ? "\(saved.count) of \(Config.maxPlaces) cities — remove one to add another"
@@ -1358,7 +1377,7 @@ final class SettingsWindowController: NSObject, NSWindowDelegate {
             SurfacePane(role: .saver, title: "Screen Saver", symbol: "display",
                         blurb: "Fully animated, and the only animated surface that appears at the lock "
                              + "screen — macOS starts it after the idle timer."),
-            WaterPane(),
+            ElementsPane(),
             LocationPane(),
         ]
         panes.forEach { $0.owner = self }
@@ -1428,6 +1447,14 @@ final class SettingsWindowController: NSObject, NSWindowDelegate {
     ///
     /// `sender` is nil for changes from outside the panes (a resolved location,
     /// a config reload), and then everything syncs as before.
+    /// The window and its panes, for the offscreen verification harness.
+    ///
+    /// Reaching them is the only way to prove the window builds, lays out and
+    /// syncs without putting it on the user's screen — and "the settings window
+    /// crashes because a pane's controls are still nil" is a bug this project
+    /// has actually had. Nothing in the app calls this.
+    var inspectable: (window: NSWindow, panes: [Pane]) { (window, panes) }
+
     func commit(_ newConfig: Config, from sender: Pane? = nil) {
         config = newConfig
         delegate?.applyConfig(newConfig)

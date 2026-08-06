@@ -125,8 +125,21 @@ final class ElementalSaverView: ScreenSaverView {
                   source, resolved.effectivePlace.name, resolved.gridRows)
         }
         resolved.apply(to: &state)
-        // Grid changes need the textures rebuilding, which resize handles.
-        if resolved.gridRows != loadedConfig.gridRows { renderer?.state.gridRows = resolved.gridRows }
+        // A grid change needs the textures rebuilding, and only `resize` does
+        // that. The row count was being set here and the rebuild left to a
+        // `resize` that never came: it is called from `layout()`, which fires
+        // when the VIEW changes size — and a row count arriving on the config
+        // poll changes the cell pitch without the view moving at all. So the
+        // saver kept drawing the old grid until something resized it, which on
+        // a screen saver is never.
+        //
+        // Calling it unconditionally is free when nothing changed: the
+        // renderer's own guard compares the pixel size AND the row count, so a
+        // no-op poll returns immediately.
+        if resolved.gridRows != loadedConfig.gridRows {
+            renderer?.state.gridRows = resolved.gridRows
+            resizeIfNeeded()
+        }
         refreshAstro(cfg: resolved)
     }
 

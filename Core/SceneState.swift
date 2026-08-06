@@ -287,7 +287,12 @@ enum SceneKind: Int32, Codable {
 /// Live conditions — everything the forecast will tell us, because the engine
 /// draws better the more it knows. Defaults describe a clear, calm day, so the
 /// scene renders correctly with no weather source attached.
-struct WeatherState {
+///
+/// `Equatable` so the renderer can tell a NEW READING from a re-assignment of
+/// the one it already has — see `WeatherEaser`. Every stored property is a
+/// scalar, an optional scalar or an optional `Date`/`String`, so the synthesised
+/// `==` is exactly the right test and costs nothing worth measuring.
+struct WeatherState: Equatable {
 
     // ---- what it is
     var code: Int = 0
@@ -1177,6 +1182,317 @@ struct WeatherState {
     }
 }
 
+// MARK: - Easing a reading in
+//
+// A fetch lands every ten minutes and used to be ADOPTED: the moment the reply
+// parsed, the cover, the rain, the wind and the light all stepped to their new
+// values inside one frame. Nothing about a sky does that. The user's own
+// description of what is wrong with it is the specification for this type:
+//
+//     "in real life the clouds come, darken the sky, hide the sun, and then it
+//      rains. Conditions don't snap in or out."
+//
+// So a reading is a TARGET, not a state, and the scene chases it. The one rule
+// that makes this look right rather than merely smooth is that there is no
+// single smoothing constant, because the quantities do not share a timescale:
+//
+//     gusts            seconds        a gust is an event, not a level
+//     precipitation    1-5 minutes    a shower genuinely starts in a minute
+//     visibility       ~5 minutes     fog forms and lifts fast
+//     wind             ~1 minute      the mean speed behind the gusts
+//     cloud            ~20 minutes    a deck builds over tens of minutes
+//     temperature      ~30 minutes    air has thermal mass
+//     air quality      ~30 minutes    an aerosol load is a whole air mass
+//
+// and that the rates are ASYMMETRIC and PHASE-AWARE. Rain ramps in faster than
+// it tapers out; a deck that is arriving ahead of measured precipitation
+// thickens quickly; a deck that is clearing lingers long after the last drop,
+// which is the "and then it stops raining but stays grey" half of the same
+// sequence. `PrecipPhase` is what supplies that — see below.
+
+/// Chases a fetched reading instead of adopting it.
+///
+/// Hold one of these per renderer, hand it each fetch through `retarget`, and
+/// step it once a frame with `advance(dt:)`. What comes back out is the sky to
+/// draw: every measured quantity part-way from where it was to where the
+/// forecast says it is going, and every CLASSIFICATION (the WMO code, the
+/// observer's present-weather groups, the nowcast counters) taken from the
+/// reading as-is, because a classification has no midpoint to be at.
+///
+/// The scene's own derivations are left to do their work on the eased numbers:
+/// `effectiveKind`, `morphology`, `precipForm` and `lightTransmission` all key
+/// off measurements, so easing the measurements is enough to make the kind, the
+/// form and the light move continuously with them. That is the whole reason the
+/// easing sits here and not in the shader.
+struct WeatherEaser {
+
+    /// Time constants, in seconds, each the time to close ~63% of the gap.
+    /// Named rather than inlined so the tuning is one readable table.
+    enum Tau {
+        // ---- cloud. The deck is the slowest thing on screen and the one the
+        // complaint is really about.
+        /// Ordinary thickening and thinning.
+        static let cloud: Float = 1200            // 20 min
+        /// A deck arriving ahead of precipitation the nowcast has already
+        /// measured. This is the "the clouds come" step, and it is quick.
+        static let cloudArriving: Float = 420     // 7 min
+        /// After the rain stops. The deck does not evaporate with it.
+        static let cloudLingering: Float = 2700   // 45 min
+        /// Burning off on a drying day — slower than it built.
+        static let cloudBurningOff: Float = 1500  // 25 min
+
+        // ---- water. Fast, and asymmetric: rain arrives quicker than it leaves.
+        static let rainOnset: Float = 120
+        static let rainTaper: Float = 210
+        /// A shower is cellular. It is over you in under a minute.
+        static let showerOnset: Float = 45
+        static let showerTaper: Float = 150
+        /// Drizzle fades up and down out of a low deck; nothing about it is
+        /// sudden.
+        static let drizzleOnset: Float = 240
+        /// Snow starts and stops far more gently than rain at the same rate.
+        static let snowOnset: Float = 180
+        static let snowTaper: Float = 420
+        /// Lying snow. Accumulation and melt are hours, not minutes.
+        static let snowDepth: Float = 3600
+
+        // ---- wind
+        /// Gusts are seconds by definition.
+        static let gust: Float = 8
+        static let wind: Float = 45
+        /// A gust front is a downdraft hitting the ground. It arrives.
+        static let windSquall: Float = 15
+        static let windDir: Float = 150
+
+        // ---- air
+        static let temperature: Float = 1800      // 30 min
+        static let humidity: Float = 600
+        static let pressure: Float = 1800
+        static let visibility: Float = 300        // fog forms in minutes
+        static let uv: Float = 600
+        static let aerosol: Float = 1800          // an AQI is an air mass
+        static let convection: Float = 900
+        static let levels: Float = 1800           // freezing level, PBL top
+        static let ceiling: Float = 600
+        static let probability: Float = 600
+    }
+
+    /// What is being drawn. Starts on the defaults — a clear calm day — which
+    /// is what the scene renders before any fetch has landed.
+    private(set) var shown = WeatherState()
+    /// The last reading, with its nowcast clock run forward. Public so a host
+    /// can log what the sky is heading toward as well as where it has got to.
+    private(set) var target = WeatherState()
+    /// Whether a reading has ever landed. The FIRST one is adopted outright:
+    /// at launch there is no previous sky to ease away from, and easing in from
+    /// the clear-day defaults would spend twenty minutes drawing weather that
+    /// is not happening.
+    private(set) var hasReading = false
+
+    /// Take a new fetch.
+    mutating func retarget(_ w: WeatherState) {
+        guard hasReading else {
+            shown = w; target = w; hasReading = true
+            return
+        }
+        // Precipitation is an ACCUMULATION over a window, so the same number of
+        // millimetres means a different rate when the window changes — the
+        // hourly feed reports an hour, the 15-minute nowcast a quarter of one.
+        // Rescale what is on screen into the new reading's units first, or the
+        // eased value silently jumps by 4x at the seam.
+        let oldW = max(1, shown.precipWindow), newW = max(1, w.precipWindow)
+        if oldW != newW {
+            let f = newW / oldW
+            shown.precipitation *= f
+            shown.rain *= f
+            shown.showers *= f
+            shown.snow *= f
+        }
+        target = w
+    }
+
+    /// Adopt a reading with no easing at all. For the offscreen stills
+    /// exporter and the settings thumbnails, which draw a settled scene rather
+    /// than a moving one.
+    mutating func snap(to w: WeatherState) {
+        shown = w; target = w; hasReading = true
+    }
+
+    /// Step the scene toward the target and return what to draw.
+    ///
+    /// `dt` is scene seconds. A wake fast-forward can hand in the whole gap in
+    /// one call: exponential easing composes exactly over a step of any size,
+    /// so replaying an hour as a single 3600-second step lands on the same
+    /// place as 3600 one-second steps would.
+    mutating func advance(dt: Float) -> WeatherState {
+        guard hasReading, dt > 0, dt.isFinite else { return shown }
+        // Two hours of easing is fully settled for every constant in the table
+        // above, so a longer step buys nothing and only risks overflow.
+        let step = min(dt, 7200)
+
+        // ---- the nowcast clock runs on its own.
+        //
+        // `minutesToPrecip` is a countdown measured at fetch time. Freezing it
+        // between fetches makes `approachProgress` — and with it the pre-rain
+        // darkening — a staircase with a ten-minute tread. Running it forward
+        // is what turns the lead-in into the continuous thing the user
+        // described: the sky darkens all the way in, not in two steps.
+        let mins = step / 60
+        if target.nowcastSlots > 0 {
+            if target.minutesToPrecip >= 0 {
+                target.minutesToPrecip = max(0, target.minutesToPrecip - mins)
+            }
+            if target.minutesSincePrecip >= 0 {
+                target.minutesSincePrecip += mins
+            }
+        }
+
+        // Where in the arc of the event the READING says we are. This is what
+        // makes the deck lead the rain and lag it, and it is the reason
+        // PrecipPhase exists — it was computed and read by nothing but the
+        // diagnostics block until now.
+        let phase = target.precipPhase
+        let morph = target.morphology
+
+        // Everything not listed below is a classification, an observation or a
+        // counter, and is adopted whole: there is no halfway between "an
+        // observer reported hail" and "they did not".
+        var next = target
+
+        // ---- cloud
+        let deckTau = cloudTau(phase: phase, rising: target.cloudLow >= shown.cloudLow)
+        next.cover     = Self.ease(shown.cover,     target.cover,     step, deckTau)
+        next.cloudLow  = Self.ease(shown.cloudLow,  target.cloudLow,  step, deckTau)
+        next.cloudMid  = Self.ease(shown.cloudMid,  target.cloudMid,  step,
+                                   cloudTau(phase: phase, rising: target.cloudMid >= shown.cloudMid))
+        next.cloudHigh = Self.ease(shown.cloudHigh, target.cloudHigh, step, Tau.cloud)
+
+        // ---- water
+        let liquidTau = precipTau(phase: phase, morph: morph, frozen: false,
+                                  rising: target.precipAmount >= shown.precipAmount)
+        let solidTau = precipTau(phase: phase, morph: morph, frozen: true,
+                                 rising: target.snow >= shown.snow)
+        next.precipitation = Self.ease(shown.precipitation, target.precipitation, step, liquidTau, floor: 0.045)
+        next.rain          = Self.ease(shown.rain,          target.rain,          step, liquidTau, floor: 0.045)
+        next.showers       = Self.ease(shown.showers,       target.showers,       step, liquidTau, floor: 0.045)
+        next.snow          = Self.ease(shown.snow,          target.snow,          step, solidTau,  floor: 0.045)
+        next.snowDepth     = Self.ease(shown.snowDepth,     target.snowDepth,     step, Tau.snowDepth)
+        next.precipProbability = Self.ease(shown.precipProbability, target.precipProbability,
+                                           step, Tau.probability)
+
+        // ---- wind. The gust front is the one part of a storm that genuinely
+        // arrives before everything else, so when the reading says one is on
+        // its way the mean wind is allowed to move at nearly gust speed.
+        let windTau = (phase == .imminent && target.gusts >= 32) ? Tau.windSquall : Tau.wind
+        next.wind    = Self.ease(shown.wind,  target.wind,  step, windTau)
+        next.gusts   = Self.ease(shown.gusts, target.gusts, step, Tau.gust)
+        next.windDir = Self.easeAngle(shown.windDir, target.windDir, step, Tau.windDir)
+
+        // ---- air
+        next.temperature = Self.ease(shown.temperature, target.temperature, step, Tau.temperature)
+        next.apparent    = Self.ease(shown.apparent,    target.apparent,    step, Tau.temperature)
+        next.dewPoint    = Self.ease(shown.dewPoint,    target.dewPoint,    step, Tau.temperature)
+        next.humidity    = Self.ease(shown.humidity,    target.humidity,    step, Tau.humidity)
+        next.pressureMSL = Self.ease(shown.pressureMSL, target.pressureMSL, step, Tau.pressure)
+        next.surfacePressure = Self.ease(shown.surfacePressure, target.surfacePressure, step, Tau.pressure)
+        next.visibility  = Self.ease(shown.visibility,  target.visibility,  step, Tau.visibility)
+        next.uv          = Self.ease(shown.uv,          target.uv,          step, Tau.uv)
+
+        // ---- aerosol
+        next.aqi   = Self.ease(shown.aqi,   target.aqi,   step, Tau.aerosol)
+        next.pm25  = Self.ease(shown.pm25,  target.pm25,  step, Tau.aerosol)
+        next.pm10  = Self.ease(shown.pm10,  target.pm10,  step, Tau.aerosol)
+        next.smoke = Self.ease(shown.smoke, target.smoke, step, Tau.aerosol)
+
+        // ---- convection and the levels
+        next.cape        = Self.ease(shown.cape,        target.cape,        step, Tau.convection)
+        next.liftedIndex = Self.ease(shown.liftedIndex, target.liftedIndex, step, Tau.convection)
+        next.convectiveInhibition = Self.ease(shown.convectiveInhibition,
+                                              target.convectiveInhibition, step, Tau.convection)
+        next.freezingLevel = Self.ease(shown.freezingLevel, target.freezingLevel, step, Tau.levels)
+        next.boundaryLayer = Self.ease(shown.boundaryLayer, target.boundaryLayer, step, Tau.levels)
+
+        // ---- ceiling. -1 is "nobody measured one", which is not a height and
+        // must never be eased through: a station appearing or disappearing
+        // would otherwise sweep the cloud base up or down through the whole
+        // troposphere on its way to or from the sentinel.
+        next.ceiling = (shown.ceiling < 0 || target.ceiling < 0)
+            ? target.ceiling
+            : Self.ease(shown.ceiling, target.ceiling, step, Tau.ceiling)
+
+        shown = next
+        return shown
+    }
+
+    // ---- rate selection
+
+    /// How fast the deck moves, given where in the event we are.
+    private func cloudTau(phase: PrecipPhase, rising: Bool) -> Float {
+        switch phase {
+        case .imminent:   return rising ? Tau.cloudArriving : Tau.cloud
+        case .thickening: return rising ? Tau.cloudArriving * 1.6 : Tau.cloud
+        case .active:     return rising ? Tau.cloudArriving : Tau.cloudLingering
+        case .clearing:   return rising ? Tau.cloud : Tau.cloudLingering
+        case .clear:      return rising ? Tau.cloud : Tau.cloudBurningOff
+        }
+    }
+
+    /// How fast precipitation comes and goes. A shower is over you in a minute
+    /// and gone as quickly; frontal rain fades up and down; nothing stops dead.
+    private func precipTau(phase: PrecipPhase, morph: PrecipMorphology,
+                           frozen: Bool, rising: Bool) -> Float {
+        if frozen { return rising ? Tau.snowOnset : Tau.snowTaper }
+        switch morph {
+        case .showery, .squally:
+            return rising ? Tau.showerOnset : Tau.showerTaper
+        case .drizzle:
+            return rising ? Tau.drizzleOnset : Tau.rainTaper
+        case .steady, .none:
+            // Coming out of an event the deck is still there and the last of
+            // the rain trails off under it, so the taper is the slower one.
+            if !rising && phase == .clearing { return Tau.rainTaper * 1.25 }
+            return rising ? Tau.rainOnset : Tau.rainTaper
+        }
+    }
+
+    // ---- the arithmetic
+
+    /// Fraction of the remaining gap to close in `dt` at time constant `tau`.
+    @inline(__always)
+    private static func alpha(_ dt: Float, _ tau: Float) -> Float {
+        guard tau > 0 else { return 1 }
+        return 1 - exp(-dt / tau)
+    }
+
+    /// Exponential approach, with a floor that snaps the last sliver away.
+    ///
+    /// The floor matters for water specifically: `isPrecipitating` is gated at
+    /// 0.05mm, so an asymptote that never quite reaches zero would leave the
+    /// engine believing a trace of rain was falling for ever.
+    @inline(__always)
+    private static func ease(_ cur: Float, _ tgt: Float, _ dt: Float, _ tau: Float,
+                             floor: Float = 0) -> Float {
+        guard cur.isFinite else { return tgt }
+        guard tgt.isFinite else { return cur }
+        if cur == tgt { return cur }
+        let v = cur + (tgt - cur) * alpha(dt, tau)
+        return abs(tgt - v) <= floor ? tgt : v
+    }
+
+    /// The same, the shortest way round the compass — so a wind backing from
+    /// 350 to 10 degrees goes forward through north rather than sweeping the
+    /// long way round through south.
+    @inline(__always)
+    private static func easeAngle(_ cur: Float, _ tgt: Float, _ dt: Float, _ tau: Float) -> Float {
+        guard cur.isFinite, tgt.isFinite else { return tgt }
+        var d = (tgt - cur).truncatingRemainder(dividingBy: 360)
+        if d > 180 { d -= 360 } else if d < -180 { d += 360 }
+        var v = cur + d * alpha(dt, tau)
+        if v < 0 { v += 360 } else if v >= 360 { v -= 360 }
+        return v
+    }
+}
+
 // MARK: - Scene state
 
 /// The full description of what to draw, assembled on the CPU each frame.
@@ -1234,6 +1550,16 @@ struct SceneState {
     /// Per-block jitter of height, tilt and rotation, so the courses are not
     /// perfectly regular.
     var splay: Float = 0.15
+
+    /// How long a block takes to RISE to a new height, 0..1, where 0 is the old
+    /// behaviour — the height field is assigned, so a block that should be
+    /// taller simply is taller in the next frame.
+    ///
+    /// The height itself is still produced by `heightPass` from a cell's
+    /// prominence; this only decides how fast the displayed height chases the
+    /// one the shader just computed. See `ElementalRenderer.riseAlpha`, which
+    /// is where a wall of blocks becomes a wall of blocks that MOVES.
+    var reliefRise: Float = 0.4
 
     /// Skip the detail passes (moon terminator, sharp stars).
     var lowFX: Bool = false

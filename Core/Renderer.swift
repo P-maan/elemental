@@ -23,6 +23,9 @@ final class ElementalRenderer {
     private let queue: MTLCommandQueue
     private var cellPS: MTLRenderPipelineState!
     private var heightPS: MTLRenderPipelineState!
+    /// `heightPS` with blending on, so a new height eases into the old one
+    /// instead of replacing it. See `buildPipelines`.
+    private var heightRisePS: MTLRenderPipelineState!
     private var presentPS: MTLRenderPipelineState!
     private var glassPS: MTLRenderPipelineState!
 
@@ -50,7 +53,68 @@ final class ElementalRenderer {
         get { sim.surfaces }
         set { sim.surfaces = newValue }
     }
-    var state = SceneState()
+
+    // MARK: Scene state, and the weather transition layer
+    //
+    // `state` looks like a plain stored property and deliberately still reads
+    // like one at every call site — hosts assign `renderer.state.weather = w`,
+    // `renderer.state.astro = a` or a whole `SceneState` and nothing about that
+    // changed. What it does now is separate the two halves of a weather update:
+    //
+    //   the READING, which is where the sky is going, and
+    //   the SCENE, which is where it has got to.
+    //
+    // A fetch sets the first. The second chases it, once per frame, at a rate
+    // that depends on which quantity it is — see `WeatherEaser`. Doing it here
+    // rather than in each host means every surface gets it for free: desktop,
+    // lock still, screen saver and the previews all go through this renderer.
+    private var _state = SceneState()
+    private var easer = WeatherEaser()
+
+    var state: SceneState {
+        get { _state }
+        set {
+            let incoming = newValue.weather
+            _state = newValue
+            if easesTransitions {
+                // Only a genuinely NEW reading retargets, and the two things
+                // that are not one are both routine:
+                //
+                //   `state.astro = a`, once a minute, carries the weather it
+                //   read a line earlier straight back in; and
+                //
+                //   every host applies settings by reading the whole state,
+                //   changing the appearance fields and writing it back — which
+                //   hands us the value we are part-way THROUGH easing to. Taken
+                //   as a reading, that pins the target to wherever the sky had
+                //   got to and the transition stops dead, so touching any
+                //   slider in Settings would freeze the weather mid-move.
+                //
+                // So a write is a reading only when it matches neither what we
+                // are showing nor what we are already heading for.
+                if incoming != easer.target && incoming != easer.shown {
+                    easer.retarget(incoming)
+                }
+                _state.weather = easer.shown
+            } else {
+                easer.snap(to: incoming)
+            }
+        }
+    }
+
+    /// Force the transition layer on or off. `nil` — the default — means
+    /// automatic: eased on a live surface, snapped in the offscreen stills
+    /// exporter, which sets `fixedTimeStep` and whose whole contract is that
+    /// one call renders one settled frame rather than the start of a movement.
+    ///
+    /// Governs the relief rise as well as the weather, because they are the
+    /// same question: is this a scene that is running, or a picture of one.
+    var easeTransitions: Bool?
+
+    private var easesTransitions: Bool { easeTransitions ?? (fixedTimeStep == nil) }
+
+    /// What the last fetch actually said, as opposed to what is being drawn.
+    var weatherTarget: WeatherState { easer.target }
 
     // Persistent buffers. Sized generously on resize, never reallocated per frame.
     private var uniformBuf: MTLBuffer!
@@ -197,6 +261,35 @@ final class ElementalRenderer {
         heightDesc.colorAttachments[0].pixelFormat = .r16Float
         heightPS = try device.makeRenderPipelineState(descriptor: heightDesc)
 
+        // ---- the same pass, blended into the height already standing.
+        //
+        // The relief height is produced per cell by `heightPass` from that
+        // cell's prominence, and was ASSIGNED: a block whose target height
+        // changed was at the new height in the very next frame, which is the
+        // snap the rise setting exists to remove. Easing it wants to happen
+        // exactly where the height is fed, per cell, and the cheapest correct
+        // place to do that is the blend unit: with
+        //
+        //     src * blendColor + dst * (1 - blendColor)
+        //
+        // and the previous frame's height loaded as the destination, one pass
+        // over a few thousand texels IS the exponential approach, at no cost,
+        // with no second texture and without touching the shader. `blendColor`
+        // is set per frame from dt and the setting — see `riseAlpha`.
+        let riseDesc = MTLRenderPipelineDescriptor()
+        riseDesc.vertexFunction = library.makeFunction(name: "fullscreenVS")
+        riseDesc.fragmentFunction = library.makeFunction(name: "heightPass")
+        let ha = riseDesc.colorAttachments[0]!
+        ha.pixelFormat = .r16Float
+        ha.isBlendingEnabled = true
+        ha.rgbBlendOperation = .add
+        ha.alphaBlendOperation = .add
+        ha.sourceRGBBlendFactor = .blendColor
+        ha.destinationRGBBlendFactor = .oneMinusBlendColor
+        ha.sourceAlphaBlendFactor = .blendAlpha
+        ha.destinationAlphaBlendFactor = .oneMinusBlendAlpha
+        heightRisePS = try device.makeRenderPipelineState(descriptor: riseDesc)
+
         let presentDesc = MTLRenderPipelineDescriptor()
         presentDesc.vertexFunction = library.makeFunction(name: "fullscreenVS")
         presentDesc.fragmentFunction = library.makeFunction(name: "presentPass")
@@ -257,6 +350,9 @@ final class ElementalRenderer {
         h.usage = [.renderTarget, .shaderRead]
         h.storageMode = .private
         heightTex = device.makeTexture(descriptor: h)
+        // A fresh texture has undefined contents; nothing may blend against it
+        // until one full write has landed.
+        heightPrimed = false
 
         let ax = MTLTextureDescriptor.texture2DDescriptor(
             pixelFormat: .r16Float, width: sim.cols, height: sim.rows, mipmapped: false)
@@ -431,8 +527,25 @@ final class ElementalRenderer {
         if playback != nil { clock = advancePlayback(dt: clock.dt, clock: clock) }
         let sec = clock.sec
 
+        // ---- ease the sky toward the last reading.
+        //
+        // Before the simulation steps, because the rain, the glass and the
+        // streaks are all driven from `state.weather` and must see the sky
+        // that is about to be drawn rather than the one it is heading for.
+        //
+        // A wake hands the whole gap over in one call. That is not a fight
+        // with the fast-forward below, it is the same move: exponential easing
+        // composes exactly, so one 3600-second step lands precisely where an
+        // hour of 60fps steps would have. A replay instead advances on the
+        // replay's own accelerated dt, so the weather moves at the same speed
+        // as everything else the user is watching rush past.
+        let wokeUp = clock.wasIdle > 1.0 && playback == nil
+        if easesTransitions {
+            _state.weather = easer.advance(dt: wokeUp ? clock.wasIdle : clock.dt)
+        }
+
         // Step the integrators, catching up if we have just woken.
-        if clock.wasIdle > 1.0 && playback == nil {
+        if wokeUp {
             sim.fastForward(to: sec, elapsed: clock.wasIdle, state: state)
         } else {
             sim.step(dt: clock.dt, sec: sec, state: state)
@@ -471,16 +584,29 @@ final class ElementalRenderer {
         // so the neighbourhood analysis behind the emphasis curve is free here
         // and would not be at full resolution.
         if let heightTex {
+            // How much of the newly computed height to take this frame. 1 is
+            // the old behaviour: assign it. Anything less blends it into the
+            // height already standing, so the blocks rise and fall into place.
+            //
+            // The first frame after a rebuild — and the first after a wake,
+            // when nothing was on screen to see a movement — must take the
+            // whole thing through the UNBLENDED pipeline. A private texture's
+            // contents before its first write are undefined, and a NaN in
+            // there survives a blend of any weight (NaN * 0 is NaN) and would
+            // stand as a permanently broken block for the life of the process.
+            let a = (heightPrimed && !wokeUp) ? riseAlpha(dt: clock.dt) : 1
             let hDesc = MTLRenderPassDescriptor()
             hDesc.colorAttachments[0].texture = heightTex
-            hDesc.colorAttachments[0].loadAction = .dontCare
+            hDesc.colorAttachments[0].loadAction = a < 1 ? .load : .dontCare
             hDesc.colorAttachments[0].storeAction = .store
             if let e = cmd.makeRenderCommandEncoder(descriptor: hDesc) {
-                e.setRenderPipelineState(heightPS)
+                e.setRenderPipelineState(a < 1 ? heightRisePS : heightPS)
+                if a < 1 { e.setBlendColor(red: a, green: a, blue: a, alpha: a) }
                 e.setFragmentBuffer(uniformBuf, offset: 0, index: 0)
                 e.setFragmentTexture(cellTex, index: 0)
                 e.drawPrimitives(type: .triangle, vertexStart: 0, vertexCount: 3)
                 e.endEncoding()
+                heightPrimed = true
             }
         }
 
@@ -520,6 +646,27 @@ final class ElementalRenderer {
         if let drawable { cmd.present(drawable) }
         cmd.commit()
         if waitForCompletion { cmd.waitUntilCompleted() }
+    }
+
+    // MARK: - Relief rise
+
+    /// Whether `heightTex` holds a height from a previous frame that is safe
+    /// to blend against. Cleared whenever the texture is rebuilt.
+    private var heightPrimed = false
+
+    /// Fraction of a cell's newly computed height to adopt this frame.
+    ///
+    /// `state.reliefRise` is a feel control, not a time: squared, so the low
+    /// end of the slider stays useful, and mapped onto a time constant of a
+    /// twelfth of a second at the bottom to about two and a half seconds at
+    /// the top. Zero returns 1 — the height is assigned, exactly as it was
+    /// before this existed, through the unblended pipeline.
+    private func riseAlpha(dt: Float) -> Float {
+        guard easesTransitions else { return 1 }
+        let rise = max(0, min(1, state.reliefRise))
+        guard rise > 0.005, dt > 0, dt.isFinite else { return 1 }
+        let tau = 0.08 + rise * rise * 2.4
+        return max(0.02, min(1, 1 - exp(-dt / tau)))
     }
 
     // MARK: - Upload

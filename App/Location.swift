@@ -20,6 +20,14 @@ final class LocationService: NSObject, CLLocationManagerDelegate {
     var onResolve: ((Place) -> Void)?
     /// Called when location is unavailable, so the UI can offer manual entry.
     var onUnavailable: ((String) -> Void)?
+    /// Called when a quiet refresh could not run because there is no grant.
+    ///
+    /// This exists because the quiet path used to fail SILENTLY. `refreshIfAuthorised`
+    /// returned on an unmatched status with no log and no callback, so an app
+    /// that had lost its authorisation looked identical to an app that was
+    /// refreshing normally and finding it had not moved. The whole of "the scene
+    /// does not follow me when I travel" lived in that `default: break`.
+    var onNeedsAuthorisation: ((CLAuthorizationStatus) -> Void)?
 
     private var asked = false
 
@@ -31,44 +39,82 @@ final class LocationService: NSObject, CLLocationManagerDelegate {
 
     var authorization: CLAuthorizationStatus { manager.authorizationStatus }
 
+    /// Whether a fix can actually be requested right now.
+    ///
+    /// Tested by raw value rather than by case. On macOS `authorizedWhenInUse`
+    /// is marked unavailable and `authorized` is a deprecated alias for
+    /// `authorizedAlways` (both raw 3) — but the raw 4 that means when-in-use
+    /// can still arrive across the XPC boundary, and a `switch` written in the
+    /// obvious way sends it to `@unknown default` and calls it unauthorised.
+    /// Anything at or above `authorizedAlways` is a grant.
+    var isAuthorised: Bool { manager.authorizationStatus.rawValue >= 3 }
+
+    /// The status in words, for the log. Inferring authorisation from behaviour
+    /// is what made this bug take months; printing it makes it one line.
+    static func statusName(_ s: CLAuthorizationStatus) -> String {
+        switch s.rawValue {
+        case 0: return "notDetermined"
+        case 1: return "restricted"
+        case 2: return "denied"
+        case 3: return "authorizedAlways"
+        case 4: return "authorizedWhenInUse"
+        default: return "unknown(\(s.rawValue))"
+        }
+    }
+
+    private func log(_ what: String) {
+        NSLog("Elemental location: %@ [status=%@ servicesEnabled=%@]", what,
+              Self.statusName(manager.authorizationStatus),
+              CLLocationManager.locationServicesEnabled() ? "yes" : "no")
+    }
+
     /// Quietly get a fix, but ONLY if permission already exists.
     ///
     /// This is what the wake, unlock and periodic paths call. It must never
     /// show the permission dialog: those paths fire every time the lid opens,
-    /// and an app that asks again on every wake is intolerable. If we are not
-    /// authorised it simply does nothing and the scene keeps using the stored
-    /// location.
+    /// and an app that asks again on every wake is intolerable.
+    ///
+    /// What it must ALSO never do is fail invisibly, which is what it did. When
+    /// there is no grant the scene keeps using the stored location — that part
+    /// was right — but somebody has to be told, or the stored location is
+    /// simply the wrong city forever.
     func refreshIfAuthorised() {
-        switch manager.authorizationStatus {
-        case .authorized, .authorizedAlways:
-            manager.requestLocation()
-        default:
-            break
+        let st = manager.authorizationStatus
+        guard isAuthorised else {
+            log("quiet refresh skipped — not authorised")
+            onNeedsAuthorisation?(st)
+            return
         }
+        log("quiet refresh — requesting a fix")
+        manager.requestLocation()
     }
 
     /// Ask for permission and a single fix. Only from an explicit user action
     /// or genuine first run — never from a wake handler.
     func requestOnce() {
         asked = true
-        switch manager.authorizationStatus {
-        case .notDetermined:
+        let st = manager.authorizationStatus
+        if st == .notDetermined {
+            log("requesting authorisation")
             manager.requestWhenInUseAuthorization()
-        case .authorized, .authorizedAlways:
-            manager.requestLocation()
-        case .denied, .restricted:
-            onUnavailable?("Location Services is turned off for Elemental. "
-                         + "Enter a location manually in Settings, or enable it in "
-                         + "System Settings › Privacy & Security › Location Services.")
-        @unknown default:
-            onUnavailable?("Location is unavailable.")
+            return
         }
+        if isAuthorised {
+            log("already authorised — requesting a fix")
+            manager.requestLocation()
+            return
+        }
+        log("cannot request — authorisation refused")
+        onUnavailable?("Location Services is turned off for Elemental. "
+                     + "Enter a location manually in Settings, or enable it in "
+                     + "System Settings › Privacy & Security › Location Services.")
     }
 
     func locationManagerDidChangeAuthorization(_ m: CLLocationManager) {
+        log("authorisation changed")
         guard asked else { return }
+        if isAuthorised { m.requestLocation(); return }
         switch m.authorizationStatus {
-        case .authorized, .authorizedAlways: m.requestLocation()
         case .denied, .restricted:
             onUnavailable?("Location access was denied. Enter a location manually in Settings.")
         default: break
@@ -77,12 +123,21 @@ final class LocationService: NSObject, CLLocationManagerDelegate {
 
     func locationManager(_ m: CLLocationManager, didUpdateLocations locs: [CLLocation]) {
         guard let loc = locs.last else { return }
+        NSLog("Elemental location: fix %.4f, %.4f (±%.0fm) — reverse geocoding",
+              loc.coordinate.latitude, loc.coordinate.longitude, loc.horizontalAccuracy)
         reverseGeocode(loc) { [weak self] place in
+            NSLog("Elemental location: resolved to %@ (%.4f, %.4f)",
+                  place.name, place.latitude, place.longitude)
             DispatchQueue.main.async { self?.onResolve?(place) }
         }
     }
 
     func locationManager(_ m: CLLocationManager, didFailWithError error: Error) {
+        // Logged as well as reported. `onUnavailable` is only attached while the
+        // Settings window happens to be open, so for the ordinary case — agent
+        // running in the background for weeks — this was the error going
+        // nowhere at all.
+        log("FAILED: \(error.localizedDescription)")
         onUnavailable?("Could not determine location: \(error.localizedDescription)")
     }
 

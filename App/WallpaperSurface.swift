@@ -133,7 +133,14 @@ final class WallpaperSurface: NSObject, CAMetalDisplayLinkDelegate {
         // on the item count and tile size, and the screen's insets change when it
         // is hidden or moved. Recomputing is a UserDefaults read and a little
         // arithmetic, so there is no reason to cache it.
-        renderer.surfaces = Furniture.desktop(screen: screen, widgets: config.widgets)
+        //
+        // A dock the user has corrected on the Elements grid overrides the
+        // derived one — see Config.dockRect.
+        renderer.surfaces = applyingDockOverride(
+            Furniture.desktop(screen: screen, widgets: config.widgets),
+            override: config.dockRect,
+            pixelWidth: Float(px.width), pixelHeight: Float(px.height),
+            enabled: config.wetDock)
         applyFrameRate()
     }
 

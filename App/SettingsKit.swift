@@ -246,9 +246,18 @@ final class Card: NSBox {
 /// display the natural size is 1:1.
 final class HeroPreview: NSView {
 
+    /// Size in points this instance is drawn at. The RENDER size is always
+    /// `pixels`; this only decides how big the finished image is shown.
+    let displayPoints: NSSize
+
     static let pixels = ScenePreview.large
     static let points = NSSize(width: ScenePreview.large.width / 2,
                                height: ScenePreview.large.height / 2)
+    /// The size the hero is DRAWN at now that it lives in the pane's pinned
+    /// header rather than in the scrolling column. Same 800x500 render — same
+    /// renderer, same cache key — displayed smaller, because every point of
+    /// header height is a point the controls below do not get.
+    static let pinnedPoints = NSSize(width: 320, height: 200)
 
     private let imageView = NSImageView()
     private let placeholder = NSTextField(labelWithString: "")
@@ -256,8 +265,9 @@ final class HeroPreview: NSView {
     private var shown = -1
     private(set) var spec: PreviewSpec?
 
-    init() {
-        super.init(frame: NSRect(origin: .zero, size: Self.points))
+    init(points: NSSize = HeroPreview.points) {
+        self.displayPoints = points
+        super.init(frame: NSRect(origin: .zero, size: points))
         translatesAutoresizingMaskIntoConstraints = false
         wantsLayer = true
         layer?.cornerRadius = 12
@@ -282,8 +292,8 @@ final class HeroPreview: NSView {
 
         addSubview(back); addSubview(placeholder); addSubview(imageView)
         NSLayoutConstraint.activate([
-            widthAnchor.constraint(equalToConstant: Self.points.width),
-            heightAnchor.constraint(equalToConstant: Self.points.height),
+            widthAnchor.constraint(equalToConstant: displayPoints.width),
+            heightAnchor.constraint(equalToConstant: displayPoints.height),
             back.topAnchor.constraint(equalTo: topAnchor),
             back.leadingAnchor.constraint(equalTo: leadingAnchor),
             back.trailingAnchor.constraint(equalTo: trailingAnchor),
@@ -335,111 +345,10 @@ func formRow(_ title: String, _ control: NSView) -> NSView {
 
 // MARK: - The desktop schematic
 //
-// The furniture-water switches are the one group in the window that cannot be
-// shown with a render. The wallpaper draws behind the dock, the widgets and the
-// menu bar, and which of those weather is allowed to mark is a property of the
-// SCREEN, not of the scene — a 380-point thumbnail of the sky says nothing
-// about it. Worse, the engine reads those switches from `Furniture.options`,
-// which is global and shared with the wallpaper that is running right now;
-// twiddling it to render a preview would make the real desktop flicker.
-//
-// So this is a drawing rather than a render: a little screen with its menu bar,
-// dock and widgets, and whichever of them weather is allowed to mark lit up.
-// It costs nothing, updates instantly, and answers the question the switches
-// actually raise, which is "which part of my screen is that".
-
-final class FurnitureDiagram: NSView {
-
-    var wetDock = true { didSet { needsDisplay = true } }
-    var wetWidgets = true { didSet { needsDisplay = true } }
-    var wetMenuBar = false { didSet { needsDisplay = true } }
-    var wetPane = true { didSet { needsDisplay = true } }
-    /// 0...1, dims the highlight the way the amount sliders dim the effect.
-    var furniture: CGFloat = 1 { didSet { needsDisplay = true } }
-    var pane: CGFloat = 1 { didSet { needsDisplay = true } }
-
-    override init(frame: NSRect) {
-        super.init(frame: frame)
-        translatesAutoresizingMaskIntoConstraints = false
-        widthAnchor.constraint(equalToConstant: 240).isActive = true
-        heightAnchor.constraint(equalToConstant: 150).isActive = true
-        setAccessibilityRole(.image)
-    }
-    required init?(coder: NSCoder) { fatalError() }
-
-    override var isFlipped: Bool { true }
-
-    override func draw(_ dirty: NSRect) {
-        let r = bounds.insetBy(dx: 6, dy: 6)
-        let wet = NSColor.controlAccentColor
-
-        // The screen, standing in for the wallpaper behind everything.
-        let screen = NSBezierPath(roundedRect: r, xRadius: 8, yRadius: 8)
-        NSColor.windowBackgroundColor.setFill()
-        screen.fill()
-
-        // The sky, as a plain vertical wash — this is a diagram, not a render,
-        // and pretending otherwise would misrepresent it.
-        NSGraphicsContext.saveGraphicsState()
-        screen.addClip()
-        let sky = NSGradient(colors: [
-            NSColor(calibratedRed: 0.20, green: 0.42, blue: 0.72, alpha: 1),
-            NSColor(calibratedRed: 0.62, green: 0.76, blue: 0.90, alpha: 1),
-        ])
-        sky?.draw(in: r, angle: -90)
-
-        if wetPane {
-            // Beading on the glass: scattered dots over the whole screen.
-            NSColor.white.withAlphaComponent(0.16 + 0.34 * pane).setFill()
-            var seed: UInt64 = 0x9E3779B97F4A7C15
-            func rnd() -> CGFloat {
-                seed = seed &* 6364136223846793005 &+ 1442695040888963407
-                return CGFloat((seed >> 33) % 10_000) / 10_000
-            }
-            for _ in 0..<70 {
-                let d = 1.2 + rnd() * 2.6
-                let x = r.minX + rnd() * r.width, y = r.minY + rnd() * r.height
-                NSBezierPath(ovalIn: NSRect(x: x, y: y, width: d, height: d)).fill()
-            }
-        }
-        NSGraphicsContext.restoreGraphicsState()
-
-        func plate(_ rect: NSRect, radius: CGFloat, on: Bool, label: String) {
-            let p = NSBezierPath(roundedRect: rect, xRadius: radius, yRadius: radius)
-            NSColor.windowBackgroundColor.withAlphaComponent(0.92).setFill()
-            p.fill()
-            if on {
-                wet.withAlphaComponent(0.30 + 0.45 * furniture).setFill()
-                p.fill()
-                wet.setStroke()
-                p.lineWidth = 1.5
-                p.stroke()
-            } else {
-                NSColor.separatorColor.setStroke()
-                p.lineWidth = 1
-                p.stroke()
-            }
-            let a: [NSAttributedString.Key: Any] = [
-                .font: NSFont.systemFont(ofSize: 8, weight: on ? .semibold : .regular),
-                .foregroundColor: on ? NSColor.labelColor : NSColor.secondaryLabelColor,
-            ]
-            let s = NSAttributedString(string: label, attributes: a)
-            let sz = s.size()
-            s.draw(at: NSPoint(x: rect.midX - sz.width / 2, y: rect.midY - sz.height / 2))
-        }
-
-        // Menu bar across the top, dock along the bottom, two widgets at the right.
-        plate(NSRect(x: r.minX, y: r.minY, width: r.width, height: 14),
-              radius: 3, on: wetMenuBar, label: "menu bar")
-        plate(NSRect(x: r.midX - 52, y: r.maxY - 26, width: 104, height: 20),
-              radius: 8, on: wetDock, label: "dock")
-        plate(NSRect(x: r.maxX - 54, y: r.minY + 24, width: 46, height: 34),
-              radius: 6, on: wetWidgets, label: "widget")
-        plate(NSRect(x: r.maxX - 54, y: r.minY + 64, width: 46, height: 22),
-              radius: 6, on: wetWidgets, label: "widget")
-
-        NSColor.separatorColor.setStroke()
-        screen.lineWidth = 1
-        screen.stroke()
-    }
-}
+// There used to be a `FurnitureDiagram` here: a drawn miniature of a screen with
+// its menu bar, dock and two notional widgets, lit up according to which of them
+// weather was allowed to mark. It has been replaced by `DesktopGridView` in
+// DesktopGrid.swift, which draws the user's ACTUAL screen shape with their
+// actual widgets on it — and lets them be dragged. A diagram of a generic
+// desktop was the right answer while the widget rectangles were unknowable; it
+// is the wrong one now that they can be handed in.

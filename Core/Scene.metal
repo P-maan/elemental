@@ -98,130 +98,343 @@ inline float skyBr(float sAlt) {
     return 1.0f;
 }
 
-// Sky gradient for a screen-space y fraction (roomstand.py:2186)
+// ================================================================ SKY COLOUR
 //
-// `deckF` is NOT total cover. It is how much of the sky is behind something
-// OPAQUE — low deck at full weight, mid most of the way, high cirrus barely at
-// all. Blue survives a cirrus veil (it goes milky, it does not go grey), and it
-// does not survive a stratus lid. Feeding total cover in here is what made a
-// sky of pure high cloud blanch as hard as a rain deck.
-inline float3 skyRGB(float sAlt, float yFrac, float aqiF, float deckF, float smokeF) {
-    float a = clamp(sAlt, -20.0f, 90.0f);
-    // How far down the frame the HORIZON colour reaches.
-    //
-    // This was 0.72, which is the wrong way round: an exponent below one pulls
-    // the horizon colour UP the frame, so at mid-height — 42 degrees of
-    // altitude, where the sky is still deep blue — the gradient was already
-    // two thirds of the way to the pale horizon tint. That is the single
-    // reason the bottom half of a daytime frame reads as flat grey-lavender
-    // instead of blue, and at twilight it is what smeared the warm horizon
-    // band over the entire sky.
-    //
-    // Above one, the horizon tint stays where it belongs: a band low down,
-    // with blue holding all the way to the zenith.
-    float h = min(1.0f, powr(max(yFrac, 0.0f), 1.6f));
-    float tr, tg, tb, hr, hg, hb;
-    if (a <= -18.0f)      { tr=3;  tg=5;  tb=14; hr=7;  hg=9;  hb=20; }
-    else if (a <= -12.0f) { float f=(a+18.0f)/6.0f;
-        tr=skl(3,8,f);    tg=skl(5,12,f);   tb=skl(14,26,f);
-        hr=skl(7,18,f);   hg=skl(9,16,f);   hb=skl(20,38,f); }
-    else if (a <= -6.0f)  { float f=(a+12.0f)/6.0f;
-        tr=skl(8,20,f);   tg=skl(12,30,f);  tb=skl(26,62,f);
-        hr=skl(18,44,f);  hg=skl(16,40,f);  hb=skl(38,58,f); }
-    // Civil twilight / blue hour.
-    //
-    // The horizon ran skl(55,195) / skl(32,95) / skl(68,118) — green BELOW
-    // both red and blue at every point on the ramp. That is magenta, and it is
-    // not a colour the sky is ever any part of; combined with the gradient
-    // exponent above spreading it over the whole frame it is exactly the
-    // uniform purple-maroon that -5 degrees came out as.
-    //
-    // The far end was also discontinuous with the golden-hour branch that
-    // follows it: (195,95,118) pink here against (255,155,80) orange there,
-    // switching at a = -0.83. On a timeline that is a visible jump between two
-    // consecutive frames. It now lands on the same orange it hands over to.
-    else if (a <= -0.83f) { float f=(a+6.0f)/5.17f;
-        tr=skl(20,38,f);  tg=skl(30,48,f);  tb=skl(62,105,f);
-        hr=skl(44,250,f); hg=skl(40,152,f); hb=skl(58,84,f); }
-    else if (a <= 5.0f)   { float f=a/5.0f;              // golden hour
-        tr=skl(38,70,f);  tg=skl(48,85,f);  tb=skl(105,165,f);
-        hr=skl(255,255,f);hg=skl(155,205,f);hb=skl(80,125,f); }
-    else if (a <= 14.0f)  { float f=(a-5.0f)/9.0f;       // morning/evening ramp
-        tr=skl(70,48,f);  tg=skl(85,115,f); tb=skl(165,220,f);
-        hr=skl(255,215,f);hg=skl(205,215,f);hb=skl(125,238,f); }
-    else if (a <= 42.0f)  { float f=(a-14.0f)/28.0f;
-        tr=skl(48,20,f);  tg=skl(115,130,f);tb=skl(220,238,f);
-        hr=skl(215,172,f);hg=skl(215,208,f);hb=skl(238,242,f); }
-    else                  { tr=20; tg=130; tb=238; hr=172; hg=208; hb=242; }
+// What replaced the table, and why.
+//
+// Everything below used to be a stack of hand-picked RGB triples interpolated
+// by sun altitude — ported from roomstand.py and nudged by eye ever since. Every
+// colour bug this project has had came out of it: an inverted gradient exponent,
+// a civil-twilight ramp with green below both red and blue at every point (that
+// is magenta, and the sky is never any part of magenta), a cover blend capped at
+// 28% so a raining sky stayed bright blue. Those were each fixed in place, which
+// is the problem — a table has no way to be right, only ways to be less wrong.
+//
+// So the clear sky is now COMPUTED. Single-scattering airlight, per sRGB
+// primary, from published optical depths:
+//
+//   Rayleigh   tau_R(lam) = 0.008569 lam^-4 (1 + 0.0113 lam^-2 + 0.00013 lam^-4)
+//              -> (0.0683, 0.0973, 0.2213) at 600/550/450nm, sea level.
+//   Aerosol    Angstrom tau_a(lam) = beta lam^-alpha.
+//   Airmass    Kasten & Young (1989): 1 at the zenith, 37.9 at the horizon.
+//
+// Those three give nearly all of it for free, and each is a MEASUREMENT rather
+// than a preference:
+//
+//   * the zenith is blue because tau_B is 3.2x tau_R and the path is short, so
+//     the scattering stays selective;
+//   * the horizon is pale because the path is ~38 airmasses, every channel
+//     saturates at (1 - e^-tau*m) -> 1, and what is left is white. This is why
+//     an overcast is grey rather than a dimmer blue, and it is the distinction
+//     the old table could not express at all;
+//   * a low sun goes orange because the beam LIGHTING the air has crossed the
+//     same 38 airmasses and lost its blue before it ever scatters;
+//   * haze whitens because aerosol at alpha~1.3 is barely selective
+//     (0.89/1.00/1.30 across RGB against Rayleigh's 0.70/1.00/2.27), and thick
+//     mist whitens completely because droplets in the geometric regime scatter
+//     every wavelength alike (alpha -> 0).
+//
+// Cross-checked against measured daylight. Converting the model's blue/red ratio
+// to a correlated colour temperature through the CIE daylight locus
+// (x_D cubic in 1/T; y_D = -3.000 x^2 + 2.870 x - 0.275) gives:
+//
+//   noon zenith        8500 K      45 deg up, noon      12000 K
+//   noon horizon       7300 K      sun 15 deg, horizon   4400 K
+//   sun 5 deg, zenith 11400 K      sun 5 deg, horizon    3000 K
+//   V = 2km mist       5700 K      V = 5km haze          6100 K
+//
+// Published clear-sky skylight runs 5400-33000 K (Hernandez-Andres et al.,
+// JOSA A 18, 1325, Granada, 2600 spectra), so every one of those sits inside the
+// measured band, and the ORDERING is right: zenith cool, horizon warm, warm band
+// low while the zenith stays blue at golden hour, haze pulling everything toward
+// neutral. That last check is the one the table failed.
+//
+// Twilight follows Lynch, Dearborn & Lock, "Antitwilight I: structure and
+// optics", Appl. Opt. 56(19) G156 (2017) — see the twilight block below.
+// Overcast chromaticity is 6415 K (Chain, Dumontier & Fontoynont; mean of Lee &
+// Hernandez-Andres' 9100 spectra is 6358 K) — near-neutral, very slightly blue,
+// and uniform over the hemisphere.
 
-    float hk = h * h * (3.0f - 2.0f * h);
-    float r = tr + (hr - tr) * hk, g = tg + (hg - tg) * hk, b = tb + (hb - tb) * hk;
+// Rayleigh optical depth of the whole sea-level atmosphere at the sRGB primaries.
+constant float3 TAU_RAYLEIGH = float3(0.0683f, 0.0973f, 0.2213f);
+// Linear-light luminance weights (Rec.709 / sRGB).
+constant float3 LUMW = float3(0.2126f, 0.7152f, 0.0722f);
 
-    // aerosol haze: mild brown from pollution, red-orange from wildfire smoke
-    float sm = smokeF;
-    if (aqiF > 0.0f || sm > 0.0f) {
-        float hz = (aqiF * 0.28f + sm * 0.40f) * powr(max(yFrac, 0.0f), 1.3f - sm * 0.55f) * skyBr(sAlt);
-        float hzR = 150.0f + aqiF * 78.0f + sm * 52.0f;
-        float hzG = 120.0f + aqiF *  6.0f - sm * 34.0f;
-        float hzB =  82.0f - aqiF * 24.0f - sm * 40.0f;
-        r += (hzR - r) * hz; g += (hzG - g) * hz; b += (hzB - b) * hz;
-        float avg = (r + g + b) / 3.0f, ds = aqiF * 0.07f * (1.0f - sm);
-        r += (avg - r) * ds; g += (avg - g) * ds; b += (avg - b) * ds;
+// Relative optical airmass, Kasten & Young (1989). 1.0 at the zenith, 37.9 at
+// the horizon — the plain 1/cos(z) it replaces diverges there, which is exactly
+// where all the interesting colour is.
+inline float airmassKY(float zenithDeg) {
+    float z = min(zenithDeg, 91.5f);
+    return 1.0f / (cos(z * (M_PI_F / 180.0f))
+                   + 0.50572f * powr(96.07995f - z, -1.6364f));
+}
+
+// Clear-sky airlight, linear, per sRGB primary. Not normalised: the caller takes
+// the chroma from it and sets the exposure separately, so the verified
+// brightness ramp is left alone.
+//
+//   viewAlt   degrees above the horizon for this cell
+//   cosGamma  cosine of the angle between the view ray and the sun
+//   tauA      aerosol optical depth at 550nm, vertical
+inline float3 airlight(float sunAlt, float viewAlt, float cosGamma, float tauA) {
+    // Angstrom exponent falls as the aerosol coarsens: ~1.3 for dry continental
+    // haze, ~0 for fog and cloud droplets, which are large enough to be in the
+    // geometric regime and scatter every wavelength alike. Ramping it with the
+    // load is why 2km-visibility mist comes out white here instead of the warm
+    // brown a fixed exponent gave.
+    float alpha = 1.3f / (1.0f + 2.2f * tauA);
+    float3 rel  = powr(float3(0.600f, 0.550f, 0.450f), -alpha);
+    float3 tA   = tauA * (rel / rel.y);
+    float3 tau  = TAU_RAYLEIGH + tA;
+
+    float mV = airmassKY(90.0f - viewAlt);
+    float mS = airmassKY(90.0f - max(sunAlt, 0.0f));
+    // The sun's airmass AT THE HEIGHT this view ray mostly scatters from. A
+    // zenith ray scatters high in the column, where the beam has only thin air
+    // left to cross; a horizon ray scatters low, where the beam has crossed
+    // everything. Without this term one sun airmass serves the whole sky and
+    // sunset turns the ZENITH orange, which is not what a sunset looks like —
+    // measured antitwilight has the upper sky still blue at 0 degrees and only
+    // reaching neutral around -2.
+    float f   = 0.10f + 0.90f * powr(1.0f - saturate(viewAlt / 90.0f), 2.2f);
+    float mSe = 1.0f + (mS - 1.0f) * f;
+
+    // Phase functions: Rayleigh is symmetric and mild, aerosol is sharply
+    // forward. The aureole round a low sun, and the warm band that goes with
+    // it, is the Mie term — which is also why that band is on the SUN's side of
+    // the frame and not smeared round the whole horizon.
+    float pR = 0.75f * (1.0f + cosGamma * cosGamma);
+    const float g = 0.76f;
+    // Capped at 6. A single Henyey-Greenstein lobe reproduces real aerosol
+    // backscatter well (~0.2 at 90 degrees, which is what keeps the sky blue
+    // away from the sun) but smears the narrow Mie diffraction peak — a few
+    // degrees wide in truth — across fifteen or more. Uncapped it whitened the
+    // whole upper frame whenever the sun was high, since at 85 degrees of
+    // altitude every azimuth is within about 25 degrees of a noon sun.
+    float pM = min((1.0f - g * g)
+                   * powr(max(1.0f + g * g - 2.0f * g * cosGamma, 1e-4f), -1.5f), 6.0f);
+
+    float3 beam     = exp(-tau * mSe);                  // sun, reddened by its own path
+    float3 phase    = (TAU_RAYLEIGH * pR + tA * pM) / tau;
+    float3 saturate_ = 1.0f - exp(-tau * mV);           // -> neutral at the horizon
+    return max(beam * phase * saturate_, 1e-6f);
+}
+
+// Sky colour for one cell.
+//
+//   yFrac      0 at the top of the frame, 1 at the bottom
+//   dAzDeg     azimuth of this cell relative to the SUN, degrees
+//   tauA       aerosol optical depth, from visibility via Koschmieder
+//   deckF      how much of the sky is behind something opaque, 0..1
+//   gloomF     how much light the deck is taking out, 0..1
+inline float3 skyRGB(float sAlt, float yFrac, float dAzDeg,
+                     float aqiF, float deckF, float smokeF,
+                     float gloomF, float tauA) {
+    // Screen -> sky geometry. astroXY maps altitude 85..0 onto y 0..1, so this
+    // is its exact inverse; the sky the cell shows and the sun drawn over it now
+    // agree about where they are.
+    float viewAlt = 85.0f * (1.0f - clamp(yFrac, 0.0f, 1.0f));
+    float sa = sAlt * (M_PI_F / 180.0f), va = viewAlt * (M_PI_F / 180.0f);
+    float cosGamma = clamp(sin(va) * sin(sa)
+                         + cos(va) * cos(sa) * cos(dAzDeg * (M_PI_F / 180.0f)),
+                           -1.0f, 1.0f);
+
+    // ---- clear-sky chroma, from the scattering model
+    float3 al   = airlight(sAlt, viewAlt, cosGamma, tauA);
+    float3 chroma = al / max(dot(al, LUMW), 1e-6f);      // unit luminance
+
+    // Below the horizon the single-scatter model runs out of validity: there is
+    // no direct beam left in the layers we can see, and pinning the sun's
+    // airmass at the horizon value — which is all it can do — paints the ENTIRE
+    // sky the colour of the setting sun. Measured twilight does close to the
+    // opposite. Lynch et al. find the upper sky still blue through civil
+    // twilight, reaching neutral only around -2 degrees and going blue again
+    // after; the orange is confined to a band on the sun's side. So the base
+    // hands over to a pale blue upper sky and the structured bands below paint
+    // the afterglow and the Belt onto it, rather than the whole frame inheriting
+    // a sunset colour it should never have had.
+    //
+    // 11000 K on the CIE daylight locus, at unit luminance: the blue end of the
+    // measured clear-sky range, which is what the upper sky reads as when the
+    // reddened low path has dropped out of it.
+    //
+    // Weighted by WHERE we are looking, not applied flat. The model's reddening
+    // is right in exactly one place — low down, on the sun's side, where the
+    // line of sight really does run through air that is still lit and still
+    // reddening what it scatters. Everywhere else it is wrong, and for opposite
+    // reasons: a zenith view is lit from far above the terminator where the beam
+    // has crossed almost nothing, and an ANTISOLAR low view is looking into the
+    // earth's own shadow, where there is no direct beam at all. Single scattering
+    // knows about neither, so it painted both of them sunset-orange — which is
+    // what left the eastern horizon glowing like the western one.
+    float upper    = saturate(viewAlt / 35.0f);
+    float antiSide = saturate(-cos(dAzDeg * (M_PI_F / 180.0f)));
+    float lowLit   = (1.0f - upper) * (1.0f - antiSide);
+    float below = saturate((1.5f - sAlt) / 5.5f) * (1.0f - 0.72f * lowLit);
+    chroma = mix(chroma, float3(0.798f, 1.012f, 1.478f), below);
+
+    // ---- exposure
+    //
+    // Kept as it was. `skyBr` is the verified time-of-day ramp and the scene is
+    // tuned against it, so the model supplies HUE and the ramp supplies value;
+    // rebuilding both at once would have made a regression impossible to
+    // attribute. The horizon-brighter-than-zenith shape is the CIE clear sky's
+    // and is what stops a frame reading as a flat wall.
+    float lit  = skyBr(sAlt);
+    float hk   = yFrac * yFrac * (3.0f - 2.0f * yFrac);
+    float Lz   = 6.0f + 112.0f * lit;                   // zenith
+    float Lh   = 9.0f + 196.0f * powr(lit, 0.78f);      // horizon
+    float L    = mix(Lz, Lh, hk);
+    float3 col = chroma * L;
+
+    // ---- night floor
+    //
+    // Below astronomical twilight there is no sunlight in the column at all and
+    // the scattering model has nothing to work on. What is left is airglow and
+    // scattered starlight: very dark, and slightly blue to the adapted eye.
+    // Blended in rather than switched to, so there is no seam at -18.
+    float night = saturate((-12.0f - sAlt) / 6.0f);
+    if (night > 0.0f) {
+        float3 nightCol = mix(float3(3.0f, 5.0f, 14.0f), float3(7.0f, 9.0f, 20.0f), hk);
+        col = mix(col, nightCol, night);
     }
-    // Cloud cover softens and blanches — toward a light overcast grey by day.
-    // The target used to be a flat 198 at every hour, so an overcast midnight
-    // sky was washed to the same pale grey as an overcast noon, and every trace
-    // of hue went with it. Overcast at night is dark, and what light it does
-    // have is the orange the city throws up at it. That much was right and is
-    // kept.
+
+    // ---- twilight
     //
-    // The WEIGHT was not. It was `(deckF - 0.08) * 1.09 * 0.28`, which tops out
-    // at 0.28: a hundred per cent overcast still kept 72% of the clear-sky hue,
-    // so a 95%-cover rain scene rendered as bright blue. There is no blue in an
-    // overcast. You are not looking at the sky at all — you are looking at the
-    // bottom of a cloud, and the only question is how bright it is.
+    // Lynch, Dearborn & Lock, Appl. Opt. 56(19) G156 (2017) measured the
+    // antisolar twilight as four bands and gave their motion with solar
+    // altitude. Three of their findings drive this block:
     //
-    // So the response is now superlinear and reaches near-total: scattered cloud
-    // barely touches the background (the clouds themselves are drawn on top of
-    // it, and blue belongs in the gaps), while a closed deck takes it all.
-    if (deckF > 0.06f) {
-        float t  = saturate((deckF - 0.06f) / 0.94f);
-        float ck = powr(t, 2.2f) * 0.97f;   // 25%->0.02, 50%->0.17, 90%->0.76, 100%->0.97
-        float lit = skyBr(sAlt);
-        // Brightness of the lid: sun elevation sets the exposure, deck depth
-        // sets how much of it survives the trip through. A thin stratus is a
-        // luminous white ceiling; nimbostratus over the same town at the same
-        // hour is slate.
+    //   * the Belt of Venus appears around -6 deg, is the brightest part of the
+    //     antisolar sky by -2 deg, and is PINK, not orange — the sun-side
+    //     afterglow is the orange one, and having both on the same 1-D ramp is
+    //     why the old table could produce neither;
+    //   * the boundary between the Belt and the earth's shadow beneath it rises
+    //     about 8x as fast as the sun falls (their Fig. 16);
+    //   * the colours are pale. Lee showed a vertical scan through civil
+    //     twilight spans only a small region near the achromatic point in CIE
+    //     u'v'. The old ramp's saturated magenta was not a mistuning of a real
+    //     colour, it was a colour twilight does not contain.
+    if (sAlt < 4.0f) {
+        float tw = saturate((4.0f - sAlt) / 10.0f) * saturate((sAlt + 16.0f) / 8.0f);
+        // Which side of the sky this cell is on. +1 straight at the sun.
+        float side = cos(dAzDeg * (M_PI_F / 180.0f));
+        float anti = saturate(-side);
+        float solar = saturate(side);
+
+        // Earth's shadow climbing the antisolar sky. The boundary between the
+        // Belt and the shadow beneath it rises about 8x as fast as the sun
+        // falls, so it sweeps the whole frame during civil twilight — which is
+        // why the Belt is a fast-moving band and not a fixed glow.
+        float shadowTop = clamp(-8.0f * sAlt, 0.0f, 70.0f);
+        // The Belt sits just above the shadow line, 10-20 degrees thick, and is
+        // always brighter in its lower part.
+        float dBelt = (viewAlt - shadowTop) / 15.0f;
+        // Weighted to reach full strength rather than tint: by -2 degrees the
+        // Belt is the BRIGHTEST part of the antisolar sky (Lynch, Sec. 4C), so
+        // a band that merely tinges the blue behind it is under-reading the
+        // measurement, not over-reading it.
+        float belt  = min(1.0f, 1.6f * exp(-dBelt * dBelt * (dBelt > 0.0f ? 1.0f : 2.2f))
+                    * anti * tw * saturate((sAlt + 6.0f) / 4.0f));
+        // Pale pink: red brightest, blue a shade ABOVE green. That ordering is
+        // the whole difference between the Belt and an orange afterglow, and it
+        // is why this cannot be a point on the same 1-D ramp as the sun side.
+        col = mix(col, float3(1.00f, 0.74f, 0.78f) * L * 1.12f, belt);
+
+        // The dark segment below it — the earth's shadow cast on the air,
+        // bluish-grey and distinctly darker than everything around it.
+        float dark = saturate((shadowTop - viewAlt) / max(shadowTop, 8.0f))
+                   * anti * tw * saturate((sAlt + 11.0f) / 7.0f);
+        col = mix(col, float3(0.68f, 0.77f, 1.00f) * L * 0.62f, dark * 0.60f);
+
+        // Sun-side afterglow. Deepest right at the horizon and reddening as the
+        // sun sinks, gone by nautical twilight.
+        float low  = saturate(1.0f - viewAlt / 28.0f);
+        float glow = solar * tw * low * low * saturate((sAlt + 9.0f) / 7.0f);
+        float3 warm = mix(float3(1.00f, 0.34f, 0.16f), float3(1.00f, 0.62f, 0.30f),
+                          saturate((sAlt + 6.0f) / 8.0f));
+        col = mix(col, warm * L * 1.15f, glow * 0.82f);
+    }
+
+    // ---- wildfire smoke
+    //
+    // Smoke is the one aerosol that is not just a whitener: it ABSORBS in the
+    // blue, so it reddens rather than greys. Its optical depth is already in
+    // `tauA`; this is only the absorption that Angstrom scattering does not
+    // describe.
+    if (smokeF > 0.0f) {
+        float sm = smokeF * (0.35f + 0.65f * hk);
+        col *= mix(float3(1.0f), float3(1.12f, 0.72f, 0.42f), saturate(sm));
+    }
+    // Photochemical pollution: a weak brown, and a general loss of purity that
+    // the aerosol term alone understates for an absorbing urban haze.
+    if (aqiF > 0.0f) {
+        float ds = aqiF * 0.16f * (1.0f - smokeF);
+        float avg = dot(col, float3(1.0f / 3.0f));
+        col = mix(col, float3(avg) * float3(1.05f, 1.00f, 0.92f), ds);
+    }
+
+    // ---- the deck
+    //
+    // You are not looking at the sky at all — you are looking at the bottom of a
+    // cloud, and the only question is how bright it is.
+    //
+    // Chromaticity of a daytime overcast is 6415 +/- 133 K, uniform over the
+    // hemisphere (Chain, Dumontier & Fontoynont); Lee & Hernandez-Andres put the
+    // mean of 9100 spectra at 6358 K. sRGB's white point is D65 = 6504 K, so an
+    // overcast is very slightly BLUER than neutral, not warmer — and thicker
+    // decks are bluer still, because multiple scattering inside an optically
+    // thick cloud enhances the droplets' own selective absorption (Lee &
+    // Hernandez-Andres, Appl. Opt. 44, 5712). Hence day = (216,217,220) thin ->
+    // (148,150,157) thick: neutral, darkening and very slightly cooling. Those
+    // two were already right by eye and the measurements agree with them, so
+    // they stay; what was wrong was never the target but the WEIGHT.
+    //
+    // The weight: `deckF` comes from the per-altitude cloud split, which is the
+    // least reliable number in the whole forecast — the calibration layer exists
+    // precisely because the model files low cloud as high. When that split is
+    // wrong BOTH the cloud sprites and this blend under-fire, from the same bad
+    // input, so the error doubles instead of cancelling and you get a bright
+    // blue sky in the rain. `gloomF` and the falling precipitation are measured
+    // independently of the split, so they set a FLOOR: this can be pushed
+    // greyer by evidence, never bluer.
+    float opaque = max(deckF, saturate((gloomF - 0.06f) / 0.30f));
+    if (opaque > 0.06f) {
+        float t  = saturate((opaque - 0.06f) / 0.94f);
+        // Superlinear over the part the cloud pass will draw sprites for — blue
+        // belongs in the gaps — but the part that only the gloom knows about has
+        // nothing coming to cover it, so it blanches at full weight.
+        float drawn  = saturate((min(deckF, opaque) - 0.06f) / 0.94f);
+        float unseen = max(0.0f, t - drawn);
+        float ck = saturate(powr(drawn, 2.2f) * 0.97f + unseen * 0.97f);
         float thick = t * t;
         float3 day   = mix(float3(216.0f, 217.0f, 220.0f), float3(148.0f, 150.0f, 157.0f), thick);
-        float3 night = mix(float3( 30.0f,  28.0f,  34.0f), float3( 19.0f,  18.0f,  23.0f), thick);
-        float3 tgt = mix(night, day, lit);
+        float3 night2 = mix(float3(30.0f, 28.0f, 34.0f), float3(19.0f, 18.0f, 23.0f), thick);
+        float3 tgt = mix(night2, day, lit);
+        // Gloom is the light the deck is actually taking out, and it leads the
+        // rain by up to two hours. Reaching the sky COLOUR and not only the
+        // cloud tone is what makes the frame darken BEFORE the first drop —
+        // which is the order the sky does it in.
+        tgt *= 1.0f - 0.45f * gloomF;
         // Not dead flat: an overcast is brightest overhead, where the sight line
-        // through the deck is shortest, and greys down toward the horizon. Small,
-        // but without it a full lid is one solid colour edge to edge.
+        // through the deck is shortest, and greys down toward the horizon.
         tgt *= 1.05f - 0.17f * hk;
-        r += (tgt.r - r) * ck; g += (tgt.g - g) * ck; b += (tgt.b - b) * ck;
+        col = mix(col, tgt, ck);
     }
-    // Urban skyglow, at the horizon, through night and twilight.
+
+    // ---- urban skyglow, at the horizon, through night and twilight
     //
-    // Two things were wrong with this and both showed. It began at 55% of the
-    // frame height and ran to the bottom, so it painted nearly half the sky
-    // orange — real skyglow is a horizon phenomenon, effectively gone more than
-    // ten or fifteen degrees up, and spreading it that far is most of why a
-    // clear midnight read as a sunset. And the altitude term was unclamped, so
-    // deep night pushed the blend weight past 1 and overshot the target colour.
-    //
-    // Cloud AMPLIFIES skyglow rather than hiding it, which the old `1 - cov`
-    // had exactly backwards. A low deck over a city is a reflector: it catches
-    // the light going up and throws it back down. That is why the orange nights
-    // are the overcast ones and a clear night over the same city is not.
-    if (a < 2.0f && yFrac > 0.78f) {
+    // Real skyglow is a horizon phenomenon, effectively gone more than ten or
+    // fifteen degrees up. Cloud AMPLIFIES it rather than hiding it: a low deck
+    // over a city catches the light going up and throws it back down, which is
+    // why the orange nights are the overcast ones.
+    if (sAlt < 2.0f && yFrac > 0.78f) {
         float reach = saturate((yFrac - 0.78f) / 0.22f);
-        float lp = saturate((2.0f - a) / 22.0f) * reach * reach
-                 * 0.34f * (0.65f + 0.90f * deckF);
-        r += (88.0f - r) * lp; g += (54.0f - g) * lp; b += (30.0f - b) * lp;
+        float lp = saturate((2.0f - sAlt) / 22.0f) * reach * reach
+                 * 0.34f * (0.65f + 0.90f * opaque);
+        col += (float3(88.0f, 54.0f, 30.0f) - col) * lp;
     }
-    return float3(r, g, b);
+    return max(col, 0.0f);
 }
 
 // Sun disc tint: deep red at the horizon -> warm yellow -> white
@@ -1096,7 +1309,32 @@ fragment CellOut cellPass(VOut in [[stage_in]],
     float lum = (R0 + G0 + B0) * 0.333f;
 
     // ---- LUT base, sky ambient tint, weather tint, posterize
-    float3 sky = skyRGB(U.sunAlt, float(iy) / U.rows, aqiF, deckF, smokeF);
+    //
+    // Azimuth of this cell relative to the sun. astroXY spreads +/-95 degrees of
+    // azimuth across the frame, so inverting it gives the cell's bearing, and
+    // the sun's own relative bearing subtracts out. This is what lets the sky
+    // put the warm band on the side the sun is actually on and the Belt of
+    // Venus opposite it, instead of ringing the whole horizon with both.
+    float cellRelAz = (cxp / max(W, 1.0f) - 0.5f) * 190.0f;
+    float sunRelAz  = fmod(U.sunAz - U.facingAz + 540.0f, 360.0f) - 180.0f;
+    float dAzSun    = cellRelAz - sunRelAz;
+
+    // Aerosol optical depth from MEASURED visibility, via Koschmieder's law:
+    // V = 3.912 / sigma_ext, and a 1km aerosol scale height turns that surface
+    // extinction coefficient into a vertical optical depth. This replaces a
+    // hand-set haze constant with the number a station actually reports, and it
+    // is why a 2km-visibility monsoon morning comes out white rather than blue.
+    // Sanity: 45km visibility -> 0.087, 20km -> 0.20, 5km -> 0.78, all inside
+    // the range aerosol optical depth is actually measured over. Floored at a
+    // clean-air 0.02 and capped at 1.3, past which the sky is uniform white and
+    // more depth only removes what structure is left.
+    float visKm  = clamp(U.vis, 200.0f, 60000.0f) / 1000.0f;
+    float tauVis = clamp(3.912f / visKm, 0.02f, 1.3f);
+    // Pollution and smoke add load of their own on top of what visibility sees.
+    float tauA   = min(1.3f, tauVis + aqiF * 0.25f + smokeF * 0.9f);
+
+    float3 sky = skyRGB(U.sunAlt, float(iy) / U.rows, dAzSun,
+                        aqiF, deckF, smokeF, U.gloomF, tauA);
     float li = saturate(lum / 210.0f);
     float3 g = rampLUT(lum + U.nightBoost);
 

@@ -46,6 +46,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
         NSApp.setActivationPolicy(.accessory)
         buildStatusItem()
+        // The chosen icon, applied to the bundle. Costs one image load and is
+        // a no-op for the default, which the bundle already carries.
+        AppIcons.apply(config.appIcon)
         rebuildSurfaces()
 
         // Write settings once at launch. This seeds the copy inside the screen
@@ -59,17 +62,17 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         location.onResolve = { [weak self] place in
             self?.locationDidResolve(place)
         }
-        // Ask for permission exactly once, ever. After that the answer is
-        // remembered and the scene falls back to the stored location, so a
-        // rebuild or a denial never turns into a dialog on every launch.
-        if config.place == nil && !config.hasAskedForLocation {
-            config.hasAskedForLocation = true
-            saveUnlessRecovering()
-            location.requestOnce()
-        } else {
-            refreshAstro()
-            location.refreshIfAuthorised()
+        // Errors and refusals used to go nowhere unless Settings happened to be
+        // open. Now they are always recorded, so "why is it still drawing my old
+        // city" has an answer sitting in the log.
+        location.onUnavailable = { msg in
+            NSLog("Elemental location: unavailable — %@", msg)
         }
+        location.onNeedsAuthorisation = { [weak self] st in
+            self?.locationNeedsAuthorisation(st)
+        }
+        refreshAstro()
+        resolveLocationAtLaunch()
 
         // Astro moves slowly; once a minute is plenty and costs nothing.
         astroTimer = Timer.scheduledTimer(withTimeInterval: 60, repeats: true) { [weak self] _ in
@@ -148,6 +151,93 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         return true
     }
 
+    // MARK: - Location
+
+    /// A token that changes whenever this binary does.
+    ///
+    /// Elemental is signed ad hoc (`codesign -s -`), so its code directory hash
+    /// is minted fresh by every build. locationd files its authorisation record
+    /// under that hash, which means a rebuild is indistinguishable from a
+    /// different app and the grant is gone. Size-and-mtime of the executable is
+    /// a cheap stand-in for the hash: it moves for exactly the same reason, it
+    /// needs no Security framework, and getting it wrong costs one extra dialog
+    /// rather than a wrong sky.
+    private static var buildToken: String {
+        guard let exe = Bundle.main.executableURL,
+              let a = try? FileManager.default.attributesOfItem(atPath: exe.path),
+              let size = a[.size] as? NSNumber,
+              let date = a[.modificationDate] as? Date
+        else { return "unknown" }
+        return String(format: "%llu-%.0f", size.uint64Value, date.timeIntervalSince1970)
+    }
+
+    /// Decide, once per launch, whether to ask for location or just refresh it.
+    ///
+    /// The rule this replaces was "ask if we have no place and have never
+    /// asked". Both halves were wrong for a user who travels:
+    ///
+    ///   * `hasAskedForLocation` never becomes false again, so the FIRST time
+    ///     the grant was lost was also the LAST time the app would ever ask.
+    ///   * having a stored place was treated as proof that location works. It
+    ///     is proof only that it worked once. A stale place is precisely the
+    ///     symptom, so using it as the reason not to re-check is circular.
+    ///
+    /// Now the status decides. Authorised, refresh quietly. Refused, respect it
+    /// and say so. Undetermined, ask — but at most once per build, because a
+    /// build is exactly the granularity at which TCC forgets.
+    private func resolveLocationAtLaunch() {
+        let st = location.authorization
+        NSLog("Elemental location: launch status=%@ storedPlace=%@ following=%@",
+              LocationService.statusName(st),
+              config.place?.name ?? "none",
+              config.isShowingDetectedPlace ? "yes" : "no")
+
+        if location.isAuthorised {
+            location.refreshIfAuthorised()
+            return
+        }
+        guard st == .notDetermined else {
+            // Denied or restricted. Asking again cannot show a dialog, so don't.
+            locationNeedsAuthorisation(st)
+            return
+        }
+
+        let token = Self.buildToken
+        guard config.locationPromptBuild != token else {
+            NSLog("Elemental location: undetermined, but already prompted under this build — not re-asking")
+            locationNeedsAuthorisation(st)
+            return
+        }
+        NSLog("Elemental location: undetermined under a new build (%@) — asking", token)
+        config.hasAskedForLocation = true
+        config.locationPromptBuild = token
+        saveUnlessRecovering()
+        location.requestOnce()
+    }
+
+    /// The scene cannot follow you and something should say so.
+    ///
+    /// Deliberately not a modal: this fires from wake and unlock handlers, and a
+    /// dialog on every lid-open would be worse than the bug. It writes the state
+    /// where the user can find it — the menu bar item's tooltip and the status
+    /// file — and Settings turns its "Use Location Services" button back on.
+    private func locationNeedsAuthorisation(_ st: CLAuthorizationStatus) {
+        let name = LocationService.statusName(st)
+        NSLog("Elemental location: NOT FOLLOWING YOU — authorisation is %@. "
+            + "The scene is pinned to the stored place '%@'. "
+            + "Open Settings › Places and press Use Location Services to re-request.",
+              name, config.scenePlace.name)
+        locationBlocked = true
+        statusItem?.button?.toolTip =
+            "Elemental — location is \(name); the sky is drawn for \(config.scenePlace.name)"
+        settings?.refreshIfVisible(config: config)
+    }
+
+    /// True when the last attempt to follow the user was refused. Settings reads
+    /// it to re-enable the re-request button, which was otherwise disabled for
+    /// good the moment any place got stored.
+    private(set) var locationBlocked = false
+
     /// A location that has genuinely moved should move the scene, not merely
     /// be recorded. The 0.05 degree threshold is about 5km — enough to ignore
     /// GPS jitter while still catching a real journey.
@@ -157,6 +247,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     /// stored place either way, and it has nothing to do with picking a city by
     /// hand — that path does not come through here at all.
     private func locationDidResolve(_ place: Place) {
+        locationBlocked = false
+        statusItem?.button?.toolTip = nil
         let moved = config.place.map { p in
             abs(p.latitude - place.latitude) > 0.05 || abs(p.longitude - place.longitude) > 0.05
         } ?? true
@@ -312,7 +404,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     /// live surfaces so the preview tracks the control. Everything else can
     /// wait until the user stops moving.
     func applyConfig(_ newConfig: Config) {
+        let iconChanged = newConfig.appIcon != config.appIcon
         config = newConfig
+        if iconChanged { AppIcons.apply(config.appIcon) }
         for screen in NSScreen.screens {
             guard let num = screen.deviceDescription[
                     NSDeviceDescriptionKey("NSScreenNumber")] as? NSNumber else { continue }
@@ -510,8 +604,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private func buildStatusItem() {
         let item = NSStatusBar.system.statusItem(withLength: NSStatusItem.variableLength)
         if let b = item.button {
-            b.image = NSImage(systemSymbolName: "circle.grid.3x3.fill", accessibilityDescription: "Elemental")
-            b.image?.isTemplate = true
+            // The real mark, drawn from the artwork's own path data and marked
+            // as a template so the menu bar tints it — see Mark.swift.
+            b.image = Mark.menuBarImage()
         }
         let menu = NSMenu()
         menu.addItem(withTitle: "Elemental", action: nil, keyEquivalent: "").isEnabled = false
@@ -550,5 +645,26 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
 let app = NSApplication.shared
 let delegate = AppDelegate()
+
+// The Elements pane cannot be verified by reading it — a detector that finds
+// nothing and an editor that draws blank both compile. `--elements-selftest`
+// renders both to PNGs and exits, before anything is put on screen and before
+// any timer that could write config.json has a runloop to fire on.
+if ElementsSelfTest.request != nil {
+    ElementsSelfTest.run(delegate: delegate)
+    exit(0)
+}
+
+// `--make-icons [projectRoot]` rebakes Icons/*.icns from the three Icon
+// Composer bundles. An authoring step, not a build step: the .icns files are
+// checked in, and build.sh only copies them. Same reasoning as the shader —
+// nothing at launch may depend on a tool that is not installed.
+if let i = CommandLine.arguments.firstIndex(of: "--make-icons") {
+    let root = CommandLine.arguments.count > i + 1
+        ? CommandLine.arguments[i + 1] : FileManager.default.currentDirectoryPath
+    print("Elemental: baking icons from \(root)")
+    exit(AppIconArt.makeAll(projectRoot: root) ? 0 : 1)
+}
+
 app.delegate = delegate
 app.run()

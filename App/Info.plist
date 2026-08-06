@@ -7,6 +7,10 @@
   <key>CFBundleExecutable</key>           <string>Elemental</string>
   <key>CFBundleIdentifier</key>           <string>com.prakritmaan.elemental</string>
   <key>CFBundlePackageType</key>          <string>APPL</string>
+  <!-- Icons/Elemental002.icns, copied in by build.sh. The user can pick a
+       different design in Settings; that is applied as a custom Finder icon
+       at runtime, which does not touch anything under Contents. -->
+  <key>CFBundleIconFile</key>             <string>AppIcon</string>
   <key>CFBundleShortVersionString</key>   <string>0.1</string>
   <key>CFBundleVersion</key>              <string>1</string>
   <key>LSMinimumSystemVersion</key>       <string>14.0</string>

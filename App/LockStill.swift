@@ -84,6 +84,12 @@ final class LockStillExporter {
 
     init(device: MTLDevice) {
         renderer = ElementalRenderer(device: device, colorFormat: .rgba8Unorm)
+        // No transitions here. This renderer draws one frame a minute, so its
+        // frame-to-frame dt is a tenth of a second an hour: an eased sky would
+        // creep toward each reading at a thousandth of real speed and the lock
+        // screen would be showing yesterday by tea time. A still is a picture
+        // of the conditions as reported, and the desktop is where they move.
+        renderer?.easeTransitions = false
     }
 
     func start(configProvider: @escaping () -> Config,

@@ -57,6 +57,11 @@ build_app() {
   local APP="$BUILD/Elemental.app"
   mkdir -p "$APP/Contents/MacOS" "$APP/Contents/Resources"
   cp App/Info.plist "$APP/Contents/Info.plist"
+  # The three icon designs, plus the default (002) under the name Info.plist
+  # declares. Baked from the Icon Composer bundles by `Elemental --make-icons`
+  # and checked in, so a build needs no icon toolchain — see App/AppIcons.swift.
+  cp Icons/Elemental00*.icns "$APP/Contents/Resources/"
+  cp Icons/Elemental002.icns "$APP/Contents/Resources/AppIcon.icns"
   swiftc "${SWIFTFLAGS[@]}" -o "$APP/Contents/MacOS/Elemental" \
     "${CORE[@]}" App/*.swift \
     -framework AppKit -framework Metal -framework QuartzCore \

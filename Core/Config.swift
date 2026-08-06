@@ -16,6 +16,41 @@ struct Place: Codable, Equatable {
     var coordinate: Coordinate { Coordinate(latitude: latitude, longitude: longitude) }
 }
 
+/// Which of the supplied icon designs the app wears.
+///
+/// The artwork lives in the three Icon Composer bundles at the project root and
+/// is baked into `Icons/*.icns` by `Elemental --make-icons` — see AppIcons.swift. This
+/// enum is only the CHOICE, which is why it lives in Core with the rest of the
+/// settings and carries no AppKit in it: the screen saver and the offscreen
+/// renderer decode the same config file and must not need a window server to
+/// read a number they do not use.
+enum AppIconStyle: Int, Codable, CaseIterable {
+    /// "Elemental 001" — the glass mosaic itself, in a glass frame.
+    case mosaic = 1
+    /// "ELemental 002" — the El logotype alone. The default: it is the mark,
+    /// it reads at 16 points, and it is the same shape as the menu bar item.
+    case mark = 2
+    /// "ELemental 003" — the full lockup, mark over wordmark.
+    case lockup = 3
+
+    var title: String {
+        switch self {
+        case .mosaic: return "Mosaic"
+        case .mark:   return "Mark"
+        case .lockup: return "Lockup"
+        }
+    }
+
+    /// Base name of the .icns in the app's Resources.
+    var resourceName: String {
+        switch self {
+        case .mosaic: return "Elemental001"
+        case .mark:   return "Elemental002"
+        case .lockup: return "Elemental003"
+        }
+    }
+}
+
 struct Config: Codable, Equatable {
 
     /// Where the sky is drawn for. Nil until the user has granted location or
@@ -35,6 +70,25 @@ struct Config: Codable, Equatable {
     /// gets a new code identity on each rebuild, so TCC forgets the grant and
     /// the status returns to notDetermined.
     var hasAskedForLocation: Bool = false
+
+    /// WHICH build we last asked under.
+    ///
+    /// `hasAskedForLocation` alone was a one-way door. It is set true the first
+    /// time the dialog is raised and never cleared, so once a grant is lost the
+    /// app can never ask again — and for an ad-hoc signed binary the grant is
+    /// lost on *every rebuild*, because locationd keys the record on the code
+    /// directory hash and swiftc mints a new one each time. The user who set
+    /// this flag in 2026 and then travelled was still being drawn their old
+    /// city months later with nothing in the logs to say why.
+    ///
+    /// So the question is no longer "have we ever asked" but "have we asked
+    /// under THIS binary". A rebuild changes the token, which is exactly when
+    /// TCC has forgotten and exactly when asking again is legitimate. Same
+    /// binary, same token: still asked at most once, so no dialog spam.
+    ///
+    /// A denial is not affected. Denial leaves the status at `.denied`, which
+    /// is never re-prompted — macOS would not show a dialog anyway.
+    var locationPromptBuild: String?
 
     /// Most cities that can be in the list at once, including the detected one.
     static let maxPlaces = 5
@@ -140,6 +194,12 @@ struct Config: Codable, Equatable {
     /// perfectly coursed. Applies to both finishes.
     var splay: Double = 0.15
 
+    /// How long a block takes to rise or fall to a new height. 0 is the old
+    /// behaviour — the height is assigned, so a block that should be taller is
+    /// taller in the very next frame — and turning it up lets the wall settle
+    /// into a new sky over a second or two instead of snapping to it.
+    var reliefRise: Double = 0.4
+
     /// Frame rate ceiling. The display link still paces to the panel; this only
     /// lowers it. Measured on an M1 Pro at 4112x2658: 60fps costs ~6% of one
     /// core, 30fps ~3%, scaling linearly — the work is per-frame, not per-pixel
@@ -155,6 +215,17 @@ struct Config: Codable, Equatable {
     /// these the way it lands on the dock. macOS will not tell us where widgets
     /// are, so they are configured rather than detected.
     var widgets: [WidgetRect] = []
+
+    /// Where the dock actually is, as fractions of the screen.
+    ///
+    /// Nil — the default, and what every user who never opens the Elements pane
+    /// keeps — means "work it out", which `Furniture.desktop` does from
+    /// com.apple.dock's tile size and item count plus the screen's insets. That
+    /// is a good guess and not more than one: a stack, a wide separator, a
+    /// magnified dock or a second display all move the real thing. When the user
+    /// has corrected the dock on the Elements grid, this measurement is better
+    /// than the guess and replaces it.
+    var dockRect: WidgetRect?
 
     // MARK: - Weather on the desktop
     //
@@ -253,6 +324,9 @@ struct Config: Codable, Equatable {
 
     var lockConfig: Config { resolved(lock) }
     var saverConfig: Config { resolved(saver) }
+
+    /// Which icon design the app wears. 002 — the El mark — is the default.
+    var appIcon: AppIconStyle = .mark
 
     /// Fetch live weather. Off means the scene renders a clear calm day.
     var liveWeather: Bool = true
@@ -397,6 +471,7 @@ struct Config: Codable, Equatable {
         state.dispersion = Float(dispersion)
         state.frost = Float(frost)
         state.splay = Float(splay)
+        state.reliefRise = Float(reliefRise)
     }
 }
 
@@ -437,6 +512,7 @@ extension Config {
         otherPlaces        = c.lenient(.otherPlaces, d.otherPlaces)
         scenePlaceName     = try? c.decodeIfPresent(String.self, forKey: .scenePlaceName)
         hasAskedForLocation = c.lenient(.hasAskedForLocation, d.hasAskedForLocation)
+        locationPromptBuild = try? c.decodeIfPresent(String.self, forKey: .locationPromptBuild)
         facingAz           = c.lenient(.facingAz, d.facingAz)
         headingMode        = c.lenient(.headingMode, d.headingMode)
         shape              = c.lenient(.shape, d.shape)
@@ -450,9 +526,11 @@ extension Config {
         dispersion         = c.lenient(.dispersion, d.dispersion)
         frost              = c.lenient(.frost, d.frost)
         splay              = c.lenient(.splay, d.splay)
+        reliefRise         = c.lenient(.reliefRise, d.reliefRise)
         maxFPS             = c.lenient(.maxFPS, d.maxFPS)
         motionSpeed        = c.lenient(.motionSpeed, d.motionSpeed)
         widgets            = c.lenient(.widgets, d.widgets)
+        dockRect           = try? c.decodeIfPresent(WidgetRect.self, forKey: .dockRect)
         wetDock            = c.lenient(.wetDock, d.wetDock)
         wetWidgets         = c.lenient(.wetWidgets, d.wetWidgets)
         wetMenuBar         = c.lenient(.wetMenuBar, d.wetMenuBar)
@@ -463,6 +541,7 @@ extension Config {
         lowPowerOnBattery  = c.lenient(.lowPowerOnBattery, d.lowPowerOnBattery)
         lock               = c.lenient(.lock, d.lock)
         saver              = c.lenient(.saver, d.saver)
+        appIcon            = c.lenient(.appIcon, d.appIcon)
         liveWeather        = c.lenient(.liveWeather, d.liveWeather)
         playbackOnWake     = c.lenient(.playbackOnWake, d.playbackOnWake)
         playbackMaxSeconds = c.lenient(.playbackMaxSeconds, d.playbackMaxSeconds)
