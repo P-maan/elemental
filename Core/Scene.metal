@@ -176,7 +176,12 @@ inline float airmassKY(float zenithDeg) {
 //   viewAlt   degrees above the horizon for this cell
 //   cosGamma  cosine of the angle between the view ray and the sun
 //   tauA      aerosol optical depth at 550nm, vertical
-inline float3 airlight(float sunAlt, float viewAlt, float cosGamma, float tauA) {
+// Returns the three airlight channels in .rgb, and in .w the fraction of the
+// scattering in this direction that was RAYLEIGH rather than aerosol. That
+// fraction is the whole clear-versus-overcast distinction in one number:
+// wavelength-dependent scattering makes blue, wavelength-independent scattering
+// makes grey, and it is what decides how much purity to restore below.
+inline float4 airlight(float sunAlt, float viewAlt, float cosGamma, float tauA) {
     // Angstrom exponent falls as the aerosol coarsens: ~1.3 for dry continental
     // haze, ~0 for fog and cloud droplets, which are large enough to be in the
     // geometric regime and scatter every wavelength alike. Ramping it with the
@@ -189,15 +194,19 @@ inline float3 airlight(float sunAlt, float viewAlt, float cosGamma, float tauA) 
 
     float mV = airmassKY(90.0f - viewAlt);
     float mS = airmassKY(90.0f - max(sunAlt, 0.0f));
-    // The sun's airmass AT THE HEIGHT this view ray mostly scatters from. A
-    // zenith ray scatters high in the column, where the beam has only thin air
-    // left to cross; a horizon ray scatters low, where the beam has crossed
-    // everything. Without this term one sun airmass serves the whole sky and
-    // sunset turns the ZENITH orange, which is not what a sunset looks like —
-    // measured antitwilight has the upper sky still blue at 0 degrees and only
-    // reaching neutral around -2.
-    float f   = 0.10f + 0.90f * powr(1.0f - saturate(viewAlt / 90.0f), 2.2f);
-    float mSe = 1.0f + (mS - 1.0f) * f;
+    // How much ATMOSPHERE the beam crossed before it reached the height this
+    // view ray mostly scatters from — not merely how slanted it was.
+    //
+    // This was `1 + (mS-1)*f`, which only discounts the SLANT and still charges
+    // every scattering point the full vertical column. That is a real error and
+    // it lands almost entirely on blue, whose optical depth is three times red's:
+    // a zenith ray was losing 30% of its blue to a beam that in truth had crossed
+    // about a third of the column. It is most of why a clear midday sky came out
+    // warm grey. A zenith view scatters around one scale height up, with roughly
+    // two thirds of the mass already below it; a horizon view scatters low down,
+    // where the beam really has crossed everything.
+    float f   = 0.35f + 0.65f * powr(1.0f - saturate(viewAlt / 90.0f), 2.0f);
+    float mSe = max(0.25f, mS * f);
 
     // Phase functions: Rayleigh is symmetric and mild, aerosol is sharply
     // forward. The aureole round a low sun, and the warm band that goes with
@@ -205,19 +214,20 @@ inline float3 airlight(float sunAlt, float viewAlt, float cosGamma, float tauA) 
     // the frame and not smeared round the whole horizon.
     float pR = 0.75f * (1.0f + cosGamma * cosGamma);
     const float g = 0.76f;
-    // Capped at 6. A single Henyey-Greenstein lobe reproduces real aerosol
-    // backscatter well (~0.2 at 90 degrees, which is what keeps the sky blue
-    // away from the sun) but smears the narrow Mie diffraction peak — a few
-    // degrees wide in truth — across fifteen or more. Uncapped it whitened the
-    // whole upper frame whenever the sun was high, since at 85 degrees of
-    // altitude every azimuth is within about 25 degrees of a noon sun.
-    float pM = min((1.0f - g * g)
-                   * powr(max(1.0f + g * g - 2.0f * g * cosGamma, 1e-4f), -1.5f), 6.0f);
+    // Cornette-Shanks rather than plain Henyey-Greenstein: same asymmetry, but a
+    // sharper forward peak and markedly less scattering at 60-120 degrees, which
+    // is where HG is known to over-predict. That mid-angle excess was neutral
+    // Mie light landing exactly where the sky should be at its bluest.
+    float den = powr(max(1.0f + g * g - 2.0f * g * cosGamma, 1e-4f), -1.5f);
+    float pM  = min(1.5f * (1.0f - g * g) / (2.0f + g * g)
+                    * (1.0f + cosGamma * cosGamma) * den, 6.0f);
 
     float3 beam     = exp(-tau * mSe);                  // sun, reddened by its own path
     float3 phase    = (TAU_RAYLEIGH * pR + tA * pM) / tau;
     float3 saturate_ = 1.0f - exp(-tau * mV);           // -> neutral at the horizon
-    return max(beam * phase * saturate_, 1e-6f);
+    float rayFrac = TAU_RAYLEIGH.g * pR
+                  / max(TAU_RAYLEIGH.g * pR + tA.g * pM, 1e-6f);
+    return float4(max(beam * phase * saturate_, 1e-6f), rayFrac);
 }
 
 // Sky colour for one cell.
@@ -240,7 +250,9 @@ inline float3 skyRGB(float sAlt, float yFrac, float dAzDeg,
                            -1.0f, 1.0f);
 
     // ---- clear-sky chroma, from the scattering model
-    float3 al   = airlight(sAlt, viewAlt, cosGamma, tauA);
+    float4 alF  = airlight(sAlt, viewAlt, cosGamma, tauA);
+    float3 al   = alF.rgb;
+    float rayFrac = alF.w;
     float3 chroma = al / max(dot(al, LUMW), 1e-6f);      // unit luminance
 
     // Below the horizon the single-scatter model runs out of validity: there is
@@ -272,6 +284,41 @@ inline float3 skyRGB(float sAlt, float yFrac, float dAzDeg,
     float lowLit   = (1.0f - upper) * (1.0f - antiSide);
     float below = saturate((1.5f - sAlt) / 5.5f) * (1.0f - 0.72f * lowLit);
     chroma = mix(chroma, float3(0.798f, 1.012f, 1.478f), below);
+
+    // ---- purity restored where the colour came from RAYLEIGH
+    //
+    // The one place this departs from straight colorimetry, and it is a
+    // correction for the renderer downstream, not for the sky.
+    //
+    // The mosaic normalises this result to unit luminance and re-lights it at
+    // the CELL's brightness (see the skyChroma block in PASS A). That is
+    // deliberate — it is what stops a night scene going grey — but it throws
+    // away the sky's own luminance, and being dark relative to the scene is half
+    // of why a real blue sky reads as blue. Re-lit at the brightness of a white
+    // wall, a colorimetrically exact zenith is a pale wash. So the chromatic
+    // content is restored in proportion to how much of the scattering here was
+    // Rayleigh — which is precisely the light whose colour is wavelength
+    // selective, and precisely the light whose purity the eye is judging.
+    //
+    // Three properties make this safe rather than a fudge:
+    //   * neutral stays neutral. A ratio of 1 is 1 at any exponent, so the
+    //     overcast and rain path is untouched — 6415 K grey in, 6415 K grey out.
+    //   * haze self-limits. Aerosol scattering drives rayFrac down, so a hazy
+    //     sky gets less of it and stays paler than a clean one.
+    //   * the warm horizon is protected. Its colour comes from beam extinction
+    //     in the Mie-dominated direction straight at the sun, where rayFrac is
+    //     low, so a sunset does not get pushed to an impossible saturation.
+    // Applied as an exponent on the ratios rather than a linear stretch, so no
+    // channel can be driven negative.
+    // Floored at 0.35. Close to the sun a single forward-scattering lobe hands
+    // essentially all the scattering to the aerosol, which zeroes the gain and
+    // leaves the circumsolar sky as flat grey. The aureole is real but it is a
+    // BRIGHTNESS effect: the molecular sky is still there behind it, and at a
+    // noon sun every azimuth in the top of this frame is within 25 degrees of it,
+    // so without a floor the whole upper frame loses its blue.
+    float pureK = 1.0f + 2.2f * max(max(rayFrac, 0.35f), below * 0.95f);
+    chroma = powr(max(chroma, 1e-4f), pureK);
+    chroma /= max(dot(chroma, LUMW), 1e-6f);
 
     // ---- exposure
     //
