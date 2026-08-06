@@ -68,6 +68,20 @@ struct PreviewSpec: Hashable {
     var facingAz = 180
     var dynamic = false
 
+    /// Draw this preview on a moonlit night instead of in the afternoon.
+    ///
+    /// Measured, not guessed. Refraction, dispersion and frost all act on what
+    /// is BEHIND a block, so over a smooth afternoon gradient a block a few
+    /// pixels off looks exactly like the block in front of it and all three
+    /// sliders render three identical thumbnails. Against a full moon — a hard
+    /// bright disc on a dark sky — frost's 0%-to-100% difference goes from 0.13
+    /// to 0.39 at the 99th percentile, and dispersion's from 0.005 to 0.008
+    /// mean. So the glass controls are previewed at night, which is also simply
+    /// when glass is worth looking at.
+    ///
+    /// Refraction stays under 0.05 either way; see the note in Settings.swift.
+    var nightMoon = false
+
     /// Tenths of a degree. The sky geometry is genuinely drawn for the chosen
     /// city, so the preview is not lying about where the sun is.
     var latT = 424
@@ -129,9 +143,16 @@ struct PreviewSpec: Hashable {
     /// mid-afternoon where the sky is, not where the laptop is.
     var instant: Date {
         var c = DateComponents()
-        c.year = 2026; c.month = 3; c.day = 20; c.hour = 12
         var cal = Calendar(identifier: .gregorian)
         cal.timeZone = TimeZone(secondsFromGMT: 0)!
+        if nightMoon {
+            // Full moon, high and better than 99% lit at this instant, which is
+            // the hard bright edge the glass sliders need to be visible at all.
+            c.year = 2026; c.month = 3; c.day = 3; c.hour = 4
+            let t = cal.date(from: c) ?? Date(timeIntervalSince1970: 1_772_337_600)
+            return t.addingTimeInterval(-longitude / 15 * 3600)
+        }
+        c.year = 2026; c.month = 3; c.day = 20; c.hour = 12
         let noonUTC = cal.date(from: c) ?? Date(timeIntervalSince1970: 1_774_008_000)
         return noonUTC.addingTimeInterval(-longitude / 15 * 3600 + 3.4 * 3600)
     }
@@ -143,7 +164,11 @@ struct PreviewSpec: Hashable {
         s.finish = finish
         s.gridRows = gridRows
         s.facingAz = Float(facingAz)
-        s.headingMode = dynamic ? .dynamic : .custom
+        // A night preview exists to show the moon through the glass, so the
+        // moon has to be ON SCREEN — dynamic keeps whatever is up centred. A
+        // custom heading would point the view at an empty patch of sky about
+        // half the time and demonstrate nothing.
+        s.headingMode = (dynamic || nightMoon) ? .dynamic : .custom
         s.reliefDepth = Float(depth) / 100
         s.reliefEmphasis = Float(emphasis) / 100
         s.lightIntensity = Float(light) / 100
@@ -157,13 +182,24 @@ struct PreviewSpec: Hashable {
         // gradient every one of the seven sliders looks identical, which is
         // exactly the failure this whole feature exists to fix.
         var w = WeatherState()
-        w.code = 2
-        w.kind = .partly
-        w.cover = 52
-        w.cloudLow = 24; w.cloudMid = 26; w.cloudHigh = 30
-        w.wind = 11; w.gusts = 15; w.windDir = 250
-        w.uv = 4; w.visibility = 20000
-        w.temperature = 17; w.dewPoint = 8; w.humidity = 55
+        if nightMoon {
+            // Clear, so nothing is between the moon and the wall.
+            w.code = 0
+            w.kind = .sun
+            w.cover = 4
+            w.cloudLow = 2; w.cloudMid = 2; w.cloudHigh = 4
+            w.wind = 8; w.gusts = 12; w.windDir = 250
+            w.uv = 0; w.visibility = 25000
+            w.temperature = 9; w.dewPoint = 4; w.humidity = 70
+        } else {
+            w.code = 2
+            w.kind = .partly
+            w.cover = 52
+            w.cloudLow = 24; w.cloudMid = 26; w.cloudHigh = 30
+            w.wind = 11; w.gusts = 15; w.windDir = 250
+            w.uv = 4; w.visibility = 20000
+            w.temperature = 17; w.dewPoint = 8; w.humidity = 55
+        }
         s.weather = w
 
         s.astro = Astro.update(lat: latitude, lon: longitude,
@@ -182,8 +218,15 @@ final class ScenePreview {
     // thumbnail almost never triggers a `resize()` (which reallocates the cell
     // textures AND re-randomises the drifting light pockets, so two tiles that
     // straddle one are lit differently and stop being comparable).
-    static let large  = CGSize(width: 600, height: 376)   // 300x188 pt
+    /// The hero. Deliberately a FIXED size, centred in the pane rather than
+    /// stretched to fill it: 1:1 on a Retina display, so the cell edges stay
+    /// hard. Stretching an 800px render across a wide window would upscale the
+    /// one thing the preview exists to show. 400k pixels, ~19ms a frame, and
+    /// that cost does not grow when the user resizes the window.
+    static let large  = CGSize(width: 800, height: 500)   // 400x250 pt
+    /// Option tiles — shape, finish, density.
     static let medium = CGSize(width: 240, height: 150)   // 120x75 pt
+    /// The low/medium/high strip beside a slider.
     static let small  = CGSize(width: 132, height: 84)    //  66x42 pt
 
     /// One thumbnail at a time, off the main thread, forever.

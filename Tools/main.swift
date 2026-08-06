@@ -370,6 +370,46 @@ wx.cloudMid  = Float(num("mid",  0))
 wx.cloudHigh = Float(num("high", 0))
 wx.aqi = Float(num("aqi", 30))
 wx.smoke = Float(num("smoke", 0))
+// ---- the inputs the presentation layer actually keys off.
+//
+// Morphology, phase and form are derived from these, and until they were
+// reachable from the command line there was no way to render a shower and a
+// steady band side by side and see whether they look like different weather.
+// Every one of them is a quantity somebody measures.
+wx.showers   = Float(num("showers", 0))
+wx.cape      = Float(num("cape", 0))
+wx.liftedIndex = Float(num("li", 0))
+wx.gusts     = Float(num("gusts", Double(wx.wind)))
+wx.ceiling   = Float(num("ceiling", -1))          // metres AGL; -1 = unmeasured
+wx.freezingLevel = Float(num("fzlevel", 3000))
+wx.snowDepth = Float(num("snowdepth", 0))
+wx.precipProbability = Float(num("prob", 0))
+// The measured time structure of the nowcast: how many separate wet runs the
+// next four hours hold, which is the direct measurement of "scattered".
+if let slots = args["slots"].flatMap(Int.init) {
+    wx.nowcastSlots = slots
+    wx.nowcastWetSlots = int("wetslots", slots)
+    wx.nowcastRuns = int("runs", 1)
+    wx.minutesToPrecip = Float(num("tomins", -1))
+    wx.minutesSincePrecip = Float(num("sincemins", -1))
+    wx.precipNext60 = Float(num("next60", 0))
+    wx.precipPast60 = Float(num("past60", 0))
+}
+// A stand-in station report. These are the present-weather groups a METAR
+// carries; the real ones arrive through Observation.swift, and this is only so
+// the offscreen harness can exercise each branch deterministically.
+if args["obs"] != nil || args["showery"] != nil || args["hail"] != nil
+    || args["squall"] != nil || args["drizzleobs"] != nil || args["continuous"] != nil {
+    wx.observedAt = Date()
+    wx.observedFrom = "SYNTH"
+    wx.observedShowery = args["showery"] != nil
+    wx.observedContinuous = args["continuous"] != nil
+    wx.observedDrizzle = args["drizzleobs"] != nil
+    wx.observedHail = args["hail"] != nil
+    wx.observedSquall = args["squall"] != nil
+    wx.observedIcePellets = args["pellets"] != nil
+    wx.observedFreezing = args["freezing"] != nil
+}
 // --live fetches real conditions for the chosen location, exercising exactly
 // the same WeatherService the app and saver use.
 if args["live"] != nil {
@@ -396,12 +436,24 @@ renderer.resize(width: width, height: height)
 // Stand-in furniture so splash behaviour can be exercised offscreen. The real
 // hosts derive this from NSScreen and the dock preferences; here it is just a
 // bar across the bottom the right sort of size.
-if args["dock"] != nil {
+// --widget adds a floating rect with clear pane BELOW it, which the dock does
+// not have — the dock is flush with the bottom of the display, so anything
+// running off its underside runs off the screen. Undersides are where fog and
+// dew separate themselves from everything else that falls, and without a
+// surface that has one there is no way to see that they do.
+if args["dock"] != nil || args["widget"] != nil {
     let W = Float(width), H = Float(height)
-    let dockH = H * 0.09, dockW = W * 0.72
-    renderer.surfaces = [
-        Surface(x: (W - dockW) / 2, y: H - dockH, w: dockW, h: dockH, kind: .dock)
-    ]
+    var out: [Surface] = []
+    if args["dock"] != nil {
+        let dockH = H * 0.09, dockW = W * 0.72
+        out.append(Surface(x: (W - dockW) / 2, y: H - dockH, w: dockW, h: dockH, kind: .dock))
+    }
+    if args["widget"] != nil {
+        let wW = W * 0.26, wH = H * 0.20
+        out.append(Surface(x: W * 0.09, y: H * 0.30, w: wW, h: wH, kind: .widget))
+        out.append(Surface(x: W * 0.63, y: H * 0.16, w: wW * 0.8, h: wH * 0.7, kind: .widget))
+    }
+    renderer.surfaces = out
 }
 
 // ---------------------------------------------------------------- --sheet

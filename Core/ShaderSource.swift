@@ -61,7 +61,11 @@ struct Uniforms {
     float dispersAmt;          // 0..1, glass only
     float frostAmt;            // 0..1, glass only
     float splayAmt;            // 0..1
-    float _pad0, _pad1;        // keep the struct a multiple of 16 bytes (224)
+    // ---- what is falling, and how dark it has got. These two took over the
+    // pair of tail pad floats, so the struct is still 56 fields / 224 bytes.
+    float pform;               // PrecipForm: 0 none 1 drizzle 2 rain 3 freezing
+                               // 4 ice pellets 5 snow 6 snow grains 7 graupel 8 hail
+    float gloomF;              // 0..1, light the deck is taking out
 };
 
 // Rain is rasterised at this multiple of the cell grid in each axis.
@@ -100,7 +104,13 @@ inline float skyBr(float sAlt) {
 }
 
 // Sky gradient for a screen-space y fraction (roomstand.py:2186)
-inline float3 skyRGB(float sAlt, float yFrac, float aqiF, float covF, float smokeF) {
+//
+// `deckF` is NOT total cover. It is how much of the sky is behind something
+// OPAQUE — low deck at full weight, mid most of the way, high cirrus barely at
+// all. Blue survives a cirrus veil (it goes milky, it does not go grey), and it
+// does not survive a stratus lid. Feeding total cover in here is what made a
+// sky of pure high cloud blanch as hard as a rain deck.
+inline float3 skyRGB(float sAlt, float yFrac, float aqiF, float deckF, float smokeF) {
     float a = clamp(sAlt, -20.0f, 90.0f);
     // How far down the frame the HORIZON colour reaches.
     //
@@ -167,11 +177,34 @@ inline float3 skyRGB(float sAlt, float yFrac, float aqiF, float covF, float smok
     // The target used to be a flat 198 at every hour, so an overcast midnight
     // sky was washed to the same pale grey as an overcast noon, and every trace
     // of hue went with it. Overcast at night is dark, and what light it does
-    // have is the orange the city throws up at it.
-    if (covF > 0.08f) {
-        float ck = (covF - 0.08f) * 1.09f * 0.28f;
+    // have is the orange the city throws up at it. That much was right and is
+    // kept.
+    //
+    // The WEIGHT was not. It was `(deckF - 0.08) * 1.09 * 0.28`, which tops out
+    // at 0.28: a hundred per cent overcast still kept 72% of the clear-sky hue,
+    // so a 95%-cover rain scene rendered as bright blue. There is no blue in an
+    // overcast. You are not looking at the sky at all — you are looking at the
+    // bottom of a cloud, and the only question is how bright it is.
+    //
+    // So the response is now superlinear and reaches near-total: scattered cloud
+    // barely touches the background (the clouds themselves are drawn on top of
+    // it, and blue belongs in the gaps), while a closed deck takes it all.
+    if (deckF > 0.06f) {
+        float t  = saturate((deckF - 0.06f) / 0.94f);
+        float ck = powr(t, 2.2f) * 0.97f;   // 25%->0.02, 50%->0.17, 90%->0.76, 100%->0.97
         float lit = skyBr(sAlt);
-        float3 tgt = mix(float3(26.0f, 24.0f, 30.0f), float3(198.0f, 198.0f, 200.0f), lit);
+        // Brightness of the lid: sun elevation sets the exposure, deck depth
+        // sets how much of it survives the trip through. A thin stratus is a
+        // luminous white ceiling; nimbostratus over the same town at the same
+        // hour is slate.
+        float thick = t * t;
+        float3 day   = mix(float3(216.0f, 217.0f, 220.0f), float3(148.0f, 150.0f, 157.0f), thick);
+        float3 night = mix(float3( 30.0f,  28.0f,  34.0f), float3( 19.0f,  18.0f,  23.0f), thick);
+        float3 tgt = mix(night, day, lit);
+        // Not dead flat: an overcast is brightest overhead, where the sight line
+        // through the deck is shortest, and greys down toward the horizon. Small,
+        // but without it a full lid is one solid colour edge to edge.
+        tgt *= 1.05f - 0.17f * hk;
         r += (tgt.r - r) * ck; g += (tgt.g - g) * ck; b += (tgt.b - b) * ck;
     }
     // Urban skyglow, at the horizon, through night and twilight.
@@ -190,7 +223,7 @@ inline float3 skyRGB(float sAlt, float yFrac, float aqiF, float covF, float smok
     if (a < 2.0f && yFrac > 0.78f) {
         float reach = saturate((yFrac - 0.78f) / 0.22f);
         float lp = saturate((2.0f - a) / 22.0f) * reach * reach
-                 * 0.34f * (0.65f + 0.90f * covF);
+                 * 0.34f * (0.65f + 0.90f * deckF);
         r += (88.0f - r) * lp; g += (54.0f - g) * lp; b += (30.0f - b) * lp;
     }
     return float3(r, g, b);
@@ -421,6 +454,14 @@ fragment CellOut cellPass(VOut in [[stage_in]],
     float dotPh = cellPhase(idx);
 
     float covF     = U.covF;
+    // Opaque cover: how much of the sky is behind something you cannot see blue
+    // through. The three layers are not interchangeable — a stratus lid is a
+    // ceiling, altostratus is a translucent sheet, cirrus is a veil you read the
+    // sun straight through — so they are weighted by what they actually block,
+    // and they overlap multiplicatively rather than summing past one.
+    float deckF = 1.0f - (1.0f - U.cloudLow)
+                       * (1.0f - U.cloudMid  * 0.80f)
+                       * (1.0f - U.cloudHigh * 0.22f);
     float humidF   = saturate((U.humid - 50.0f) / 50.0f);
     float aqiF     = U.aqiF, smokeF = U.smokeF;
     float skyBrAmt = U.skyBrAmt;
@@ -522,7 +563,16 @@ fragment CellOut cellPass(VOut in [[stage_in]],
             float g2 = fexp(-sqrt(gd2) / bpr) * bpp;
             L += g2 * (skyBrAmt > 0.5f ? 120.0f : 100.0f);
             float ww2 = min(0.6f, g2 * 0.8f);
-            if (ww2 > w) { w = ww2; cr = 248.0f; cg = 250.0f; cb = 255.0f; }
+            // `ww2 > w` alone is a gate that is always true: nothing has written
+            // a colour yet, so w is exactly 0 and ANY pocket, however faint,
+            // takes the cell outright — and it takes it at full strength,
+            // because this is an assignment and not a blend. At night `lightAmt`
+            // collapses to a fraction of a per cent, so these were painting
+            // near-white (248,250,255) into cells at a weight of 0.003; the deck
+            // then blended only 39% of the way back, leaving hard-edged white
+            // discs — the pocket's own circular cutoff — hanging in an overcast
+            // midnight sky. A pocket has to be worth something to be seen.
+            if (ww2 > w && ww2 > 0.02f) { w = ww2; cr = 248.0f; cg = 250.0f; cb = 255.0f; }
         }
     }
 
@@ -591,10 +641,25 @@ fragment CellOut cellPass(VOut in [[stage_in]],
         // Depth into the deck, 1 at the solid top and falling through the
         // fringe. Drives the shading below, so the deck still lightens toward
         // its edge rather than being a slab of one tone.
-        lowD2 = saturate(1.0f - cyp / max(eY + lowFeather, 1.0f));
+        //
+        // Measured over a FIXED distance above the edge, for the same reason
+        // `lowK` is: `1 - cyp / (eY + feather)` normalised by the deck's OWN
+        // extent, so it reported "thinning" purely because the frame ran out.
+        // Under a closed deck — eY well past the bottom of the frame — it fell
+        // from 1 at the top to about 0.25 at the bottom, which put a two-to-one
+        // brightness ramp and a matching opacity ramp down a lid that should be
+        // uniform. The posterizer then turned that smooth ramp into a hard
+        // scalloped contour across the middle of the frame, so a total overcast
+        // still looked like a deck that stopped halfway. A closed deck is now
+        // flat, and only a real fringe thins.
+        lowD2 = saturate((eY - cyp) / (4.0f * lowFeather));
         // How much cloud is THERE, and how brightly it is painted, are two
         // different quantities and only the second is a function of the hour.
-        lowThick = lowK * (0.45f + 0.55f * lowD2) * min(1.0f, 0.35f + covF);
+        //
+        // Density is the LOW layer's own, not total cover. Keyed off `covF` this
+        // read a sky of pure cirrus as a solid deck — the layer split exists
+        // precisely so those two do not look alike.
+        lowThick = lowK * (0.45f + 0.55f * lowD2) * min(1.0f, 0.35f + U.cloudLow);
         lowAmt   = lowThick * nightCloudDim;
     }
 
@@ -624,18 +689,56 @@ fragment CellOut cellPass(VOut in [[stage_in]],
     if (sAlt > -1.5f) {
         float sunV = saturate((sAlt + 1.5f) / 3.0f);
         float dx = cxp - sunP.x, dy = cyp - sunP.y, d = sqrt(dx * dx + dy * dy);
-        float glow = fexp(-d * invSunR) * uvAmp * sunDim * sunV * seeThrough;
+        // How much of the sun gets past what is in front of it.
+        //
+        // NOT linear in transmission, which is what this used to be and what
+        // put a bright patch over a solid deck: at 30% transmission a linear
+        // law still hands over 30% of a very bright glow, and 30% of very
+        // bright against a dark overcast is a glowing hole in the cloud.
+        //
+        // Thin cloud does the opposite. A strong sun behind a broken low deck
+        // genuinely does outshine it — the rays come through harder than the
+        // cover alone suggests, which is why a bright day with scattered cloud
+        // looks brilliant rather than merely averaged.
+        //
+        // So: a gamma that collapses the tail, plus a punch-through that grows
+        // with how strong the sun actually is and with how much is getting
+        // past. Dense cloud takes it to nothing; thin cloud lets it flare.
+        float punch = powr(seeThrough, 2.2f) * (1.0f + uvNorm * 1.4f * seeThrough);
+        float glow = fexp(-d * invSunR) * uvAmp * sunDim * sunV * punch;
         float ripSpeed = 0.15f + saturate(U.uv / 11.0f) * 0.25f;
         // The solar ripple — concentric arcs radiating from the sun. Wanted,
         // and deliberately at this wavelength: it is the shimmer, not the
         // banding. (I flattened it once looking for the vertical striping and
         // it was the wrong term entirely; that one is the mid-cloud sheet.)
+        // The ripple has to reach exactly ZERO through a closed deck, not merely
+        // become small. You can see where the sun is behind an overcast; you
+        // cannot see it shimmer. Scaled by plain `seeThrough` it survived a 97%
+        // occluding deck at about half a luminance unit — which sounds like
+        // nothing, and is not, because `posterQ` is 16 by day and contouring is
+        // scale-free: an arbitrarily faint periodic signal still decides which
+        // side of a quantisation step each cell falls on, and draws its own
+        // iso-surfaces as hard concentric arcs. In colour, too, since the three
+        // channels cross their steps at different radii. That is the ringed
+        // olive-and-teal target a flat overcast was wearing. Fading to zero at
+        // a fifth transmission removes the signal instead of shrinking it.
+        // Clear sky is untouched: seeThrough is 1 there and so is `ripVis`.
+        float ripVis = saturate((seeThrough - 0.18f) / 0.32f);
         float rip = sin(d * 0.03f - sec * ripSpeed) * fexp(-d * invSunRip)
-                  * uvAmp * sunDim * sunV * seeThrough;
+                  * uvAmp * sunDim * sunV * ripVis;
         L += glow * 58.0f + (rip > 0.0f ? rip * 46.0f : 0.0f);
         float3 sc = sunTint(sAlt, aqiF);
         float ww = min(1.0f, (glow * 1.6f + (rip > 0.0f ? rip * 0.5f : 0.0f)) * sunDim);
-        if (ww > w) { w = ww; cr = sc.r; cg = sc.g; cb = sc.b; }
+        // Same significance floor as the light pockets, and for the same reason:
+        // `ww > w` is not a real test when nothing has written yet. Both `glow`
+        // and `rip` already carry `seeThrough`, so under a closed deck they come
+        // out around a per cent — but the ASSIGNMENT does not care, and it was
+        // stamping full-strength sun tint (255, 250, 195) across the whole
+        // ripple. Against a neutral overcast grey a one per cent hue shift is
+        // the most visible thing in the frame, which is why a flat lid was
+        // wearing concentric olive-and-teal arcs. The ripple still shows through
+        // thin cloud, where it is real, and nothing changes on a clear sky.
+        if (ww > w && ww > 0.02f) { w = ww; cr = sc.r; cg = sc.g; cb = sc.b; }
         // solar disc: round core, soft falloff, weight kept under thick-cloud
         // max so clouds still pass in front of it
         if (d < sunDiscR * 1.7f) {
@@ -848,11 +951,41 @@ fragment CellOut cellPass(VOut in [[stage_in]],
 
     // Low: the dense deck hanging from the top.
     if (lowAmt > 0.0f) {
-        float light = fexp(-sqrt(sgx * sgx + sgy * sgy) / (H * 0.5f));
+        // Where the SUN is putting light on the deck. This had no altitude gate
+        // at all — unlike `sunProx` eight lines up, which stops at -5 degrees —
+        // so at midnight, with the sun forty degrees under the floor, its screen
+        // position still sat just off the frame and lit a broad patch of cloud
+        // from below it. Under a closed deck that patch is the whole difference
+        // between a lit corner and a dark one, and the posterizer turns it into
+        // a hard-edged lobe. A deck at night is lit by the moon and the city, and
+        // by nothing else.
+        float light = fexp(-sqrt(sgx * sgx + sgy * sgy) / (H * 0.5f))
+                    * saturate((sAlt + 7.0f) / 11.0f);
         // The deck is thick, so only its ragged lower fringe transmits.
         float rim = 4.0f * lowAmt * (1.0f - lowAmt) * bodyLight * 0.55f;  // fringe law
-        float shade = min(235.0f, U.cbase * (0.55f + 0.45f * (1.0f - lowD2))
-                                * (0.75f + 0.55f * light) + rim * 70.0f);
+        // Body tone of the deck. The solid part used to sit at 0.55 of `cbase`
+        // and only the fringe reached 1.0, which was survivable while the deck
+        // was a shallow strip along the top but is not once it can close: a
+        // hundred per cent overcast at noon came out as a dark slate ceiling,
+        // when `cbase` is exactly the quantity that already encodes how much
+        // light is getting through the deck at this hour. So the solid tone now
+        // sits near `cbase` itself and the fringe is a modest lift on top.
+        //
+        // The deck also needs a mottle of its own. Every other layer has one —
+        // `midN` for the mid sheet, `fib` for the cirrus — and the low deck had
+        // none at all: it was `cbase` times two smooth radial falloffs, i.e.
+        // paint. That went unnoticed while the deck was a strip along the top of
+        // a blue sky. Once it can close, the whole frame is that one smooth
+        // field, and the posterizer quantises a smooth field into contour rings
+        // — concentric arcs around the sun, with coloured fringes where the
+        // three channels cross their steps at different radii. Overcast IS flat,
+        // but it is not featureless at this scale, and the little that is there
+        // is what breaks the contours up.
+        float lowN = 0.5f + 0.30f * sin(cxp * 0.0061f + cyp * 0.0113f + sec * 0.011f)
+                          + 0.20f * sin(cxp * 0.0134f - cyp * 0.0072f - sec * 0.008f + 2.3f);
+        float shade = min(235.0f, U.cbase * (0.78f + 0.30f * (1.0f - lowD2))
+                                * (0.75f + 0.55f * light)
+                                * (0.84f + 0.32f * lowN) + rim * 70.0f);
         float3 cc = cloudTint(sAlt, light + rim, shade);
         L += lowAmt * (skyBrAmt > 0.5f ? 55.0f : 12.0f) + rim * 26.0f;
         float a = lowAmt * 0.97f;
@@ -877,14 +1010,20 @@ fragment CellOut cellPass(VOut in [[stage_in]],
         // the old hard `y >= eY` cut — which was the same staircase seen from
         // the other side, as a step in the light thrown down.
         float under = saturate(1.0f - (cyp - eY) / (H * 0.30f)) * (1.0f - lowK);
-        L *= 1.0f - under * under * 0.20f * U.cloudLow;
+        // Deepened, and the lift below cut back, by how much light the deck is
+        // actually taking out. `gloomF` rises before the first drop falls and
+        // lingers after the last, and it rises again for a MEASURED low cloud
+        // base — so the space under a 200m ceiling goes properly dim while the
+        // same cover at 3km stays the bright grey it should be. Bounded on
+        // purpose: `cbase` remains the authority on the deck's own tone.
+        L *= 1.0f - under * under * (0.20f + 0.26f * U.gloomF) * U.cloudLow;
         // Scaled WITH `under`, which is 1 at the deck's edge and falls to 0
         // away from it. It was `(26 + 30 * (1 - under))` — maximal where
         // `under` is zero, so the further a cell sat from the deck the more
         // light the deck threw on it. That inverted falloff flooded the whole
         // lower frame with a flat achromatic lift and is what turned the bottom
         // two thirds of a daytime sky into featureless grey.
-        L += U.cloudLow * skyBrAmt * 34.0f * under;
+        L += U.cloudLow * skyBrAmt * 34.0f * under * (1.0f - 0.50f * U.gloomF);
     }
 
     // rain / snow, sampled from the rasterised grid. Streaks lean with the
@@ -899,11 +1038,35 @@ fragment CellOut cellPass(VOut in [[stage_in]],
         float kx = streaks2.sample(ns, float2(float(ix) + 0.5f, float(iy) + 0.5f)).r;
         if (kx > 0.01f) {
             float lit = 1.0f + bodyLight * 1.6f;
-            L += kx * (U.kind == 4 ? 70.0f : 85.0f) * lit;
-            float3 rc = (U.kind == 4) ? float3(240.0f, 246.0f, 255.0f)
-                                      : float3(150.0f, 200.0f, 255.0f);
+
+            // What is falling, not what category the hour is in. `U.kind == 4`
+            // could only ever say snow-or-not, so drizzle, freezing rain, ice
+            // pellets, graupel and hail were all drawn as the same blue-grey
+            // line at the same brightness — five different substances wearing
+            // one costume. Drizzle in particular has to be nearly invisible
+            // individually and read as a haze in aggregate, which is what a
+            // low stratus deck actually delivers.
+            float pf = U.pform;
+            float bright = 85.0f;                        // rain
+            float3 rc = float3(150.0f, 200.0f, 255.0f);
+            float alpha = 0.75f;
+            if (pf > 0.5f && pf < 1.5f) {                // drizzle: fine, floating
+                bright = 32.0f; rc = float3(176.0f, 194.0f, 214.0f); alpha = 0.38f;
+            } else if (pf > 2.5f && pf < 3.5f) {         // freezing rain: glassy
+                bright = 96.0f; rc = float3(198.0f, 222.0f, 255.0f); alpha = 0.80f;
+            } else if (pf > 3.5f && pf < 4.5f) {         // ice pellets: hard, compact
+                bright = 105.0f; rc = float3(226.0f, 238.0f, 252.0f); alpha = 0.86f;
+            } else if (pf > 4.5f && pf < 6.5f) {         // snow / snow grains
+                bright = 70.0f; rc = float3(240.0f, 246.0f, 255.0f); alpha = 0.80f;
+            } else if (pf > 6.5f && pf < 7.5f) {         // graupel: opaque pellets
+                bright = 92.0f; rc = float3(244.0f, 248.0f, 255.0f); alpha = 0.88f;
+            } else if (pf > 7.5f) {                      // hail: hard and very bright
+                bright = 130.0f; rc = float3(250.0f, 252.0f, 255.0f); alpha = 0.95f;
+            }
+
+            L += kx * bright * lit;
             rc = mix(rc, float3(252.0f, 250.0f, 245.0f), saturate(bodyLight * 0.8f));
-            float a = kx * 0.75f;
+            float a = kx * alpha;
             cr += (rc.r - cr) * a; cg += (rc.g - cg) * a; cb += (rc.b - cb) * a;
             w = w + (1.0f - w) * a;
         }
@@ -938,7 +1101,7 @@ fragment CellOut cellPass(VOut in [[stage_in]],
     float lum = (R0 + G0 + B0) * 0.333f;
 
     // ---- LUT base, sky ambient tint, weather tint, posterize
-    float3 sky = skyRGB(U.sunAlt, float(iy) / U.rows, aqiF, covF, smokeF);
+    float3 sky = skyRGB(U.sunAlt, float(iy) / U.rows, aqiF, deckF, smokeF);
     float li = saturate(lum / 210.0f);
     float3 g = rampLUT(lum + U.nightBoost);
 
@@ -1763,6 +1926,126 @@ fragment float4 presentPass(VOut in [[stage_in]],
                 float3 sky = cells.sample(nearestS, mirror + 0.5f).rgb;
                 col = mix(col, mix(col * 0.86f, sky, 0.62f), wetness);
                 lum = saturate(lum * 0.92f);
+            } else if (kind >= 7) {
+                // ---- WEATHER ON THE FURNITURE.
+                //
+                // The dock, the menu bar and the widgets draw over the
+                // wallpaper, so none of this is inside their rects: it is the
+                // band of cells immediately above a top edge, where the
+                // meniscus stands, and below a bottom edge, where a film hangs.
+                //
+                // These are separate MATERIALS rather than one wetness at
+                // several strengths, because that is the actual difference
+                // between them — glaze is bright where water is dark, frost is
+                // matte where ice is glossy, dirt is warm where all three are
+                // cool. The pane's own water is deliberately understated so it
+                // reads as atmosphere; a lip is a thing you are looking AT, so
+                // these are allowed to be seen.
+                float  k    = min(wetness, 1.0f);
+                float  lumv = dot(col, float3(0.299f, 0.587f, 0.114f));
+
+                if (kind == 7) {
+                    // Liquid water on a lip. Wet is DARKER and more saturated —
+                    // the film kills the diffuse scatter that made the dry
+                    // surface pale — and glossy, because what you lose in
+                    // scatter comes back as a reflection of the sky above.
+                    col = mix(col, col * 0.55f, k);
+                    col = mix(col, lumv + (col - lumv) * 1.60f, k * 0.85f);
+                    float3 sky = cells.sample(nearestS,
+                                    float2(cid.x, max(0.0f, cid.y - 5.0f)) + 0.5f).rgb;
+                    col = mix(col, sky, k * 0.26f);
+                    lum = saturate(lum * (1.0f - k * 0.28f) + k * 0.10f);
+
+                } else if (kind == 12) {
+                    // A bead standing on that lip. Same sphere-of-water shading
+                    // as a pane droplet, on a surround that is properly soaked.
+                    col = mix(col, col * 0.58f, k);
+                    col = mix(col, lumv + (col - lumv) * 1.55f, k * 0.80f);
+                    int wdepth = detailDepth(wetness, 0.10f, SP, 6.0f, 2);
+                    if (wdepth > 1) {
+                        dc = splitCell(px, SPv, wdepth);
+                        phase = cellPhase(uint(dc.id.y * U.cols * float(wdepth) + dc.id.x));
+                    }
+                    float2 rel = gcell.zw;
+                    float  q   = min(length(rel) * 1.30f, 1.0f);
+                    if (q < 1.0f) {
+                        float2 src = clamp(cid - rel * (q * q * 2.6f), float2(0.0f),
+                                           float2(U.cols - 1.0f, U.rows - 1.0f));
+                        col = mix(col, cells.sample(nearestS, src + 0.5f).rgb, 0.60f * k);
+                        col *= 1.0f - saturate((q - 0.50f) / 0.50f) * 0.32f * k;
+                        float spec = saturate(1.0f - length(rel - float2(-0.30f, -0.30f)) / 0.42f);
+                        col += spec * spec * 0.26f * k;
+                    }
+                    lum = saturate(lum * (1.0f - k * 0.20f) + k * 0.12f);
+
+                } else if (kind == 8) {
+                    // Clear ice. A glaze is the one deposit that BRIGHTENS what
+                    // it covers: it is transparent, so the surface shows
+                    // through, with a hard bright skin over the top of it. What
+                    // makes it read as ice rather than as paint is that the
+                    // skin is SPECULAR — a glaze is optically smooth, far
+                    // smoother than the surface underneath, so it carries a
+                    // hard highlight that frost at the same whiteness cannot.
+                    col = mix(col, mix(col * 1.14f, float3(0.82f, 0.90f, 0.99f), 0.42f), k);
+                    float gl = fract(sin(dot(cid, float2(31.7f, 11.3f))) * 24634.6345f);
+                    col += k * (0.06f + 0.16f * pow(gl, 3.0f));
+                    lum = saturate(lum + k * 0.26f);
+
+                } else if (kind == 9) {
+                    // Frost. Crystalline and MATTE — the opposite of glaze,
+                    // which is why the two never look alike however cold it is.
+                    // It scatters instead of reflecting, so it takes the colour
+                    // out and puts nothing back but the occasional facet catching
+                    // the light.
+                    col = mix(col, mix(float3(lumv), float3(0.93f, 0.95f, 0.99f), 0.72f),
+                              k * 0.88f);
+                    float g = fract(sin(dot(cid, float2(12.9898f, 78.233f))) * 43758.5453f);
+                    float tw = sin(U.time * 0.85f + g * 6.2832f);
+                    col += pow(max(0.0f, tw), 14.0f) * k * 0.20f;
+                    lum = saturate(lum + k * 0.28f);
+
+                } else if (kind == 13) {
+                    // CONDENSATION. A surface carrying micron-scale droplets is
+                    // optically rough at the wavelength of light, so it
+                    // SCATTERS: it goes pale and hazy and loses contrast. That
+                    // is breath on a window, and it is the opposite of what
+                    // rain does to the same surface, which is why fog and dew
+                    // must not be drawn as weak versions of wet.
+                    //
+                    // It is also why they are visible at all. Dew forms on a
+                    // clear night and a night sky is nearly black — there is
+                    // nothing there to darken, and a darkening treatment made
+                    // the one condition that only ever happens in the dark
+                    // completely invisible.
+                    float3 haze = mix(float3(lumv), float3(0.86f, 0.90f, 0.96f), 0.55f);
+                    col = mix(col, haze, k * 0.62f);
+                    // No specular anywhere: a scattering film has no mirror in
+                    // it, which is exactly what separates it from a glaze.
+                    lum = saturate(lum + k * 0.16f);
+
+                } else if (kind == 10) {
+                    // Dry deposition. Warm, dull and desaturating — dirt is the
+                    // only thing here that is not made of water, and it should
+                    // not read as any kind of wetness.
+                    float d = k * 0.60f;
+                    col = mix(col, mix(float3(lumv), float3(0.44f, 0.39f, 0.33f), 0.55f), d);
+                    lum = saturate(lum * (1.0f - d * 0.30f));
+
+                } else {
+                    // kind 11 — a matte film: drizzle, dew, or rain whose drops
+                    // are measurably too small to gather. Wet, and therefore
+                    // darker, but with no bead anywhere on it to catch a
+                    // highlight, so it darkens and FLATTENS instead of
+                    // glossing. That flatness is the whole of what makes a
+                    // drizzled surface look different from a rained-on one, so
+                    // it has to be strong enough to actually see — at the
+                    // wet-cell strengths the pane uses it was a 13% shift and
+                    // vanished entirely against the mosaic.
+                    float d = min(1.0f, k * 1.05f);
+                    col = mix(col, col * 0.60f, d);
+                    col = mix(col, float3(lumv), d * 0.34f);
+                    lum = saturate(lum * (1.0f - d * 0.30f));
+                }
             } else {
                 // Wet cells: same cell, wetter. Darker and more saturated.
                 float k = wetness * (kind == 2 ? 1.15f : (kind == 3 ? 0.5f : 1.0f));

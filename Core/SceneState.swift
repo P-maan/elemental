@@ -54,7 +54,13 @@ struct Uniforms {
     var dispersAmt: Float = 0
     var frostAmt: Float = 0
     var splayAmt: Float = 0
-    var _pad0: Float = 0, _pad1: Float = 0
+    // ---- what is falling, and how dark it has got. These two took over the
+    // pair of tail pad floats, so the struct is still 56 fields / 224 bytes.
+    /// `PrecipForm.rawValue` as a float. Snow, hail and drizzle are not one
+    /// substance at three intensities, and the streak pass draws them apart.
+    var pform: Float = 0
+    /// `WeatherState.gloom`, 0..1. How much light the deck is taking out.
+    var gloomF: Float = 0
 }
 
 struct GPUBreather { var ax, ay, R, per, s1, s2, ph, ph2: Float }
@@ -451,7 +457,18 @@ struct WeatherState {
 
     /// Water genuinely arriving, in mm. Snow is weighted to a liquid
     /// equivalent so one threshold works for both.
-    var precipAmount: Float { max(precipitation, effectiveRain + snow * 10) }
+    ///
+    /// `snow` is reported in CENTIMETRES of depth and the conventional
+    /// snow-to-liquid ratio is about ten to one, so a centimetre of snow is
+    /// about a millimetre of water and the conversion is times one, not times
+    /// ten. The old factor made every snowfall behave as ten times the weather
+    /// it was: two centimetres an hour — heavy but ordinary — came out as a
+    /// 20mm/h rate, which drove the fall speed, the streak length and the
+    /// through-precipitation visibility right off their curves and reported a
+    /// hundred-metre whiteout for a normal snowy afternoon. Every published
+    /// relationship downstream (Gunn & Kinzer, Rasmussen) is written against a
+    /// liquid-equivalent rate, so this has to be one.
+    var precipAmount: Float { max(precipitation, effectiveRain + snow) }
 
     /// Is anything actually falling? A hair above zero, because the feeds
     /// report 0.01mm noise on dry days.
@@ -960,9 +977,21 @@ struct WeatherState {
             t *= (1 - 0.25 * clearingProgress)
         }
 
-        // A measured low ceiling under precipitation is a deep deck.
-        if ceiling >= 0 && isPrecipitating {
-            t *= lerp(0.75, 1, ceiling / 900)
+        // A MEASURED cloud base. This is the single most useful number a METAR
+        // carries that the model does not report at all, and cloud base height
+        // is most of what decides whether an overcast reads as a high grey lid
+        // or a low oppressive one.
+        //
+        // It applies wet or dry. The old test only looked at the ceiling while
+        // it was raining, which threw away the commonest case there is: a 200m
+        // ceiling on a dry winter afternoon is the darkest sky most people ever
+        // stand under. Scaled by how much low cloud is actually there, so a
+        // ceiling reported under a broken sky cannot black out a half-clear
+        // frame, and by construction a missing ceiling (-1) changes nothing.
+        if ceiling >= 0 {
+            let deck = clamp01(cloudLow / 100)
+            let low = 1 - clamp01((ceiling - 120) / 2200)   // 1 at the deck, 0 by 2.3km
+            t *= 1 - (isPrecipitating ? 0.30 : 0.20) * low * deck
         }
 
         // Snow is the exception to all of it. The crystals scatter forward and

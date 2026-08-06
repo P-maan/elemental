@@ -77,6 +77,13 @@ enum DepositForm {
     /// Fog and mist. No impact at all — the water arrives out of the air by
     /// condensation, so it wets everything evenly including undersides.
     case fog
+    /// Dew. The same mechanism as fog and the far more common one: the air is
+    /// not obscured, but the surface has fallen below the dew point and the
+    /// vapour touching it gives up its water. An even film of very small
+    /// droplets on every face, arriving out of the air rather than falling onto
+    /// it, and it appears on a clear calm night precisely because that is when a
+    /// surface radiates itself coldest.
+    case dew
     /// Deposition straight from vapour to ice on a sub-zero surface. A
     /// crystalline bloom that grows outward from edges.
     case frost
@@ -93,6 +100,98 @@ enum DepositForm {
 
     /// Does it leave liquid water that can run?
     var runs: Bool { self == .rain || self == .freezingRain }
+
+    /// Is this form actively putting liquid water onto a surface right now?
+    ///
+    /// If it is, the evaporation term must not run in the same frame, or the
+    /// two fight: dew condensed at 0.013/s while the dryer took 0.011/s back
+    /// out, so after two minutes of a perfect dew night the lip had 0.24 of a
+    /// film and was still climbing at a fifth of the rate it should have. The
+    /// deposit was correct, the balance was not, and the symptom was simply
+    /// "not very visible" — which is the hardest kind of wrong to spot.
+    var deposits: Bool {
+        switch self {
+        case .rain, .drizzle, .hail, .fog, .dew, .freezingRain: return true
+        case .sleet, .snow, .frost, .dust, .none: return false
+        }
+    }
+
+    /// The most liquid water an impact of this kind can leave on a lip, 0..1.
+    ///
+    /// An impact deposits what did not bounce away, and for most of these that
+    /// is almost nothing: an ice pellet is frozen through and leaves a dry
+    /// rattle, a snowflake is not liquid at all. Without this ceiling the splash
+    /// path simply added wetness on every strike whatever was striking, and six
+    /// thousand frames of a snowstorm left the dock reporting a soaking wet,
+    /// running lip at -4°C — the arrival physics said one thing and the
+    /// collision physics quietly overruled it.
+    var liquidCeiling: Float {
+        switch self {
+        case .rain:         return 1.0
+        case .hail:         return 0.60   // meltwater, and plenty of it
+        case .freezingRain: return 0.45   // most of it sets as ice instead
+        case .fog, .dew:    return 0.35
+        case .drizzle:      return 0.25   // wets, never gathers
+        case .sleet:        return 0.12   // bounces off nearly dry
+        case .snow:         return 0.05
+        case .frost, .dust, .none: return 0.10
+        }
+    }
+
+    /// Does it clean a surface off, or add to what is on it?
+    ///
+    /// Only water arriving with enough volume and momentum to carry dirt away.
+    /// Drizzle wets the dirt without moving it — which is why a drizzled car
+    /// comes out streakier than a dry one — and a glaze seals it underneath.
+    var washes: Bool { self == .rain || self == .hail }
+}
+
+/// The weather as a LIP feels it, worked out once a frame from measured
+/// quantities.
+///
+/// Every field here is derived from something an instrument reported — a fall
+/// speed, a dew point, a cloud cover, a wind — and never from a WMO code or a
+/// scene category. That is the whole discipline: a code says what someone
+/// decided to call the hour, and a surface responds to what actually hit it.
+///
+/// Anything that cannot be derived because the reading is missing degrades to
+/// the value that makes NOTHING happen, rather than to a plausible default.
+/// A missing cloud cover must not be allowed to invent a frost.
+struct SurfaceWeather {
+    /// What the lip itself is at, °C.
+    ///
+    /// No surface in this engine carries a temperature, so this is the air
+    /// temperature minus the radiative deficit a surface facing an open sky
+    /// runs at. That deficit is not a detail: it is the entire reason frost
+    /// appears on a clear calm night and not on a cloudy windy one at the same
+    /// air temperature.
+    var surfaceTemp: Float = 20
+    /// Median drop diameter, mm. Inverted from the MEASURED fall speed rather
+    /// than assumed from the form — Atlas & Ulbrich, v = 3.78 D^0.67 at sea
+    /// level. This is what decides whether water beads or lies flat.
+    var dropDiameter: Float = 0
+    /// 0 discrete beads, 1 a continuous sheet. A surface sheets when water
+    /// arrives faster than the lip can shed it.
+    var sheeting: Float = 0
+    /// Can what is landing actually run? Below about 0.6mm surface tension
+    /// wins outright and the drop stays where it lands however much of it
+    /// arrives, which is why drizzle is matte and light rain is glossy.
+    var canRun = false
+    /// How hard the air is giving up water onto the surface, 0..1. The measured
+    /// test is dew point against SURFACE temperature; relative humidity on its
+    /// own would put frost on a warm monsoon night.
+    var condensing: Float = 0
+    /// Is the lip at or below freezing? Decides deposition versus condensation,
+    /// and glaze versus run-off.
+    var freezing: Bool { surfaceTemp <= 0 }
+    /// Which way water is being driven along the lip, -1..1. Zero in still air:
+    /// spray then goes straight up, which is a different picture entirely.
+    var drive: Float = 0
+    /// How much of the water is thrown horizontally rather than dropped, 0..1.
+    var driven: Float = 0
+    /// How loose the snow lies. A dendrite bulks up deep and open; graupel is
+    /// rimed and nearly spherical and packs dense and shallow.
+    var snowBulk: Float = 1
 }
 
 /// What has collected on one piece of desktop furniture.
@@ -107,6 +206,14 @@ struct SurfaceFilm {
     var lip: Float = 0
     /// Snow lying, in cells.
     var snow: Float = 0
+    /// How much of the lip the snow still covers, 0..1.
+    ///
+    /// Depth and EXTENT are separate, because a thawing cap does not thin
+    /// evenly — it retreats from the ends, where the edge sees warm air on
+    /// three sides instead of one. A cap that only lost depth would fade like a
+    /// dimmer being turned down; a cap that also loses span visibly shrinks back
+    /// toward the middle of the lip, which is what a real one does.
+    var snowSpan: Float = 0
     /// Clear ice, 0..1.
     var glaze: Float = 0
     /// Crystalline bloom, 0..1.
@@ -141,8 +248,31 @@ final class SceneSimulation {
     // weather-driven fields
     private(set) var edgeArr: [Float] = []
 
-    // streaks, packed per column for the shader's colIndex lookup
-    private var streaks: [(c: Float, y: Float, len: Float, v: Float, slope: Float)] = []
+    // Falling hydrometeors.
+    //
+    // `wob`/`ph` are the sideways wander a slow crystal describes on the way
+    // down — a dendrite at 0.8 m/s in any breeze at all does not fall, it
+    // drifts. `hops` counts rebounds, so a hailstone bounces once off the
+    // bottom edge and then behaves.
+    private var streaks: [(c: Float, y: Float, len: Float, v: Float,
+                           slope: Float, wob: Float, ph: Float, hops: Float)] = []
+
+    /// How much precipitation is arriving at each COLUMN right now, 0..1.
+    ///
+    /// This is where MORPHOLOGY lives. Steady frontal rain fills it almost
+    /// flat, because uniform in space and continuous in time is what frontal
+    /// rain IS; a shower puts cells in it with genuinely dry gaps between them;
+    /// a squall puts narrow bands in it that sweep across; drizzle is the most
+    /// uniform thing there is and fills it completely.
+    ///
+    /// Streaks are placed by rejection against this, so a dry gap places
+    /// nothing at all rather than merely placing dimmer rain — which is the
+    /// difference between scattered showers and weak steady rain.
+    private(set) var precipField: [Float] = []
+
+    /// Fractional carry on the spawn rate, so it is a RATE rather than "at most
+    /// one streak per frame". See updateStreaks.
+    private var spawnAccum: Float = 0
 
     /// Rain rasterised into the cell grid, so a streak can lean with the wind
     /// instead of being locked to one column. Bucketing streaks per column made
@@ -171,13 +301,38 @@ final class SceneSimulation {
         let wet = trailCells.filter { $0 > 0.15 }.count
         let mean = trailCells.isEmpty ? 0 : trailCells.reduce(0, +) / Float(trailCells.count)
         let peak = trailCells.max() ?? 0
+        let fMin = precipField.min() ?? 0
+        let fMean = precipField.isEmpty ? 0 : precipField.reduce(0, +) / Float(precipField.count)
         return String(format: "T=%.0f RH=%.0f Td=%.1f wind=%.0f uv=%.1f evap=%.3f vpd=%.2f | surfaces=%d splashes=%d streaks=%d lit=%d drops=%d | film mean=%.3f peak=%.2f wet>0.15=%d/%d "
-                            + "| pool=%.2f spots=%d grid=%dx%d",
+                            + "| pool=%.2f spots=%d grid=%dx%d | field min=%.2f mean=%.2f dryCols=%d",
                       lastWeather.temperature, lastWeather.humidity, lastWeather.dewPoint,
                       lastWeather.wind, lastWeather.uv,
                       lastWeather.evaporationRate, lastWeather.vapourPressureDeficit,
                       surfaces.count, splashCount, streaks.count, lit, drops.count, mean, peak, wet, trailCells.count,
-                      poolDepth, spots.count, cols, rows)
+                      poolDepth, spots.count, cols, rows,
+                      fMin, fMean, precipField.filter { $0 < 0.05 }.count)
+            + "\n" + surfaceSummary
+            + "\n" + lastWeather.presentationSummary
+    }
+
+    /// What the furniture is actually carrying. Without this the only way to
+    /// check a deposit is to squint at a PNG and hope.
+    var surfaceSummary: String {
+        let sw = surfaceWeather
+        var s = String(format:
+            "  furniture form=%@ Tsurf=%.1f (air %.1f) Td=%.1f drop=%.2fmm sheet=%.2f "
+            + "run=%@ cond=%.2f drive=%+.2f bulk=%.2f",
+            String(describing: form), sw.surfaceTemp, lastWeather.temperature,
+            lastWeather.dewPoint, sw.dropDiameter, sw.sheeting,
+            sw.canRun ? "y" : "n", sw.condensing, sw.drive, sw.snowBulk)
+        for (i, f) in films.enumerated() {
+            s += String(format:
+                "\n    [%d %@] wet=%.2f lip=%.2f run=%.2f snow=%.2f/%.2f glaze=%.2f frost=%.2f grime=%.2f steam=%.2f imp=%.2f",
+                i, String(describing: surfaces[i].kind),
+                f.wet, f.lip, f.runoff, f.snow, f.snowSpan,
+                f.glaze, f.frost, f.grime, f.steam, f.impact)
+        }
+        return s
     }
 
     /// Wet tracks left behind by running drops.
@@ -202,6 +357,16 @@ final class SceneSimulation {
     private var boltEnergy: Float = 0
     /// Last weather seen, so helpers do not need it threaded through.
     private var lastWeather = WeatherState()
+    /// Scene time at the current step, for the presentation pass — beads on a
+    /// lip swell and slide, and that has to be a function of time rather than
+    /// of the frame counter or it flickers instead of moving.
+    private var simSec: Float = 0
+    /// Sun altitude and view heading, kept for the surface-energy terms. A lip
+    /// only runs colder than the air once the sun is off it.
+    private var sunAlt: Float = 0
+    private var facingAz: Float = 180
+    /// The measured picture the furniture responds to. Recomputed once a frame.
+    private(set) var surfaceWeather = SurfaceWeather()
     private var boltActive = false
     private var flashT: Float = -9
     private var nextBolt: Float = 0
@@ -249,15 +414,14 @@ final class SceneSimulation {
 
     /// Grime settles out of dirty air onto every surface and washes off in
     /// rain, so a filthy week visibly builds up and one shower clears it.
-    /// Snow lying on each kind of surface, in cells, keyed by Surface.Kind.
-    ///
-    /// Declared here because the reference existed without it — an agent was
-    /// cut off mid-edit and left the read site behind. Empty means the guard at
-    /// the read site never passes, so snow caps are inert rather than wrong:
-    /// restoring the build without inventing accumulation physics that was
-    /// never written and cannot be verified.
-    private var snowCap: [Int32: Float] = [:]
-
+    //
+    //  There used to be a `snowCap: [Int32: Float]` here, keyed by Surface.Kind
+    //  and left permanently empty by an interrupted edit so its read site could
+    //  never fire. Keying by KIND was the wrong shape anyway: two widgets in
+    //  different places catch different amounts, and one number per kind averages
+    //  exactly the difference that makes them worth drawing. Accumulation now
+    //  lives in `SurfaceFilm.snow`/`snowSpan`, one per surface, alongside every
+    //  other thing that collects on a lip.
     private(set) var grime: Float = 0
     /// Condensation on the furniture: warm wet air against a cool surface.
     private(set) var steam: Float = 0
@@ -319,6 +483,7 @@ final class SceneSimulation {
         H = Float(rows) * sp
         W = Float(cols) * sp
         edgeArr = [Float](repeating: 0, count: cols)
+        precipField = [Float](repeating: 1, count: cols)
         streakCells = [Float](repeating: 0, count: cols * rows)
         streakFine  = [Float](repeating: 0,
                               count: cols * rows * SceneSimulation.streakSub * SceneSimulation.streakSub)
@@ -347,6 +512,7 @@ final class SceneSimulation {
     /// pane and stays, because the pane is your screen rather than the weather.
     func locationChanged(now sec: Float) {
         streaks.removeAll(keepingCapacity: true)
+        spawnAccum = 0
         rasteriseStreaks()
         streakGridLive = false
         boltActive = false
@@ -360,6 +526,7 @@ final class SceneSimulation {
     /// Reset the transient weather effects (roomstand.py:2063).
     func seed(now sec: Float) {
         streaks.removeAll(keepingCapacity: true)
+        spawnAccum = 0
         boltActive = false
         flashT = -9
         nextBolt = sec + 9 + rnd() * 14
@@ -372,16 +539,37 @@ final class SceneSimulation {
     /// Advance by `dt` seconds at absolute time `sec`.
     func step(dt rawDT: Float, sec: Float, state: SceneState) {
         let dt = min(0.1, max(0, rawDT))
+        simSec = sec
+        // Pick up an edited config. `Furniture.poll` documents itself as being
+        // called from the simulation's step "which is the one place that runs in
+        // every host" — and it was called from nowhere at all, so every one of
+        // the wetDock / wetWidgets / wetMenuBar / paneWater switches was inert
+        // and `Furniture.options` sat on its compiled-in defaults forever. It
+        // stats the file at most once every five seconds and decodes only when
+        // the timestamp has actually moved.
+        Furniture.poll(now: TimeInterval(sec))
         let w = state.weather
         lastWeather = w
         let covF = state.covF
         let sAlt = state.astro.sunAlt
+        sunAlt = sAlt
+        facingAz = state.facingAz
 
-        // The hanging deck is the LOW layer. Driving it from total cover made
-        // a sky of pure high cirrus grow a dense lid it should not have.
-        let deckCover = max(w.cloudLow / 100, covF * 0.25)
-        updateCloudEdge(sec: sec, covF: deckCover, wind: w.wind)
-        updateStreaks(dt: dt, kind: w.effectiveKind, covF: covF, weather: w, facingAz: state.facingAz)
+        // The hanging deck is the LOW layer, and ONLY the low layer. The
+        // `max(..., covF * 0.25)` floor that used to be here defeated the point:
+        // it meant 90% high cirrus still grew a quarter-strength lid, so the two
+        // skies the altitude split exists to separate came out looking alike.
+        //
+        // The one case total cover is still needed for is a report that gives a
+        // cover figure with no breakdown — an older cache, a partial fetch. Then
+        // it all goes in the low deck, matching the same fallback in Renderer,
+        // because that is the reading that hides the most.
+        var deckCover = w.cloudLow / 100
+        if w.cloudLow + w.cloudMid + w.cloudHigh < 2 && w.cover > 2 { deckCover = covF }
+        deckCover = max(0, min(1, deckCover))
+        updateCloudEdge(sec: sec, covF: deckCover, weather: w)
+        updateStreaks(dt: dt, kind: w.effectiveKind, weather: w,
+                      facingAz: state.facingAz, sec: sec)
         updateLightning(dt: dt, sec: sec, kind: w.effectiveKind)
         updateShootingStar(sec: sec, sunAlt: sAlt, kind: w.effectiveKind)
         updateGlass(dt: dt, state: state)
@@ -405,8 +593,43 @@ final class SceneSimulation {
     // MARK: Cloud edge
 
     /// Per-column cloud deck height in pixels (roomstand.py:2280).
-    private func updateCloudEdge(sec: Float, covF: Float, wind: Float) {
-        let depth = H * (0.10 + 0.38 * covF)
+    private func updateCloudEdge(sec: Float, covF: Float, weather w: WeatherState) {
+        let wind = w.wind
+        // ---- how LOW the deck sits, from the measured cloud base.
+        //
+        // A ceiling is a metres-above-ground measurement of where the cloud
+        // actually is, taken by an instrument at an aerodrome. It is the whole
+        // reason Observation.swift decodes cloud layers at all, and until now
+        // nothing downstream read it. Out of a window a 200m base is a lid you
+        // can almost touch that fills the view; the same cover at 3km is a flat
+        // grey ceiling well above the roofline.
+        //
+        // -1 means nobody measured one, and that has to leave the profile
+        // EXACTLY as it was rather than defaulting to either extreme.
+        var lowness: Float = 1
+        if w.ceiling >= 0 {
+            let f = max(0, min(1, (w.ceiling - 150) / 2400))
+            lowness = 1.30 - 0.48 * f              // 1.30 on the deck, 0.82 by 2.5km
+        }
+        // ---- the LEAD and the LAG. The user's own description of rain is a
+        // sequence: the grey comes over, then it gets dark, then it rains — and
+        // the deck does not evaporate the moment the rain stops. So the deck
+        // grows before the first drop and lingers after the last one.
+        let arc = max(w.approachProgress, w.clearingProgress * 0.7)
+
+        // How far down the frame the deck can hang.
+        //
+        // This was `H * (0.10 + 0.38 * covF)`, so the lower edge bottomed out at
+        // 48% of the frame — a hundred per cent overcast left the bottom half of
+        // the window as open sky, which is not a thing that happens. A closed
+        // deck is closed: there is no horizon gap to see out of.
+        //
+        // Cubic, so the growth is where it belongs. Scattered cloud stays a
+        // shallow fringe along the top, and only as cover approaches total does
+        // the deck run past the bottom of the frame — at 100% the shallowest
+        // column still lands well below H, so no clear sky survives anywhere.
+        let depth = H * (0.10 + covF * (0.35 + 1.10 * covF * covF))
+                     * lowness * (1 + 0.22 * arc)
         let spd = 0.003 + min(0.02, wind * 0.0004)
         for c in 0..<cols {
             let cx = Float(c) * SP
@@ -429,8 +652,63 @@ final class SceneSimulation {
 
     // MARK: Rain and snow
 
-    private func updateStreaks(dt: Float, kind: SceneKind, covF: Float,
-                               weather: WeatherState, facingAz: Float) {
+    /// Where the rain IS, across the frame, right now.
+    ///
+    /// Steady frontal rain and a scattered afternoon shower deliver the same
+    /// millimetres and look nothing alike, and the difference is entirely in
+    /// how the water is distributed in space and in time. That difference has
+    /// to be built here, at the point where hydrometeors are placed, because no
+    /// amount of shading downstream can put a dry gap into a field that was
+    /// seeded uniformly.
+    ///
+    /// `patchiness` sets the contrast and `bandedness` the organisation; both
+    /// come from `WeatherState`, which derives them from an observer's
+    /// present-weather group, the measured run structure of the nowcast, or the
+    /// model's own convective millimetres — never from a WMO code.
+    private func updatePrecipField(sec: Float, weather w: WeatherState) {
+        guard !precipField.isEmpty else { return }
+        let patch = w.patchiness
+        let band = w.bandedness
+
+        // Cells and bands are carried past the window by the wind. The constant
+        // term is there so a shower in dead calm still opens and closes rather
+        // than standing over the house forever.
+        let drift = sec * (0.012 + min(0.09, w.wind * 0.006))
+
+        // How much of the structure survives. At `patchiness` 0 the field is
+        // flat — uniform is what frontal rain IS, not a failure to be
+        // interesting — and by 0.7 the gaps run all the way down to dry.
+        let shape = min(1, patch * 1.45)
+        let gate = patch * 0.72
+        let span = max(0.18, 1 - gate)
+        let inv = 6.2832 / Float(max(1, cols))
+
+        for c in 0..<cols {
+            let a = Float(c) * inv
+            // Three scales. The longest is WIDER THAN THE FRAME, so the whole
+            // view can go quiet at once — a shower that only ever moved from one
+            // side of the window to the other would never actually stop, and
+            // stopping is most of what makes a shower a shower.
+            let n = 0.50
+                  + 0.30 * sin(a * 0.6 + drift * 0.55 + 0.7)
+                  + 0.22 * sin(a * 2.3 - drift * 0.90 + 2.4)
+                  + 0.14 * sin(a * 6.1 + drift * 1.60 + 5.1)
+            var v = max(0, min(1, (n - gate) / span))
+            v = 1 - shape * (1 - v)
+            if band > 0.01 {
+                // A squall line is a LINE, not a blotch: narrow crests, high
+                // contrast, moving fast. The rain arrives as a wall and leaves
+                // as one, which is why a squall is over in minutes.
+                let s = sin(a * 1.4 + drift * 2.6 + 1.1)
+                let crest = s > 0 ? s * s * s : 0
+                v = max(v * (1 - band * 0.8), crest * min(1, 0.45 + band))
+            }
+            precipField[c] = max(0, min(1, v))
+        }
+    }
+
+    private func updateStreaks(dt: Float, kind: SceneKind,
+                               weather: WeatherState, facingAz: Float, sec: Float) {
         // Nothing measured means nothing falls, whatever the code claims.
         guard kind.isWet, weather.isPrecipitating else {
             // Clear the rasterised grid too, not just the list. Without this the
@@ -443,54 +721,147 @@ final class SceneSimulation {
                 rasteriseStreaks()            // zeroes the grid on its way in
                 streakGridLive = false
             }
+            // Dropped, not banked. Carrying the fraction across a dry spell
+            // would fire a dozen streaks at once the moment it started again.
+            spawnAccum = 0
             return
         }
         streakGridLive = true
-        let intensity: Float
-        switch kind {
-        case .snow:    intensity = min(1, weather.snow / 4)
-        case .thunder: intensity = min(1, 0.5 + weather.rain / 8)
-        default:       intensity = min(1, weather.rain / 6)
-        }
-        let rate = max(0.08, min(0.95, intensity * 0.9 + covF * 0.15))
-        let maxStreaks = Int((30 + intensity * 90).rounded())
-        let baseSpeed = kind == .snow ? (0.15 + intensity * 0.25)
-                                      : (0.6 + intensity * 1.2 + weather.wind * 0.02)
+        updatePrecipField(sec: sec, weather: weather)
 
-        // spawn rate is per-frame in the reference; scale by dt so the look
-        // holds at any refresh rate
-        if rnd() < rate * dt * 60 && streaks.count < maxStreaks {
-            for _ in 0..<6 {
-                let c = Int(rnd() * Float(cols))
-                if c < cols && edgeArr[c] > 0 {
-                    // wind direction relative to facing: eastward drifts right
-                    let relWind = ((weather.windDir - facingAz + 180 + 360)
-                                    .truncatingRemainder(dividingBy: 360)) - 180
-                    let driftSign: Float = weather.wind > 8
-                        ? (relWind > 0 ? 1 : -1) * min(1, abs(relWind) / 90) : 0
-                    let len: Float = kind == .snow ? (2 + rnd() * 2)
-                                                   : (3 + intensity * 5 + rnd() * 3)
-                    // Slope is horizontal cells per vertical cell: the ratio of
-                    // the wind's push to the drop's fall speed. Fast rain in
-                    // light wind is near vertical; slow snow in a gale goes
-                    // almost sideways, which is exactly how it behaves.
-                    let fall = max(baseSpeed, 0.05)
-                    let push = driftSign * (weather.wind / 22)
-                    streaks.append((c: Float(c), y: edgeArr[c] / SP, len: len,
-                                    v: baseSpeed * (0.7 + rnd() * 0.6),
-                                    slope: max(-2.5, min(2.5, push / fall))))
-                    break
-                }
-            }
+        let form = weather.precipForm
+        let rate = weather.precipRate
+
+        // ---- HOW FAST. From the measured terminal fall speed rather than from
+        // the scene category, so a dendrite and a hailstone stop being the same
+        // object at two intensities. Gunn & Kinzer for liquid, Barthazy &
+        // Schefold's habit coefficients for snow; see WeatherState.fallSpeed.
+        //
+        // 0.30 is the only scale factor in here, and it is chosen to land on the
+        // speeds the scene was already tuned at: 7 m/s rain comes out at 2.1
+        // cells a frame, 1 m/s snow at 0.30, and 14 m/s hail at 4.2 — which is
+        // as violent as it should be.
+        let baseSpeed = max(0.10, min(4.5, weather.fallSpeed * 0.30))
+
+        // ---- HOW LONG A LINE IT DRAWS. `streakLength` is speed and rate
+        // together, which is right for water; a compact hydrometeor is not a
+        // column of it, however fast it comes down.
+        var lenBase = 1.2 + weather.streakLength * 9
+        switch form {
+        case .hail, .icePellets, .graupel, .snowGrains: lenBase = min(lenBase, 1.8)
+        case .snow:    lenBase = min(lenBase, 2.2)   // a flake, not a line
+        case .drizzle: lenBase = min(lenBase, 2.0)   // too small and slow to streak
+        default: break
         }
+
+        // ---- HOW MUCH OF IT, as a rate per second with a fractional carry.
+        //
+        // The old code could start AT MOST ONE STREAK PER FRAME whatever the
+        // weather, so the population settled near fifteen and a downpour was
+        // indistinguishable from a shower. Drizzle is the opposite case: very
+        // many, very small, very slow — dense enough to be a texture rather
+        // than a set of lines.
+        let density = max(0, min(1, rate / 8))
+        let perSecond: Float = form == .drizzle ? (60 + 120 * density)
+                                                : (25 + 400 * density)
+        let maxStreaks = form == .drizzle ? 220 : Int(40 + 230 * density)
+
+        // Wind direction relative to facing: eastward drifts right. Slope is
+        // horizontal cells per vertical cell — the ratio of the wind's push to
+        // the fall speed — so fast rain in light wind is near vertical and slow
+        // snow in a gale goes almost sideways.
+        let relWind = ((weather.windDir - facingAz + 180 + 360)
+                        .truncatingRemainder(dividingBy: 360)) - 180
+        let driftSign: Float = weather.wind > 8
+            ? (relWind > 0 ? 1 : -1) * min(1, abs(relWind) / 90) : 0
+        let push = driftSign * (weather.wind / 22)
+        let slope = max(-2.5, min(2.5, push / max(baseSpeed, 0.05)))
+        // Wander. `flutter` is the ratio of the wind to the fall speed, and the
+        // wind's steady push is already in `slope` — what is left is TUMBLE,
+        // and tumble is a property of the shape rather than of the weather. A
+        // branched crystal is unstable in a way a sphere is not; a drizzle drop
+        // is a sphere, and it goes sideways without wiggling on the way.
+        let tumble: Float
+        switch weather.snowHabit {
+        case .dendrite:              tumble = 1.00
+        case .plate:                 tumble = 0.80
+        case .columnar:              tumble = 0.60
+        case .needle, .wetAggregate: tumble = 0.45
+        case .graupel:               tumble = 0.15   // rimed, dense, nearly a sphere
+        case .none:                  tumble = 0.12   // liquid and pellets
+        }
+        // Squared, so it is the SLOW things that wander: rain at 7 m/s barely
+        // notices a breeze, a dendrite at 0.8 goes wherever it is sent.
+        let wobble = weather.flutter * weather.flutter * 2.4 * tumble
+
+        spawnAccum += perSecond * dt
+        // Bounded, so one long frame cannot turn into a burst.
+        spawnAccum = min(spawnAccum, 12)
+        while spawnAccum >= 1 {
+            spawnAccum -= 1
+            guard streaks.count < maxStreaks else { break }
+            // Pick a column WEIGHTED BY THE FIELD, by rejection. A dry gap
+            // simply fails to place anything — which is what makes the gap dry
+            // rather than merely dimmer, and dimmer is not what a shower does.
+            var col = -1
+            for _ in 0..<4 {
+                let t = Int(rnd() * Float(cols))
+                guard t >= 0, t < cols, edgeArr[t] > 0 else { continue }
+                if rnd() < precipField[t] { col = t; break }
+            }
+            guard col >= 0 else { continue }
+
+            // Rain falls out of the BASE of the deck — but once the deck hangs
+            // past the bottom of the frame, the whole view is underneath it and
+            // the rain has to start at the top instead of below a base that is
+            // off screen.
+            //
+            // This was a real, total failure: the spawn row was the deck edge
+            // in cells, the deck edge under heavy cover runs to about 1.4x the
+            // frame height, so every streak was born below the last row and
+            // deleted on the same frame it was created. At 95% cover — i.e.
+            // whenever it is actually raining — the scene drew no rain at all.
+            let deckRow = edgeArr[col] / SP
+            let y0 = deckRow * max(0, 1 - deckRow / Float(rows))
+
+            streaks.append((c: Float(col), y: y0,
+                            len: lenBase * (0.75 + rnd() * 0.5),
+                            v: baseSpeed * (0.72 + rnd() * 0.56),
+                            slope: slope * (0.85 + rnd() * 0.3),
+                            wob: wobble * (0.4 + rnd() * 1.2),
+                            ph: rnd() * 6.2832,
+                            hops: 0))
+        }
+
         let f = dt * 60           // reference integrates per frame at 60fps
+        // Ice bounces and water does not. Almost all of a hailstone's momentum
+        // comes back off the ground and almost none of its mass stays, and that
+        // rebound is the whole visible signature of hail.
+        let bounces = (form == .hail || form == .icePellets || form == .graupel)
+        let floorRow = Float(rows)
         var i = streaks.count - 1
         while i >= 0 {
+            // A rebounding fragment is the one thing in the sky that is not at
+            // terminal velocity, so it alone gets gravity.
+            if streaks[i].v < 0 { streaks[i].v += 0.16 * f }
             let dy = streaks[i].v * f
             streaks[i].y += dy
             // The head travels along the slope, so the whole streak leans.
             streaks[i].c += streaks[i].slope * dy
-            if streaks[i].y - streaks[i].len > Float(rows)
+
+            if bounces && streaks[i].hops < 1
+                && streaks[i].v > 0 && streaks[i].y >= floorRow {
+                streaks[i].hops = 1
+                streaks[i].y = floorRow
+                streaks[i].v = -streaks[i].v * (0.30 + rnd() * 0.25)
+                streaks[i].slope = (rnd() - 0.5) * 1.2
+                streaks[i].len = min(streaks[i].len, 1.4)
+                streaks[i].wob = 0
+                i -= 1
+                continue
+            }
+            if streaks[i].y - streaks[i].len > floorRow
+                || streaks[i].y < -8
                 || streaks[i].c < -4 || streaks[i].c > Float(cols) + 4 {
                 streaks.remove(at: i)
             }
@@ -515,9 +886,15 @@ final class SceneSimulation {
         for s in streaks {
             var k: Float = 0
             let step = 0.5 / fn
+            let wobbly = s.wob > 0.08
             while k < s.len {
-                let row = (s.y - k) * fn
-                let col = (s.c - s.slope * k) * fn + (fn - 1) * 0.5
+                let ry = s.y - k
+                let row = ry * fn
+                // The wander is a function of WHERE the point is, not of how
+                // old it is, so a fluttering crystal traces one fixed wavy path
+                // down the frame instead of shivering in place.
+                let wob = wobbly ? s.wob * sin(s.ph + ry * 0.55) : 0
+                let col = (s.c - s.slope * k + wob) * fn + (fn - 1) * 0.5
                 k += step
                 let fy = Int(row), fx = Int(col.rounded())
                 guard fy >= 0, fy < fh, fx >= 0, fx < fw else { continue }
@@ -651,8 +1028,20 @@ final class SceneSimulation {
         let s = surfaces[i]
         let impact = min(1, d.v / 260) * min(1, d.r / (SP * 0.5))
         films[i].impact = min(1, films[i].impact + impact * (form == .hail ? 1.4 : 0.7))
+        // What an impact may leave behind is decided by WHAT IS FALLING, not by
+        // how hard it hit. See DepositForm.liquidCeiling.
+        //
+        // A CEILING ON THE CONTRIBUTION, never a clamp on the film. Written as
+        // `min(cap, v + d)` it silently deleted whatever was already there:
+        // the moment the rain stopped, the first stray pane droplet to land on
+        // a soaking dock dragged it from 1.00 down to the 0.10 that "nothing
+        // falling" is allowed to deposit, and the whole drying curve — an hour
+        // of evaporation physics — collapsed into under a second. An impact can
+        // raise a film toward its ceiling; it can never take one away.
+        let cap = form.liquidCeiling
+        func raise(_ v: inout Float, _ d: Float) { v = max(v, min(cap, v + d)) }
         guard impact > 0.05 else {
-            films[i].lip = min(1, films[i].lip + 0.04)
+            raise(&films[i].lip, 0.04)
             return
         }
         // Bounce fraction: liquid stays, ice comes back.
@@ -660,7 +1049,12 @@ final class SceneSimulation {
         let n = min(7, 1 + Int(impact * (form == .hail ? 6 : 4)))
         for _ in 0..<n {
             let sideways = (rnd() * 2 - 1) * d.v * (0.45 + bounce * 0.5)
-            let upward = -d.v * (0.20 + bounce * 0.45 + rnd() * 0.30)
+            // How high it goes. Gravity here is 900 px/s², so the old
+            // coefficients threw a fragment about twenty pixels — barely one
+            // cell — and every splash in the scene was hidden behind the lip
+            // that made it. Spray you cannot see over the edge is spray that
+            // does not exist. These reach two to five cells, which is a splash.
+            let upward = -d.v * (0.45 + bounce * 0.75 + rnd() * 0.55)
             drops.append(GlassDrop(x: d.x + sideways * 0.01,
                                    y: s.top - SP * 0.15,
                                    r: d.r * (0.30 + rnd() * 0.25),
@@ -670,13 +1064,84 @@ final class SceneSimulation {
                                    vx: sideways,
                                    splashLife: 0.30 + rnd() * 0.40))
         }
-        films[i].lip = min(1, films[i].lip + impact * 0.30 * (1 - bounce))
-        films[i].wet = min(1, films[i].wet + impact * 0.18 * (1 - bounce))
-        films[i].runoff = min(1, films[i].runoff + impact * 0.20 * (1 - bounce))
+        raise(&films[i].lip, impact * 0.30 * (1 - bounce))
+        raise(&films[i].wet, impact * 0.18 * (1 - bounce))
+        raise(&films[i].runoff, impact * 0.20 * (1 - bounce))
     }
 
     /// Splash events since start — purely for verifying the collision path.
     private(set) var splashCount = 0
+
+    /// Fractional carry on the spray rate, so it is a rate rather than "at most
+    /// one splash per frame". Same reason as `spawnAccum`.
+    private var sprayAccum: Float = 0
+
+    /// Spray thrown off a lip by the rain that is actually falling on it.
+    ///
+    /// The pane carries at most `maxDrops` droplets seeded at random across the
+    /// whole screen, so waiting for one of THOSE to happen to land on the dock
+    /// gave a splash every few seconds in a downpour — the dock behaved as if it
+    /// were under a leaky roof rather than out in the rain. The sky is raining
+    /// on the whole lip, so the spray rate comes from the rainfall and from how
+    /// wide the lip is, and the pane droplets are then a bonus on top.
+    ///
+    /// Only where the rain actually IS: the column is tested against
+    /// `precipField`, so a lip standing in the dry gap between two showers stays
+    /// dry, which is the entire point of having a field.
+    private func impactSpray(dt: Float, w: WeatherState) {
+        guard form.impacts, films.count == surfaces.count, !surfaces.isEmpty else {
+            sprayAccum = 0
+            return
+        }
+        guard Furniture.options.furniture > 0.001, SP > 0 else { return }
+        // Measured rate, not the category. 0.2mm/h throws essentially nothing.
+        let rate = min(1, w.precipAmount / 5)
+        guard rate > 0.015 else { sprayAccum = 0; return }
+
+        // How much lip there is to be rained on, as a fraction of the frame's
+        // width. A dock spanning most of the screen catches far more than one
+        // small widget, and that ratio is the whole of why they look different.
+        var lipWidth: Float = 0
+        for s in surfaces where marks(s.kind) { lipWidth += s.w }
+        guard lipWidth > 0 else { sprayAccum = 0; return }
+        let widthFrac = min(2.5, lipWidth / max(W, 1))
+
+        // Hail arrives fast and hard and its whole visible signature is the
+        // rebound, so it strikes far more often for the same millimetres.
+        let burst: Float = (form == .hail) ? 3.0 : (form == .sleet ? 1.8 : 1.0)
+        sprayAccum += dt * (2 + 26 * rate) * widthFrac * burst
+        sprayAccum = min(sprayAccum, 6)
+
+        while sprayAccum >= 1 {
+            sprayAccum -= 1
+            guard drops.count < Self.maxDrops + 28 else { sprayAccum = 0; return }
+            // Pick a lip, weighted by width, then a point along it.
+            var pick = rnd() * lipWidth
+            var idx = -1
+            for (k, s) in surfaces.enumerated() where marks(s.kind) {
+                if pick < s.w { idx = k; break }
+                pick -= s.w
+            }
+            guard idx >= 0 else { continue }
+            let s = surfaces[idx]
+            let x = s.left + pick
+            // Is it raining on THIS column right now?
+            let c = Int(x / SP)
+            if c >= 0, c < precipField.count, rnd() > precipField[c] { continue }
+
+            // A synthetic arrival with the fall speed the sky actually has, so
+            // a drizzle drop cannot throw a hailstone's spray.
+            let v = max(40, min(520, w.fallSpeed * 42))
+            // Big enough that its FRAGMENTS survive. splash() breaks a drop into
+            // pieces 0.30-0.55 of its radius and the droplet loop deletes
+            // anything under 0.06 SP, so a source drop below about a quarter of
+            // a cell shatters into nothing and the splash is silent.
+            let r = SP * (0.28 + rnd() * 0.26) * (form == .hail ? 1.5 : 1)
+            splash(at: GlassDrop(x: x, y: s.top, r: r, v: v,
+                                 rCrit: SP * 0.5, falling: true),
+                   on: idx)
+        }
+    }
 
     // MARK: Weather on the furniture
     //
@@ -689,34 +1154,173 @@ final class SceneSimulation {
     // add a kick on top.
 
     /// Classify what is falling into the form a surface actually feels.
-    private func precipitationForm(_ w: WeatherState) -> DepositForm {
-        let code = w.code
-        let t = w.temperature
-        if w.isPrecipitating {
-            if code == 96 || code == 99 { return .hail }
-            // The freezing-drizzle and freezing-rain codes are explicit, and
-            // they are the one case the temperature alone cannot tell you: the
-            // drop is liquid all the way down and only freezes on contact.
-            if code == 56 || code == 57 || code == 66 || code == 67 { return .freezingRain }
-            if w.snow >= 0.05 || (code >= 71 && code <= 77) || code == 85 || code == 86 {
-                // Wet snow above freezing arrives as slush and behaves like
-                // sleet on a surface: patchy, and gone in minutes.
-                return (t > 1.5 && w.frozenFraction < 0.85) ? .sleet : .snow
-            }
-            if t <= 0.3 { return .freezingRain }
-            if w.frozenFraction > 0.25 { return .sleet }
-            // Drizzle is a DROP SIZE, not a rate. The codes say so directly;
-            // failing that, a trace falling out of a low deck in light wind is
-            // the same thing.
-            if code >= 51 && code <= 55 { return .drizzle }
-            if w.precipAmount < 0.35 && w.wind < 22 { return .drizzle }
-            return .rain
+    ///
+    /// This used to re-derive the answer from the WMO code — 96 is hail, 51-55
+    /// is drizzle, and "under 0.35mm in light wind" is drizzle too, which
+    /// confuses a drop SIZE with a rate. That is exactly the
+    /// classification-over-measurement mistake the rest of the engine exists to
+    /// avoid, and it disagreed with `WeatherState.precipForm`, which had already
+    /// answered the same question from an observer's present-weather group, the
+    /// freezing level and a measured rate. Two answers to one question is one
+    /// answer too many, so this is now only the mapping from what is falling to
+    /// how a surface feels it.
+    /// Work out what a lip is actually experiencing, from measurements only.
+    private func deriveSurfaceWeather(_ w: WeatherState) -> SurfaceWeather {
+        var s = SurfaceWeather()
+
+        // ---- SURFACE TEMPERATURE.
+        //
+        // A surface with open sky above it radiates into it and settles BELOW
+        // air temperature; under cloud it radiates to the cloud base instead
+        // and sits at the air. Wind is the other half of it: a breeze mixes
+        // warm air down onto the lip and wipes the deficit out, which is why a
+        // frost warning is for a clear CALM night rather than merely a cold
+        // one. And in daylight the sun more than repays the loss.
+        //
+        // Every one of the three terms degrades to ZERO deficit when its
+        // reading is missing, so an absent cloud report can only ever fail to
+        // produce frost — never invent it.
+        let clear = w.cover >= 0 ? max(0, 1 - min(1, w.cover / 100)) : 0
+        let calm = max(0, 1 - w.wind / 20)
+        let dark = max(0, min(1, -sunAlt / 6))
+        s.surfaceTemp = w.temperature - 4.5 * clear * calm * dark
+
+        // ---- DROP SIZE, from the measured fall speed. Atlas & Ulbrich give
+        // v = 3.78 D^0.67 for raindrops at sea level; this is that inverted.
+        // 2.5 m/s at a trace is a 0.5mm drizzle drop, 7.6 m/s in a 10mm/h
+        // shower is a 2.8mm one, and those two do completely different things
+        // to a surface.
+        // Liquid only: the relation describes water drops, and a hailstone's
+        // fall speed run through it would report a seven-millimetre "drop" that
+        // beads and runs. A frozen hydrometeor has no liquid at all until it
+        // melts, and then what runs is meltwater rather than the stone.
+        let v = w.fallSpeed
+        switch w.precipForm {
+        case .rain, .drizzle, .freezingRain:
+            s.dropDiameter = v > 0.25 ? pow(v / 3.78, 1 / 0.67) : 0
+        default:
+            s.dropDiameter = 0
         }
-        // Nothing falling. What the air alone does to a surface.
-        if t < 0.5 && w.humidity > 78 { return .frost }
-        if w.isFoggy || w.fogginess > 0.55 { return .fog }
-        if w.aqi > 85 || w.smoke > 0.22 || (w.visibility < 6000 && w.humidity < 70) { return .dust }
-        return .none
+
+        // Below about 0.6mm the surface tension holding a drop to the lip beats
+        // its own weight whatever else happens, so it cannot run — the measured
+        // gate that separates drizzle from light rain without asking what the
+        // hour was called. A frozen form runs only once the lip is warm enough
+        // to melt what lands on it.
+        let melts = w.isPrecipitating && s.dropDiameter <= 0 && s.surfaceTemp > 1
+        s.canRun = (s.dropDiameter >= 0.6 && s.surfaceTemp > 0) || melts
+
+        // ---- SHEETING. Discrete beads while the lip can shed what arrives;
+        // a continuous film once it cannot. Rate does most of the work, and
+        // large drops sheet sooner because each one already wets more than
+        // surface tension can gather back into a bead.
+        let rate = w.precipRate
+        s.sheeting = s.canRun
+            ? min(1, (rate / 7) * (0.55 + 0.45 * min(1, s.dropDiameter / 2.6)))
+            : 0
+
+        // ---- CONDENSATION. Dew point against the SURFACE, not humidity.
+        let cross = w.dewPoint - s.surfaceTemp
+        s.condensing = max(0, min(1, (cross + 0.4) / 1.6))
+
+        // ---- WIND DRIVE. Which way, and how much of the water is thrown at
+        // the lip rather than dropped onto it. A gust front does this before
+        // the rain arrives; a squall does it while it is here.
+        let rel = ((w.windDir - facingAz + 180 + 360)
+                    .truncatingRemainder(dividingBy: 360)) - 180
+        let side: Float = rel > 0 ? 1 : -1
+        let steady = w.wind >= 14 ? min(1, (w.wind - 14) / 34) : 0
+        s.driven = min(1, max(steady, w.gustFrontStrength)
+                        * (w.morphology == .squally ? 1.4 : 1))
+        s.drive = side * min(1, abs(rel) / 90) * s.driven
+
+        // ---- SNOW HABIT. How the crystals stack once they land.
+        switch w.snowHabit {
+        case .dendrite:     s.snowBulk = 1.55   // open, branched, mostly air
+        case .plate:        s.snowBulk = 1.25
+        case .columnar:     s.snowBulk = 1.10
+        case .needle:       s.snowBulk = 1.00
+        case .wetAggregate: s.snowBulk = 0.75   // wet, heavy, slumps
+        case .graupel:      s.snowBulk = 0.55   // rimed and near spherical
+        case .none:         s.snowBulk = 1.00
+        }
+        return s
+    }
+
+    private func precipitationForm(_ w: WeatherState) -> DepositForm {
+        switch w.precipForm {
+        case .hail:         return .hail
+        // Graupel and ice pellets bounce off and leave almost nothing, which is
+        // what `sleet` means to a surface.
+        case .graupel, .icePellets: return .sleet
+        case .freezingRain:
+            // Freezing rain is only freezing rain because the SURFACE is below
+            // zero — that is the definition, not a property of the drop. The
+            // same rain onto a lip the sun has been on all afternoon simply
+            // runs off, and drawing a glaze there would be a glass sheet over a
+            // warm dock.
+            return surfaceWeather.freezing ? .freezingRain : .rain
+        case .snow, .snowGrains:
+            // Wet snow above freezing arrives as slush and behaves like sleet
+            // on a surface: patchy, and gone in minutes.
+            return (w.temperature > 1.5 && w.frozenFraction < 0.85) ? .sleet : .snow
+        case .drizzle:      return .drizzle
+        case .rain:
+            // Same test again: what makes rain freezing is the lip, not the air
+            // column. `temperature <= 0.3` used the air, which glazed a surface
+            // the sun was still on and left a radiatively cooled one at +2
+            // merely wet — both backwards.
+            return surfaceWeather.freezing ? .freezingRain : .rain
+        case .none:
+            // Nothing falling. What the AIR alone does to a surface.
+            //
+            // This used to read `temperature < 0.5 && humidity > 78` for frost,
+            // which is the classification-over-measurement mistake in miniature:
+            // relative humidity is a ratio to a temperature-dependent saturation
+            // pressure, so 80% RH means something completely different at -2°C
+            // and at +28°C. It puts frost on a warm monsoon night and misses it
+            // on a dry-feeling clear one at -3°C where the dew point is -4.
+            //
+            // The measured test is the DEW POINT against the SURFACE
+            // temperature. Above that crossing the air gives up its water; below
+            // it, it does not, whatever the humidity reads. Where the crossing
+            // itself is below zero the vapour deposits as ice rather than
+            // condensing as liquid, and that one comparison is the whole of the
+            // difference between frost and dew.
+            let s = surfaceWeather
+            let wets = s.condensing > 0.02
+            if wets && s.freezing { return .frost }        // includes rime in freezing fog
+            // `obscuration` and not `fogginess`. `fogginess` is 0.7 x how small
+            // the dew-point spread is, so it clears 0.55 at a spread of 1.4°C —
+            // which is every clear calm night on which dew forms, at twelve
+            // kilometres of visibility. It was reporting fog for the exact
+            // conditions that produce the opposite of fog. `obscuration` is
+            // built from measured VISIBILITY and can be contradicted by an
+            // observer, which is what the word actually means.
+            if w.obscuration == .fog || w.obscuration == .mist { return .fog }
+            if wets { return .dew }
+            if w.obscuration == .haze || w.aqi > 85 || w.smoke > 0.22 { return .dust }
+            return .none
+        }
+    }
+
+    /// Is this piece of furniture one the user lets weather mark?
+    ///
+    /// `Furniture.desktop` already filters at construction, so on a live desktop
+    /// an opted-out dock is simply not in the list. This is the second half of
+    /// the same answer, for the surfaces that do not come from there — the lock
+    /// screen's clock, the offscreen harness's stand-ins — and for the window
+    /// between the config changing and the host rebuilding the list. An opted-out
+    /// surface is invisible to the weather in every respect: water falls through
+    /// it rather than landing and then failing to show, because a drop that
+    /// vanishes at an invisible line is more obviously wrong than a wet dock.
+    private func marks(_ kind: Surface.Kind) -> Bool {
+        switch kind {
+        case .dock:             return Furniture.options.dock
+        case .widget:           return Furniture.options.widgets
+        case .menuBar:          return Furniture.options.menuBar
+        case .clock, .loginBox: return true
+        }
     }
 
     /// Advance what is sitting on each piece of furniture.
@@ -734,83 +1338,216 @@ final class SceneSimulation {
             grime = 0; steam = 0
             return
         }
+        let sw = surfaceWeather
         let evap = w.evaporationRate
-        let t = w.temperature
-        let rate = min(1.4, w.precipAmount / 3)          // arrival rate, 0..~1.4
+        let t = sw.surfaceTemp                           // the LIP's temperature
+        let rate = w.precipRate                          // mm/h, measured
+        let arrive = min(1.4, w.precipAmount / 3)        // arrival rate, 0..~1.4
         // Wind drives water onto and off a lip; a gust front throws it sideways.
         let windF = min(1.5, w.wind / 30)
-        // Dirty air, from the two measures that actually track deposition.
+        // Dirty air, from the three measures that actually track deposition.
         let dirty = min(1, max(w.aqi - 40, 0) / 220 + w.smoke * 0.6 + max(0, 1 - w.visibility / 9000) * 0.3)
-        // How close the air is to dumping its water out onto a cold surface.
-        let condense = min(1, max(0, 1 - w.dewSpread / 2.5)) * min(1, 0.35 + w.fogginess)
 
-        var meanGrime: Float = 0, meanSteam: Float = 0
+        var meanGrime: Float = 0, meanSteam: Float = 0, counted = 0
         for i in 0..<films.count {
+            // Opted out: still collision geometry, but nothing collects on it.
+            // Cleared once rather than every frame, so turning the dock back on
+            // starts it dry instead of restoring a week of weather.
+            guard marks(surfaces[i].kind) else {
+                if films[i].anyWater > 0 || films[i].snow > 0 || films[i].grime > 0 {
+                    films[i] = SurfaceFilm()
+                }
+                continue
+            }
             var f = films[i]
 
             // ---- what arrives
             switch form {
             case .rain:
-                f.wet = min(1, f.wet + dt * (0.35 + rate * 0.9))
-                f.lip = min(1, f.lip + dt * (0.22 + rate * 0.8) * (0.6 + windF * 0.5))
-                f.runoff = min(1, f.runoff + dt * (0.20 + rate * 0.7))
-                f.grime = max(0, f.grime - dt * (0.10 + rate * 0.35))
+                // How the water DISTRIBUTES is the whole difference between
+                // light rain and heavy rain on a lip, and it is not a matter of
+                // how much. Below the sheeting threshold surface tension gathers
+                // the arriving water into discrete beads and the lip between
+                // them stays comparatively dry; above it the beads have merged
+                // and the whole edge carries a continuous film. Same
+                // millimetres, two completely different pictures, and
+                // `sheeting` is derived from the measured rate and the measured
+                // drop size rather than from any threshold on the code.
+                let soak = dt * (0.25 + arrive * 0.85)
+                f.wet = min(1, f.wet + soak * (0.30 + sw.sheeting * 0.95))
+                f.lip = min(1, f.lip + soak * (1.10 - sw.sheeting * 0.35)
+                                     * (0.6 + windF * 0.5))
+                // Only water that CAN run produces run-off. A lip covered in
+                // drops too small to overcome their own surface tension has
+                // nothing to shed however long it rains.
+                if sw.canRun {
+                    f.runoff = min(1, f.runoff + dt * (0.15 + arrive * 0.70)
+                                                * (0.35 + sw.sheeting * 0.95))
+                }
+                f.grime = max(0, f.grime - dt * (0.10 + arrive * 0.35))
+                // Strikes, so the lip flickers under rain the way it does under
+                // sleet and hail. It decays at 3.2/s, so this is a level being
+                // continuously topped up rather than a value that accumulates.
+                f.impact = min(1, f.impact + dt * (0.20 + arrive * 1.0))
+
             case .drizzle:
-                // Too fine to run: it wets evenly and stops. The lip never
-                // builds a meniscus, which is why drizzle looks matte.
-                f.wet = min(0.72, f.wet + dt * 0.16)
-                f.lip = max(f.lip * (1 - dt * 0.3), min(0.10, f.lip))
-                f.runoff = min(0.25, f.runoff + dt * 0.03)
-                f.grime = max(0, f.grime - dt * 0.05)
+                // 0.1-0.5mm drops, and two things follow from that size which
+                // together are the whole of what drizzle looks like. They are
+                // far too light to overcome the tension holding them, so they
+                // never gather into beads and never run — `canRun` is false at
+                // this diameter by measurement, not by name. And they arrive in
+                // enormous numbers, so what they leave is perfectly even.
+                //
+                // An even sub-millimetre film scatters where a bead reflects,
+                // which is why drizzle makes everything look FLAT: darker, but
+                // with no highlight anywhere on it. It also soaks far more
+                // thoroughly than its millimetres suggest, because none of it
+                // runs off.
+                f.wet = min(0.80, f.wet + dt * (0.08 + rate * 0.12))
+                // Any meniscus that was there drains, and none is built.
+                f.lip = max(0, f.lip - dt * 0.30)
+                f.runoff = min(0.18, f.runoff + dt * 0.015)
+                f.grime = max(0, f.grime - dt * 0.04)     // too gentle to wash
+
             case .freezingRain:
-                // Liquid on arrival, ice within seconds. The glaze thickens
-                // steadily and does not run — that is what makes it dangerous
-                // and what makes it look like varnish rather than like rain.
-                f.wet = min(0.55, f.wet + dt * 0.25)
-                f.glaze = min(1, f.glaze + dt * (0.05 + rate * 0.12))
-                f.lip = min(0.35, f.lip + dt * 0.08)
+                // Liquid on arrival, solid within seconds of touching the lip.
+                // How fast it sets is decided by how far BELOW zero the surface
+                // is: at -0.5 the drop spreads and part of it runs before it
+                // freezes, giving a thin uneven skin; by -6 it freezes
+                // essentially where it lands. That is why the heaviest, clearest
+                // glaze comes from an ice storm sitting just below freezing,
+                // and it is a property of the surface, not of the sky.
+                let below = min(1, max(0, -sw.surfaceTemp) / 6)
+                f.glaze = min(1, f.glaze + dt * (0.035 + rate * 0.05) * (0.35 + 0.65 * below))
+                // The fraction that has not set yet is still liquid, and it
+                // still creeps to the lowest point — which is how a glaze grows
+                // a fat lower lip and eventually an icicle.
+                f.wet = min(0.50, f.wet + dt * 0.18 * (1 - below * 0.6))
+                f.lip = min(0.42, f.lip + dt * 0.07 * (1 - below * 0.5))
+                f.runoff = min(0.6, f.runoff + dt * 0.10 * (1 - below))
+                f.grime = max(0, f.grime - dt * 0.06)
+
             case .sleet:
-                // Bounces. Almost nothing stays, and what does is patchy.
-                f.impact = min(1, f.impact + dt * (0.6 + rate * 1.4))
-                f.wet = min(0.45, f.wet + dt * 0.12)
-                f.snow = min(0.9, f.snow + dt * rate * 0.06)
-                f.lip = min(0.2, f.lip + dt * 0.03)
+                // Ice pellets are frozen through. They do not deform and they do
+                // not stick: they hit, rebound and skitter, so the visible
+                // signature is the STRIKE and a shallow scatter of pellets that
+                // came to rest along the lip — never a film. On a vertical face
+                // there is nothing at all, which is why sleet leaves a
+                // windscreen clear and the wiper trough full.
+                f.impact = min(1, f.impact + dt * (0.7 + arrive * 1.6))
+                // What settles stays LOOSE. Pellets do not bond to each other
+                // the way crystals do, so wind rolls them off an exposed edge
+                // about as fast as they arrive.
+                f.snow = max(0, min(0.85, f.snow + dt * (rate * 0.05 - windF * 0.02)))
+                f.snowSpan = max(0, min(1, f.snowSpan + dt * (0.10 - windF * 0.06)))
+                // A pellet landing on a lip above freezing simply melts.
+                if sw.surfaceTemp > 0 {
+                    f.wet = min(0.45, f.wet + dt * min(1, sw.surfaceTemp / 4) * 0.14)
+                }
+
             case .snow:
-                // Accumulates on the upward-facing edge. Rate is the snowfall
-                // itself; the cap is how deep a lip a few centimetres wide can
-                // actually hold before it sloughs off.
-                f.snow = min(3.2, f.snow + dt * (0.02 + w.snow * 0.05))
+                // Depth is the snowfall times how loosely that crystal HABIT
+                // stacks. A dendrite is mostly air and bulks up two or three
+                // times deeper than the same water content of rimed graupel;
+                // a wet aggregate slumps almost flat. This is why two nights
+                // reported as the same centimetres look nothing alike, and
+                // `snowBulk` comes from the measured habit rather than from the
+                // word "snow".
+                // Slow enough that the HABIT is visible in the depth and not
+                // only in the texture. At the old rate a lip capped out in
+                // eleven seconds whatever was falling, so open dendrites and
+                // rimed graupel — which differ by a factor of three in how
+                // deep they lie — both simply pinned at the ceiling and looked
+                // identical. Now a moderate fall takes about a minute to cap
+                // with dendrites and a little over two with graupel.
+                let fall = (0.004 + w.snow * 0.012) * sw.snowBulk
+                f.snow = min(3.4, f.snow + dt * fall)
+                // The span fills in faster than the depth builds: a lip goes
+                // white along its whole length within the first minute and then
+                // keeps thickening for the rest of the storm. Wind takes it
+                // back, and blowing snow is the measurement that says the wind
+                // is actually moving what is already lying.
+                let scour = windF * 0.02 + w.blowingSnow * 0.06
+                f.snowSpan = max(0, min(1, f.snowSpan + dt * (0.05 + fall * 3) - dt * scour))
                 f.wet = max(0, f.wet - dt * 0.05)
-                f.grime = max(0, f.grime - dt * 0.04)
+                f.grime = max(0, f.grime - dt * 0.03)
+
             case .hail:
-                f.impact = min(1, f.impact + dt * (1.2 + rate * 2.0))
-                f.wet = min(1, f.wet + dt * (0.25 + rate * 0.5))
-                f.lip = min(0.6, f.lip + dt * 0.2)
-                f.runoff = min(1, f.runoff + dt * 0.3)
-                f.grime = max(0, f.grime - dt * 0.3)
+                // A hailstone arrives at 14 m/s and leaves again with most of
+                // it. The event is the strike and the rebound; almost none of
+                // the mass stays, so what a lip looks like after a hailstorm is
+                // wet — from meltwater — and not white.
+                f.impact = min(1, f.impact + dt * (1.4 + arrive * 2.2))
+                f.wet = min(1, f.wet + dt * (0.20 + arrive * 0.45))
+                f.lip = min(0.55, f.lip + dt * 0.18)
+                f.runoff = min(1, f.runoff + dt * 0.28)
+                f.grime = max(0, f.grime - dt * 0.35)     // scoured, not washed
+
             case .fog:
-                // No impact at all: the water arrives out of the air, so it
-                // wets every face evenly and beads only once the film is
-                // thick enough to run.
-                f.steam = min(1, f.steam + dt * (0.02 + condense * 0.10))
-                f.wet = min(0.6, f.wet + dt * condense * 0.05)
-                if f.steam > 0.75 { f.lip = min(0.45, f.lip + dt * 0.05) }
+                // The one hydrometeor with no momentum worth the name. Fog
+                // droplets are tens of microns across and follow the air AROUND
+                // an obstacle rather than hitting it, so a surface is wetted by
+                // interception and by condensation instead of by impact — which
+                // is exactly why fog wets undersides and sheltered faces as
+                // thoroughly as the top, and rain never does.
+                //
+                // Density is the measured one, taken from visibility.
+                let dens = max(w.obscurationDensity, w.fogginess)
+                f.steam = min(1, f.steam + dt * (0.015 + dens * 0.11)
+                                         * (0.35 + sw.condensing * 0.65))
+                f.wet = min(0.65, f.wet + dt * sw.condensing * dens * 0.06)
+                // Only once the film is thick enough does it gather and begin to
+                // move. That is the moment fog stops looking like a bloom and
+                // starts dripping off the eaves.
+                if f.steam > 0.70 {
+                    f.lip = min(0.50, f.lip + dt * 0.05)
+                    f.runoff = min(0.5, f.runoff + dt * 0.04)
+                }
+
+            case .dew:
+                // The same condensation as fog with clear air above it, and by
+                // far the more common of the two. Nothing is falling and nothing
+                // is suspended: the lip has simply radiated itself below the dew
+                // point and the vapour touching it gives up its water. Evenly,
+                // on every face, over hours — which is why a car roof is soaking
+                // on a cloudless morning when nothing has fallen for a week, and
+                // why the same night with a breeze or a cloud deck leaves it dry.
+                f.steam = min(0.85, f.steam + dt * 0.010 * (0.30 + sw.condensing))
+                f.wet = min(0.40, f.wet + dt * 0.004 * sw.condensing)
+
             case .frost:
-                // Deposition straight from vapour. Needs a sub-zero surface and
-                // air with something in it; it grows fastest on a clear night,
-                // which is when the surface radiates coldest.
-                let cold = min(1, max(0, (0.5 - t) / 6))
-                let clear = 1 - min(1, w.cover / 100) * 0.6
-                f.frost = min(1, f.frost + dt * 0.035 * cold * clear * min(1, w.humidity / 80))
-                f.steam = min(0.5, f.steam + dt * condense * 0.04)
+                // Deposition: vapour straight to ice with no liquid in between.
+                // It needs the lip below zero AND the dew point above the lip,
+                // and the second condition is why a hard, dry, frost-free night
+                // at -5°C is a perfectly ordinary thing.
+                //
+                // Growth follows how far past that crossing the air is, not how
+                // cold it is. Crystals grow fastest a few degrees below zero and
+                // slow right down in deep cold, where there is very little
+                // vapour left in the air to deposit at all.
+                let vigour = min(1, max(0, 1 - sw.surfaceTemp) / 5)
+                           * max(0.15, 1 - max(0, -sw.surfaceTemp - 8) / 20)
+                f.frost = min(1, f.frost + dt * 0.018 * sw.condensing * vigour)
+                // A little liquid condenses on the warmest parts first and then
+                // freezes, which is what welds the bloom to the surface.
+                f.steam = min(0.35, f.steam + dt * sw.condensing * 0.015)
+
             case .dust:
-                f.grime = min(1, f.grime + dt * dirty * 0.012)
+                // Dry deposition. Nothing arrives out of the sky: particles
+                // settle out of still air under their own weight and stick. The
+                // rate follows the measured loading, and it is slow — days of
+                // dirty air to build what one shower takes off in a minute.
+                f.grime = min(1, f.grime + dt * dirty * 0.010)
+
             case .none:
                 break
             }
 
             // Dirt settles whatever else is going on; rain is what removes it.
-            if form != .rain && form != .hail {
+            // A glaze seals it under rather than washing it off, so freezing
+            // rain is not on the washing list even though it is liquid on the
+            // way down.
+            if !form.washes {
                 f.grime = min(1, f.grime + dt * dirty * 0.004)
             }
 
@@ -819,15 +1556,29 @@ final class SceneSimulation {
             // Liquid goes by evaporation, on the same physical rate as the
             // pane, so the dock dries when the pane dries instead of on its own
             // invented timer.
-            let dry = dt * (0.004 + evap * 0.09)
-            if form != .rain && form != .drizzle && form != .hail {
+            // Liquid goes by evaporation on the same physical rate as the pane's
+            // film — 2.5x it, because a lip is a thin exposed edge with air on
+            // three sides where a pane holds a flat film against glass. It was
+            // 0.004 + evap * 0.09, which is NINE times the pane's rate: a
+            // soaking dock went bone dry in twenty-five seconds while the
+            // window beside it was still wet four minutes later, and the
+            // comment above it claimed the two shared a timescale. On these
+            // numbers a soaked lip takes about a minute and a half to clear in
+            // bright dry air and the better part of half an hour in humid still
+            // air, which is what water on a ledge actually does.
+            let dry = dt * (0.0008 + evap * 0.025)
+            if !form.deposits {
                 f.wet = max(0, f.wet - dry)
                 f.lip = max(0, f.lip - dry * 1.6)
                 f.runoff = max(0, f.runoff - dt * 0.25)
             } else {
                 f.runoff = max(0, f.runoff - dt * 0.12)
             }
-            if form != .fog { f.steam = max(0, f.steam - dt * (0.01 + evap * 0.12)) }
+            // Condensation is the same story. A surface below the dew point is
+            // not evaporating — that is what being below the dew point means.
+            if form != .fog && form != .dew {
+                f.steam = max(0, f.steam - dt * (0.01 + evap * 0.12))
+            }
 
             // Snow: melt is driven by the surface being above freezing, and it
             // eats the margins first, which is why a snow cap narrows before it
@@ -838,7 +1589,24 @@ final class SceneSimulation {
                 f.snow = max(0, f.snow - dt * (melt + sublime))
                 // What melts becomes water on the lip.
                 if melt > 0 { f.wet = min(1, f.wet + dt * melt * 1.6) }
+                // The margins go first. An end of the cap has warm air on three
+                // sides where the middle has it on one, so it retreats inward
+                // roughly twice as fast as the crown thins — which is why a
+                // snow cap NARROWS before it disappears rather than fading out
+                // at full width. Sublimation is a surface loss and takes the
+                // span with it too, just very slowly; that is the dry-air path,
+                // and it works below freezing where melt does not.
+                // Retreat is resisted by DEPTH. There is far more mass to
+                // remove at the margin of a deep cap than a shallow one, so a
+                // thick cap narrows slowly and then goes quickly once it has
+                // thinned — and, crucially, cannot retreat to nothing while it
+                // is still three centimetres deep in the middle, which a flat
+                // rate let it do.
+                let mass = max(0.5, f.snow)
+                f.snowSpan = max(0, f.snowSpan - dt * (melt * 2.4 + sublime * 1.6) / mass)
+                if f.snowSpan <= 0.001 { f.snow = 0 }
             }
+            if f.snow <= 0.001 { f.snowSpan = 0 }
             // Ice: only above zero, and slowly — a glaze survives a long thaw.
             if f.glaze > 0 && form != .freezingRain {
                 let thaw = max(0, t) * 0.006 + max(0, w.uv - 2) * 0.001
@@ -853,11 +1621,15 @@ final class SceneSimulation {
             f.impact = max(0, f.impact - dt * 3.2)
 
             films[i] = f
+            counted += 1
             meanGrime += f.grime
             meanSteam += max(f.steam, f.wet * 0.3)
         }
 
-        let n = Float(films.count)
+        // Averaged over the surfaces that ACTUALLY collect, not over the array.
+        // Dividing by the whole array would let an opted-out widget halve the
+        // whole-screen grime the dock earned.
+        let n = Float(max(1, counted))
         // The whole-pane terms follow the furniture rather than being invented
         // separately: they are the same air doing the same thing.
         grime = min(1, meanGrime / n)
@@ -961,11 +1733,17 @@ final class SceneSimulation {
         // Measured, not classified. The code alone used to be enough to soak
         // the pane on a dry day.
         let wet = w.isPrecipitating
+        // The measured picture first: `precipitationForm` asks it whether the
+        // LIP is freezing, so it has to be current before the form is decided.
+        surfaceWeather = deriveSurfaceWeather(w)
         form = precipitationForm(w)
-        // A thunderstorm's outflow. The gust front arrives before the core and
-        // drives the rain in at a steep angle — the same rainfall, thrown
-        // sideways, which is a different picture on a vertical pane.
-        gustFront = w.isThundering && (w.gustiness > 0.3 || w.gusts > 38)
+        // Water driven in at a steep angle rather than dropped: the same
+        // rainfall, thrown sideways, which is a completely different picture on
+        // a vertical pane. A squall does it while the rain is here; a gust front
+        // does it in the minutes BEFORE the rain arrives. Both are gated on
+        // measured gusts and measured shower structure — never on CAPE, which
+        // is the reading that once put lightning over a quiet evening.
+        gustFront = w.morphology == .squally || w.gustFrontStrength > 0.25
         let inten: Float = wet ? max(0.12, min(1, 0.12 + w.precipAmount / 4)) : 0
         // Genuine intensity, not the floored spawn rate: 0.1mm drizzle should
         // read as almost nothing, 5mm as a soaking.
@@ -1007,6 +1785,12 @@ final class SceneSimulation {
         breakUpTrails(dt: dt, wet: wet)
 
         shedDrips(dt: dt)
+        // Spray thrown off the furniture's lips by the rainfall itself. It sits
+        // inside the pane-water gate because spray is drawn as airborne
+        // droplets and that is the layer the switch turns off; the lip's own
+        // wetness, its beading and its strike flicker are furniture and carry
+        // on regardless — see updateSurfaces and stampFurniture.
+        impactSpray(dt: dt, w: w)
 
         // ---- droplets ------------------------------------------------------
         //
@@ -1124,10 +1908,16 @@ final class SceneSimulation {
             // spray back up and outward, and leaves that edge wet. The furniture
             // draws over us, so what stays visible is the spray — which is the
             // whole point of knowing where these things are.
-            if d.falling && d.splashLife == 0 && d.v > 4 {
+            //
+            // `d.r > SP * 0.10` keeps spray from re-splashing. A splash puts its
+            // fragments just above the lip with upward velocity, so every one of
+            // them crosses the lip again on the way back down — without a size
+            // floor each impact seeds a fresh generation of ever-smaller impacts
+            // and the population runs away.
+            if d.falling && d.splashLife == 0 && d.v > 4 && d.r > SP * 0.10 {
                 var landed = false
                 let prevY = d.y - d.v * dt
-                for k in 0..<surfaces.count where surfaces[k].spans(d.x) {
+                for k in 0..<surfaces.count where surfaces[k].spans(d.x) && marks(surfaces[k].kind) {
                     if prevY <= surfaces[k].top && d.y + d.r >= surfaces[k].top {
                         splash(at: d, on: k)
                         landed = true
@@ -1268,6 +2058,370 @@ final class SceneSimulation {
         rasteriseGlass()
     }
 
+    /// A stable pseudo-random number for a column. Deterministic, so a bead
+    /// stays where it is from frame to frame instead of shimmering.
+    @inline(__always)
+    private func jitter(_ n: Float) -> Float {
+        let s = sin(n * 12.9898 + 78.233) * 43758.5453
+        return s - s.rounded(.down)
+    }
+
+    // MARK: Furniture, drawn
+    //
+    //  THE MISSING HALF. `films` held a complete per-surface record of wetness,
+    //  beading, snow, glaze, frost and grime, updated every frame by
+    //  `updateSurfaces` — and absolutely nothing read it. The only path from the
+    //  simulation to the shader is `glassCells`, and the one place that wrote
+    //  furniture into it was the snow block, gated on a dictionary that was
+    //  deliberately left empty. So the physics ran correctly and invisibly for
+    //  the entire life of the feature: the dock got wet in memory only.
+    //
+    //  Where it draws matters as much as that it draws. The dock, the menu bar
+    //  and a widget all render OVER the wallpaper, so anything stamped inside
+    //  their rect is hidden by the real thing. The visible surface is the pane
+    //  immediately outside them: the band of cells above a top edge, where the
+    //  meniscus stands and the sheen spreads, and the band below a bottom edge,
+    //  where fog condenses on the underside and drips hang.
+
+    /// Cell kinds written into `glassCells.y`. The pane's own water owns 0-5;
+    /// the furniture's deposits are 6 and up, and each is a distinct MATERIAL
+    /// in the presentation pass rather than one wetness at several strengths.
+    private enum Deposit {
+        static let bead: Float = 1      // pane: a drop, shaded as a bead
+        static let film: Float = 2      // pane: a wet track
+        static let lipBead: Float = 12  // a bead standing on a soaked lip
+        static let snow: Float = 6
+        static let sheen: Float = 7     // liquid water on a lip: dark, glossy
+        static let glaze: Float = 8     // clear ice
+        static let frost: Float = 9     // crystalline bloom
+        static let grime: Float = 10    // dry deposition
+        static let matte: Float = 11    // drizzle's flat film
+        static let bloom: Float = 13    // condensation: scattering, not glossy
+    }
+
+    /// Draw what has collected on each piece of furniture into the cells around
+    /// it. Layered in physical order, later passes standing in front of earlier
+    /// ones: dirt, then water, then ice, then frost, then snow on top of the lot.
+    private func stampFurniture() {
+        guard films.count == surfaces.count, !films.isEmpty,
+              !glassCells.isEmpty, SP > 0 else { return }
+        let strength = max(0, min(1, Furniture.options.furniture))
+        guard strength > 0.003 else { return }
+        let sw = surfaceWeather
+
+        @inline(__always)
+        func put(_ cx: Int, _ cy: Int, _ v: Float, _ kind: Float,
+                 _ bx: Float = 0, _ by: Float = 0) {
+            guard cx >= 0, cx < cols, cy >= 0, cy < rows else { return }
+            let a = min(1, v * strength)
+            guard a > 0.02 else { return }
+            glassCells[cy * cols + cx] = SIMD4<Float>(a, kind, bx, by)
+        }
+
+        for i in 0..<surfaces.count {
+            let s = surfaces[i]
+            guard marks(s.kind) else { continue }
+            let f = films[i]
+
+            let c0 = max(0, Int(s.left / SP))
+            let c1 = min(cols - 1, Int((s.right - 0.001) / SP))
+            guard c0 <= c1 else { continue }
+            let span = Float(c1 - c0 + 1)
+            // The cell the top edge falls in. The furniture covers its lower
+            // part, so this is the row the meniscus shows in; everything else
+            // stacks upward from it.
+            let lipRow = Int(s.top / SP)
+
+            // ---- dirt. Underneath everything, and the widest band, because
+            // dry deposition settles rather than being thrown at an edge.
+            if f.grime > 0.05 {
+                for cx in c0...c1 {
+                    let g = f.grime * (0.55 + 0.45 * jitter(Float(cx) * 5.1 + Float(i)))
+                    put(cx, lipRow, g * 0.7, Deposit.grime)
+                    put(cx, lipRow - 1, g * 0.32, Deposit.grime)
+                }
+            }
+
+            // ---- liquid water: the sheen, the beading and the runs.
+            //
+            // Thickest AT the edge and thinning upward — the corner holds the
+            // meniscus and the film spreads away from it. Getting this the
+            // other way round would put the water in a halo floating above the
+            // dock with a dry line along the lip itself.
+            let filmAmt = min(1, max(f.wet, f.steam))
+            let lipAmt = min(1, f.lip)
+            let condensing = (form == .fog || form == .dew)
+            if filmAmt > 0.03 || lipAmt > 0.03 {
+                // Matte or glossy is decided by whether the water that arrived
+                // is ABLE to gather into beads — a measured drop diameter
+                // against surface tension — rather than by which word the hour
+                // was given. Drizzle is matte because its drops are 0.3mm; so
+                // is the first minute of a very light shower, and so is dew,
+                // and all three look the same for the same reason.
+                let matte = form == .dew || form == .drizzle
+                         || (form.impacts && !sw.canRun)
+                // How far the film reaches up from the edge. Wind-driven rain is
+                // thrown AT the lip rather than dropped on it, so it wets
+                // considerably further up the face than the same rainfall
+                // falling straight down.
+                //
+                // The drive term is added OUTSIDE the saturating part, not
+                // inside it. Inside, `min(3.9, lip*1.7 + film*1.3 + driven*1.6)`
+                // was already at 3.0 from the film alone the moment it started
+                // raining, and Int() then rounded 3.0 and 3.9 to the same
+                // number of cells — a fifty-kilometre-an-hour squall and a dead
+                // calm drew a byte-identical band.
+                let reach = 1 + Int(min(2.4, lipAmt * 1.4 + filmAmt * 1.0))
+                          + Int(sw.driven * 2.4)
+                for cx in c0...c1 {
+                    let ph = jitter(Float(cx) * 1.37 + Float(i) * 7.13)
+                    let ph2 = jitter(Float(cx) * 3.71 + Float(i) * 2.90 + 11)
+                    // Roughly half the lip carries a fat bead and the rest a
+                    // thin fillet, each swelling and draining on its own slow
+                    // cycle. A uniform row of identical beads reads as a dashed
+                    // line; water does not do that.
+                    let swell = 0.30 + 0.70
+                        * (0.5 + 0.5 * sin(simSec * (0.35 + ph * 0.85) + ph2 * 6.2832))
+                    let fat = !matte && ph > 0.44
+                    let bead = fat ? lipAmt * swell : lipAmt * 0.20
+
+                    // A run: a column where the lip has taken more than it can
+                    // hold. Only where the form leaves water that CAN run, only
+                    // where there is runoff feeding it, and only on a few
+                    // columns — a rivulet is a local failure of the meniscus,
+                    // not something the whole edge does at once.
+                    let runs = form.runs && f.runoff > 0.05 && ph2 > 0.78
+                    let runLen = runs ? 2 + Int(min(4, f.runoff * 5)) : 0
+
+                    // A lip is not uniformly wet along its length. This is the
+                    // difference between a band of water and a ruled line.
+                    var patch = 0.62 + 0.38 * jitter(Float(cx) * 0.83 + Float(i) * 4.1)
+
+                    // EXPOSURE. Wind-driven rain does not wet an edge evenly: it
+                    // is thrown at the windward end and the sheltered end stays
+                    // comparatively dry. In still air there is no windward end
+                    // and the whole lip is wetted alike, which is why this term
+                    // is scaled by `driven` and vanishes with it rather than
+                    // always asserting a gradient.
+                    var reachC = reach
+                    if sw.driven > 0.05 && span > 1 {
+                        let along = Float(cx - c0) / (span - 1)
+                        let windward = sw.drive > 0 ? along : 1 - along
+                        let expo = 1 - sw.driven * 0.70 * (1 - windward)
+                        patch *= expo
+                        reachC = max(1, Int((Float(reach) * expo).rounded()))
+                    }
+
+                    for k in 0..<max(reachC, runLen) {
+                        let cy = lipRow - k
+                        guard cy >= 0 else { break }
+                        let up = Float(k)
+                        // Strongest AT the edge, thinning upward, and it has to
+                        // stay legible for the two or three cells it reaches or
+                        // the whole band collapses back to the single ruled row
+                        // a square falloff gives.
+                        let fall = max(0, 1 - up / Float(reachC))
+                        let sheen = filmAmt * patch * fall * (0.60 + 0.40 * fall)
+                        let runV = k < runLen
+                            ? f.runoff * (1 - up / Float(max(runLen, 1))) * 0.85 : 0
+
+                        // Condensation SCATTERS. A surface carrying micron-scale
+                        // droplets is optically rough, so it goes pale and hazy
+                        // instead of dark and glossy — breath on a window, not
+                        // rain on a window. It is the only wet material here
+                        // that lightens what it covers, and that is not a
+                        // stylistic choice: darkening was making dew literally
+                        // invisible on the clear night that is the only time it
+                        // forms, because there is nothing to darken.
+                        //
+                        // `fat` is already false whenever `matte` is, so dew
+                        // never reaches the bead branches above and fog only
+                        // does once its film has genuinely gathered.
+                        if condensing {
+                            put(cx, cy, min(0.95, sheen * 0.75 + 0.20), Deposit.bloom)
+                            continue
+                        }
+                        if matte {
+                            put(cx, cy, sheen * 0.85, Deposit.matte)
+                            continue
+                        }
+                        // The meniscus sits IN the lip row and nowhere else, so
+                        // a fat column is a bead there whatever the film around
+                        // it is doing. Comparing the two as though they competed
+                        // meant the sheen — which is pinned near 1 the moment it
+                        // starts raining — won every column and the beading
+                        // never appeared at all.
+                        if k == 0 && fat && bead > 0.15 {
+                            // Where the cell sits inside the bead, so the shader
+                            // can shade it out of whole cells: a little left of
+                            // centre and above it, which is where the highlight
+                            // of a hanging drop lives.
+                            put(cx, cy, min(0.95, 0.40 + bead * 0.55), Deposit.lipBead,
+                                (ph - 0.5) * 0.9, -0.28)
+                        } else if k == 1 && fat && bead > 0.55 {
+                            // A bead big enough to stand proud of the edge
+                            // occupies the cell above it too.
+                            put(cx, cy, min(0.8, 0.25 + bead * 0.45), Deposit.lipBead,
+                                (ph - 0.5) * 0.7, 0.45)
+                        } else if runV > sheen {
+                            put(cx, cy, runV * 0.85, Deposit.film)
+                        } else {
+                            put(cx, cy, sheen * 0.88, Deposit.sheen)
+                        }
+                    }
+                }
+            }
+
+            // ---- clear ice. Freezing rain glazes: it does not run and it does
+            // not bead, so it is a smooth even skin over the whole lip that
+            // simply thickens.
+            if f.glaze > 0.04 {
+                let depth = 1 + Int(min(2, f.glaze * 2.4))
+                for cx in c0...c1 {
+                    for k in 0..<depth {
+                        let cy = lipRow - k
+                        guard cy >= 0 else { break }
+                        let fall = 1 - Float(k) / Float(depth + 1)
+                        put(cx, cy, min(0.95, f.glaze * fall * 0.95), Deposit.glaze)
+                    }
+                }
+            }
+
+            // ---- frost. Grows OUT OF THE EDGES: a corner radiates to more of
+            // the sky than the middle of a face does, so it reaches sub-zero
+            // first and the bloom starts there and creeps inward.
+            if f.frost > 0.04 {
+                let bloom = max(1.5, span * 0.35 * min(1, 0.3 + f.frost))
+                let depth = 1 + Int(min(2, f.frost * 2.6))
+                for cx in c0...c1 {
+                    let fromEnd = Float(min(cx - c0, c1 - cx))
+                    let edgeness = max(0, 1 - fromEnd / bloom)
+                    let crystal = 0.55 + 0.45 * jitter(Float(cx) * 9.7 + Float(i) * 3.3)
+                    let a = f.frost * (0.25 + 0.75 * edgeness * edgeness) * crystal
+                    guard a > 0.05 else { continue }
+                    for k in 0..<depth {
+                        let cy = lipRow - k
+                        guard cy >= 0 else { break }
+                        put(cx, cy, a * (1 - Float(k) / Float(depth + 1)), Deposit.frost)
+                    }
+                }
+            }
+
+            // ---- snow, on top of everything, because it lies on top of
+            // everything. Depth is `f.snow` in cells; `f.snowSpan` is how much
+            // of the lip it still covers, and melt takes the span back from the
+            // margins, so a thawing cap narrows toward the middle rather than
+            // fading out at full width.
+            if f.snow > 0.05 && f.snowSpan > 0.02 {
+                // Crystals BOND to each other and pellets do not, and that
+                // single difference decides the shape of what is lying there. A
+                // snow cap is a coherent drift: it holds a rounded crown, it
+                // overhangs the edge, and it is continuous. Ice pellets are
+                // loose ball bearings that find their own level — a shallow,
+                // flat, patchy scatter with bare gaps in it, which is what sleet
+                // on a ledge actually looks like.
+                let loose = (form == .sleet)
+                let mid = (Float(c0) + Float(c1) + 1) * 0.5
+                let half = span * 0.5 * f.snowSpan
+                // How rough the top of the drift is. Open dendrites pile into an
+                // uneven crown; rimed graupel and wet aggregates settle nearly
+                // level, and pellets are level by definition.
+                let rough = loose ? 0.55 : 0.10 + 0.28 * max(0, sw.snowBulk - 0.7)
+                for cx in c0...c1 {
+                    let off = abs(Float(cx) + 0.5 - mid)
+                    guard off <= half else { continue }
+                    let g = jitter(Float(cx) * 2.3 + Float(i) * 5.7)
+                    // Loose pellets do not span gaps, so some columns simply
+                    // have none. A bonded cap is continuous and never does this.
+                    if loose && g > 0.45 + f.snow * 0.5 { continue }
+                    // A drift is deepest over the middle of what is left and
+                    // tapers to nothing at the retreating ends; a scatter is
+                    // flat right up to where it stops.
+                    let t = half <= 0.5 ? 0 : off / half
+                    let prof = loose ? 1 : sqrt(max(0, 1 - t * t))
+                    let deep = f.snow * prof * (1 - rough * g)
+                    guard deep > 0.12 else { continue }
+                    let rows_ = Int(deep.rounded(.up))
+                    for k in 0..<rows_ {
+                        let cy = lipRow - k
+                        guard cy >= 0 else { break }
+                        // The top layer of the cap is a partial cell, so it
+                        // fades rather than ending on a hard step.
+                        let cover = min(1, deep - Float(k))
+                        put(cx, cy, 0.35 + 0.60 * cover, Deposit.snow)
+                    }
+                }
+            }
+
+            // ---- STRIKES. What is arriving, at the instant it arrives.
+            //
+            // `impact` decays at 3.2/s, so this is a flicker of individual
+            // events rather than a level: a scatter of bright points along the
+            // lip that is never the same two frames running. It is the only
+            // thing in here that shows the RATE rather than the accumulation,
+            // and for hail it is very nearly the whole of the effect — a
+            // hailstorm leaves almost nothing behind but you can see every
+            // stone that hits.
+            if f.impact > 0.04 && form.impacts {
+                // Hail strikes are far fewer and far harder than rain's.
+                let heavy = (form == .hail || form == .sleet)
+                let live = f.impact * (heavy ? 1.0 : 0.55)
+                let churn = simSec * (heavy ? 9 : 16)
+                for cx in c0...c1 {
+                    // A different set of columns every few frames.
+                    let g = jitter(Float(cx) * 1.9 + Float(i) * 3.1 + churn.rounded(.down))
+                    guard g > 1 - live * (heavy ? 0.30 : 0.22) else { continue }
+                    let cy = lipRow - (g > 0.94 ? 1 : 0)
+                    guard cy >= 0 else { continue }
+                    // A strike is a burst of spray seen end-on: bright, small,
+                    // and gone. Drawn as a bead with the highlight dead centre
+                    // so it reads as a flash rather than as a hanging drop.
+                    put(cx, cy, min(0.95, 0.45 + live * 0.5), Deposit.lipBead, 0, -0.05)
+                }
+            }
+
+            // ---- the UNDERSIDE.
+            //
+            // Condensation is the only way water reaches a face that points at
+            // the ground, and it is the sharpest test of whether this whole
+            // model is doing physics or decoration: rain can NEVER wet an
+            // underside however hard it falls, and fog and dew always do, at
+            // exactly the same strength as they wet the top. An engine that
+            // treats deposits as one wetness at several strengths cannot express
+            // that difference at all.
+            guard s.hasUnderside(screenHeight: H) else { continue }
+            let under = max(f.steam, condensing ? f.wet * 0.6 : 0)
+            let hang = max(under, f.glaze * 0.5)
+            guard hang > 0.05 else { continue }
+            let botRow = Int(s.bottom / SP)
+            let depth = hang > 0.45 ? 2 : 1
+            for cx in c0...c1 {
+                let ph = jitter(Float(cx) * 4.9 + Float(i) * 1.7)
+                for k in 0..<depth {
+                    let cy = botRow + k
+                    guard cy < rows else { break }
+                    let fall = 1 - Float(k) / Float(depth + 1)
+                    // A drip line is beaded, not continuous: the film gathers
+                    // into pendant drops at intervals along the lip.
+                    let pendant = ph > 0.72 && k == 0
+                    if f.glaze > 0.25 && f.glaze * 0.5 >= under {
+                        put(cx, cy, f.glaze * fall * 0.8, Deposit.glaze)
+                    } else if pendant && under > 0.55 {
+                        // A pendant drop only forms once the film is thick
+                        // enough to gather. Below that the underside carries the
+                        // same scattering bloom as the top face — which is the
+                        // point: condensation does not care which way a face
+                        // points, and nothing else here can say that.
+                        put(cx, cy, min(0.85, 0.35 + under * 0.55), Deposit.lipBead,
+                            (ph - 0.5) * 0.8, -0.20)
+                    } else {
+                        put(cx, cy, min(0.92, under * fall * 0.75 + 0.18), Deposit.bloom)
+                    }
+                }
+            }
+        }
+    }
+
     /// Stamp the glass elements onto the cell grid. Everything the presentation
     /// pass needs to draw water in the current theme, at one lookup per pixel.
     ///
@@ -1340,19 +2494,10 @@ final class SceneSimulation {
             }
         }
 
-        // Snow lying on the top edge of each surface.
-        for s in surfaces {
-            guard let cap = snowCap[s.kind.rawValue], cap > 0.05 else { continue }
-            let rowTop = s.top / SP - cap
-            let c0 = max(0, Int(s.left / SP)), c1 = min(cols - 1, Int(s.right / SP))
-            guard c0 <= c1 else { continue }
-            for cy in max(0, Int(rowTop))...max(0, Int(s.top / SP)) where cy < rows {
-                for cx in c0...c1 {
-                    let idx = cy * cols + cx
-                    if 0.9 > glassCells[idx].x { glassCells[idx] = SIMD4<Float>(0.9, 6, 0, 0) }
-                }
-            }
-        }
+        // Everything lying on the furniture. After the pane's own film and pool
+        // — what is on the dock is in front of what is on the glass — and
+        // before the droplets, so spray can still land over the top of it.
+        stampFurniture()
 
         for sp in spots  { stamp(x: sp.x, y: sp.y, r: sp.r, kind: 3, strength: sp.a * 0.30 * intensity) }
         for v in vortices {

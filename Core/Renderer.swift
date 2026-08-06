@@ -577,7 +577,9 @@ final class ElementalRenderer {
         u.code = Int32(w.code)
         u.kind = w.effectiveKind.rawValue
 
-        u.flashAmp = sim.flashAmp(sec: sec, kind: w.kind)
+        // `effectiveKind`, not `kind`. The latter is the raw WMO classification
+        // and is exactly the input the rest of the engine stopped trusting.
+        u.flashAmp = sim.flashAmp(sec: sec, kind: w.effectiveKind)
         u.shootActive = sim.shootActive ? 1 : 0
         u.shootX = sim.shootX; u.shootY = sim.shootY; u.shootT0 = sim.shootT0
 
@@ -611,6 +613,16 @@ final class ElementalRenderer {
         u.dispersAmt = max(0, min(1, state.dispersion))
         u.frostAmt   = max(0, min(1, state.frost))
         u.splayAmt   = max(0, min(1, state.splay))
+        // What is physically falling, so the streak pass can draw a hailstone
+        // and a dendrite as the different objects they are. Derived in
+        // WeatherState from observed present weather, the freezing level and a
+        // measured rate — the shader never sees the WMO code for this.
+        u.pform  = Float(w.precipForm.rawValue)
+        // How much light the deck is taking out, 0..1. `cbase` already carries
+        // the same quantity but is deliberately clamped into the band the scene
+        // was tuned in; this is the unclamped signal, used only for bounded
+        // shading under the deck.
+        u.gloomF = max(0, min(1, w.gloom))
         // Fog is observed, not read off the WMO code: model visibility is a
         // grid-box average and fog is famously not.
         u.fogOn = w.isFoggy ? 1 : 0

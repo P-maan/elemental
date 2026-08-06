@@ -12,19 +12,56 @@
 //  Reachable two ways, so hiding the menu-bar item never locks you out: the
 //  menu-bar item, or launching Elemental again from Spotlight or Finder (see
 //  applicationShouldHandleReopen in main.swift).
+//
+//  ---- What this window is trying to be
+//
+//  It had grown a lot of advanced controls, and the complaint was exact:
+//  somebody who does not want something this advanced cannot tell what any of
+//  it does. "Splay", "Emphasis" and "Dispersion" are not words, they are shader
+//  parameters, and a paragraph of prose under a slider is a worse answer than a
+//  picture. So the window is now built around SEEING:
+//
+//    * every pane opens with a HERO — a large live render of the scene exactly
+//      as configured, which updates while you drag.
+//    * every relief and glass slider carries a none/half/full strip. Click a
+//      tile to jump there.
+//    * shape and finish are four thumbnails you pick from, not a dropdown of
+//      two nouns and two other nouns.
+//    * grid density is shown at five densities rather than described as a
+//      number of rows.
+//
+//  Layout vocabulary — cards, hero, type scale, materials — lives in
+//  SettingsKit.swift. Thumbnail rendering lives in PreviewRenderer.swift.
+//
+//  ---- The performance rule
+//
+//  Settings had a bad lag problem, fixed by splitting cheap live updates from
+//  expensive work debounced by ~0.45s, and nothing here may undo that. The
+//  worst bug this project has had was the lock-still exporter doing a render
+//  and a PNG encode on the animation's runloop, freezing the wallpaper for
+//  337ms a minute; a window full of live thumbnails is exactly the shape that
+//  could bring it back. It does not, because every render goes through
+//  `ScenePreview`: one shared renderer per pixel size, small targets, cached by
+//  the parameters that produced the image, superseded requests dropped before
+//  they reach the GPU, and all of it on a background queue that hands back
+//  nothing but a finished NSImage.
+//
+//  Measured, on an M1 Pro: 0.73ms a strip tile, 0.80ms an option tile, 2.36ms a
+//  hero, plus one 550ms shader compile the first time a preview is asked for.
+//  A 120-event drag of one slider — hero live, seven strips behind a 0.35s
+//  debounce — costs 1.2ms of MAIN THREAD time in total (0.009ms per event) and
+//  138 renders, 2502 of the 2640 requests having been dropped as superseded
+//  before reaching the GPU.
 
 import AppKit
 import ServiceManagement
 import MapKit
 
 // MARK: - Shared form building
-//
-// Small helpers so every pane lays out identically. Labels are a fixed width so
-// controls line up down the window, which is most of what makes a settings
-// window look deliberate rather than assembled.
 
 class Pane: NSViewController {
 
+    /// The column of cards.
     let stack = NSStackView()
     weak var owner: SettingsWindowController?
 
@@ -34,17 +71,23 @@ class Pane: NSViewController {
 
     override func loadView() {
         stack.orientation = .vertical
+        // Cards are stretched to the pane width by `addCard`, one explicit
+        // constraint each, rather than by a `.width` stack alignment — that
+        // alignment produced a pane whose cards all landed on top of one
+        // another, with no constraint warning to say so.
         stack.alignment = .leading
-        stack.spacing = 12
-        stack.edgeInsets = NSEdgeInsets(top: 20, left: 24, bottom: 24, right: 24)
+        stack.spacing = UI.cardGap
+        stack.edgeInsets = NSEdgeInsets(top: UI.paneInset, left: UI.paneInset,
+                                        bottom: UI.paneInset + 8, right: UI.paneInset)
         stack.translatesAutoresizingMaskIntoConstraints = false
 
         let scroll = NSScrollView()
         scroll.hasVerticalScroller = true
         scroll.drawsBackground = false
         scroll.autohidesScrollers = true
+        scroll.translatesAutoresizingMaskIntoConstraints = false
 
-        let doc = NSView()
+        let doc = FlippedView()
         doc.translatesAutoresizingMaskIntoConstraints = false
         doc.addSubview(stack)
         NSLayoutConstraint.activate([
@@ -55,12 +98,40 @@ class Pane: NSViewController {
         ])
         scroll.documentView = doc
         doc.widthAnchor.constraint(equalTo: scroll.widthAnchor).isActive = true
-        view = scroll
+
+        // Material behind the pane. This one change is most of what makes the
+        // window read as a Mac window rather than as an AppKit form.
+        let backdrop = NSVisualEffectView()
+        backdrop.material = .contentBackground
+        backdrop.blendingMode = .behindWindow
+        backdrop.state = .followsWindowActiveState
+        backdrop.translatesAutoresizingMaskIntoConstraints = false
+        backdrop.addSubview(scroll)
+        NSLayoutConstraint.activate([
+            scroll.topAnchor.constraint(equalTo: backdrop.topAnchor),
+            scroll.leadingAnchor.constraint(equalTo: backdrop.leadingAnchor),
+            scroll.trailingAnchor.constraint(equalTo: backdrop.trailingAnchor),
+            scroll.bottomAnchor.constraint(equalTo: backdrop.bottomAnchor),
+        ])
+        view = backdrop
         build()
     }
 
-    /// Subclasses populate `stack` here.
+    /// Subclasses populate `stack` here, through `addCard`.
     func build() {}
+
+    /// Add a full-width item to the pane's column.
+    ///
+    /// The width is constrained explicitly against the stack rather than left
+    /// to the stack's alignment, so every card ends up the same width and the
+    /// column has one clean edge.
+    func addCard(_ v: NSView) {
+        stack.addArrangedSubview(v)
+        v.translatesAutoresizingMaskIntoConstraints = false
+        v.widthAnchor.constraint(equalTo: stack.widthAnchor,
+                                 constant: -2 * UI.paneInset).isActive = true
+    }
+
     /// Called whenever the config changes underneath the pane.
     ///
     /// Only ever call this through `syncSafely` — NSViewController loads its
@@ -88,18 +159,45 @@ class Pane: NSViewController {
         refreshPreviews()
     }
 
-    /// The one live thumbnail that tracks a control while it is being dragged.
-    /// Must stay cheap: this runs once per mouse move.
-    func updateLivePreview(_ config: Config) {}
+    /// The hero, if this pane has one. Cheap to update: one coalesced request.
+    func updateLivePreview(_ config: Config) {
+        guard let hero, let spec = heroSpec(config) else { return }
+        hero.show(spec)
+    }
 
-    /// The low/medium/high strips and option tiles. Several renders, so this is
-    /// debounced rather than run per mouse move.
-    func updateRangePreviews(_ config: Config) {}
+    /// The strips and option tiles — a dozen or more renders, so this is
+    /// debounced rather than run on every mouse move.
+    func updateRangePreviews(_ config: Config) {
+        for r in reliefStrips {
+            guard var base = heroSpec(config) else { return }
+            base.width = Int(ScenePreview.small.width)
+            base.height = Int(ScenePreview.small.height)
+            base.nightMoon = r.night
+            r.strip.show(base) { s, v in s[keyPath: r.key] = PreviewSpec.pct(v) }
+            r.strip.mark(current: r.slider.value, tolerance: 0.03)
+        }
+    }
 
+    /// Everything, at once. For appearing on screen — when a pane is first
+    /// shown there is nothing to coalesce with and the user is waiting.
     func refreshPreviews() {
         guard isPaneVisible, let c = owner?.config else { return }
         updateLivePreview(c)
         updateRangePreviews(c)
+    }
+
+    /// Everything, but with the expensive half deferred. This is what a value
+    /// CHANGE uses.
+    ///
+    /// `sync` runs on every commit from anywhere, and calling `refreshPreviews`
+    /// from it was measurably wrong: a 120-event drag issued 2640 requests and
+    /// pushed 997 of them all the way to the GPU, because the undebounced path
+    /// re-rendered all 21 strip tiles on every single mouse move. Through here
+    /// the same drag costs 121.
+    func refreshPreviewsDebounced() {
+        guard isPaneVisible, let c = owner?.config else { return }
+        updateLivePreview(c)
+        scheduleRangePreviews()
     }
 
     /// Coalesce the expensive half while a control is being worked. Mirrors the
@@ -116,74 +214,107 @@ class Pane: NSViewController {
         }
     }
 
-    // ---- builders
+    // ---- hero
 
-    func section(_ t: String) -> NSView {
-        let f = NSTextField(labelWithString: t)
-        f.font = .systemFont(ofSize: 13, weight: .semibold)
-        let box = NSStackView(views: [f])
-        box.edgeInsets = NSEdgeInsets(top: 8, left: 0, bottom: 0, right: 0)
-        return box
+    private(set) var hero: HeroPreview?
+
+    /// The scene this pane's previews should draw. Subclasses override.
+    func heroSpec(_ config: Config) -> PreviewSpec? { nil }
+
+    /// Put a hero at the top of the pane, centred, over its caption.
+    func installHero(_ caption: String) {
+        let h = HeroPreview()
+        hero = h
+        let cap = captionLabel(caption, width: HeroPreview.points.width)
+        cap.alignment = .center
+        let col = NSStackView(views: [h, cap])
+        col.orientation = .vertical
+        col.alignment = .centerX
+        col.spacing = 8
+        col.translatesAutoresizingMaskIntoConstraints = false
+        // Centred in the pane whatever the window width, without stretching the
+        // render — see ScenePreview.large.
+        addCard(centred(col))
     }
 
-    func note(_ t: String) -> NSTextField {
-        let f = NSTextField(wrappingLabelWithString: t)
-        f.font = .systemFont(ofSize: 11)
-        f.textColor = .secondaryLabelColor
-        f.preferredMaxLayoutWidth = 380
-        return f
+    // ---- relief strips
+
+    /// A relief slider, its none/half/full strip, and the preview field it
+    /// varies. Held together so a strip cannot drift out of step with its
+    /// slider — the failure mode that makes a picture worse than no picture.
+    struct ReliefStrip {
+        let slider: LabelledSlider
+        let strip: PreviewStrip
+        let key: WritableKeyPath<PreviewSpec, Int>
+        let night: Bool
+    }
+    private(set) var reliefStrips: [ReliefStrip] = []
+
+    /// A slider row that shows what the slider does.
+    ///
+    /// The row itself on top, and under it three thumbnails of this setting at
+    /// none, half and full — click one to jump straight to that value. `key` is
+    /// the `PreviewSpec` field the strip varies, which is what lets one helper
+    /// serve all seven controls without any of them being wired by hand.
+    func reliefRow(_ title: String, _ s: LabelledSlider,
+                   _ key: WritableKeyPath<PreviewSpec, Int>,
+                   night: Bool = false) -> NSView {
+        let strip = PreviewStrip(points: NSSize(width: 66, height: 42),
+                                 entries: [(value: 0.0, caption: "none"),
+                                           (value: 0.5, caption: "half"),
+                                           (value: 1.0, caption: "full")],
+                                 spacing: 6)
+        strip.onPick = { [weak s] v in
+            guard let s else { return }
+            s.value = v
+            s.refresh()
+            // Exactly the path a drag takes, so clicking a tile and dragging to
+            // the same place cannot produce different results.
+            s.slider.sendAction(s.slider.action, to: s.slider.target)
+        }
+        reliefStrips.append(ReliefStrip(slider: s, strip: strip, key: key, night: night))
+
+        // The strip lines up under the control, not under the label.
+        let indent = NSView()
+        indent.translatesAutoresizingMaskIntoConstraints = false
+        indent.widthAnchor.constraint(equalToConstant: UI.labelWidth + 10).isActive = true
+        let stripRow = NSStackView(views: [indent, strip])
+        stripRow.spacing = 0
+        stripRow.alignment = .top
+
+        let col = NSStackView(views: [formRow(title, s.box), stripRow])
+        col.orientation = .vertical
+        col.alignment = .leading
+        col.spacing = 6
+        col.translatesAutoresizingMaskIntoConstraints = false
+        return col
     }
 
-    func row(_ title: String, _ control: NSView) -> NSView {
-        let l = NSTextField(labelWithString: title)
-        l.alignment = .right
-        l.widthAnchor.constraint(equalToConstant: 108).isActive = true
-        let s = NSStackView(views: [l, control])
-        s.spacing = 12
-        s.alignment = .centerY
-        return s
-    }
+    // ---- small builders
 
-    func divider() -> NSBox {
-        let b = NSBox()
-        b.boxType = .separator
-        b.widthAnchor.constraint(equalToConstant: 400).isActive = true
-        return b
-    }
+    func note(_ t: String) -> NSTextField { captionLabel(t) }
+
+    func row(_ title: String, _ control: NSView) -> NSView { formRow(title, control) }
 
     func popup(_ titles: [String], _ action: Selector) -> NSPopUpButton {
         let p = NSPopUpButton()
         p.addItems(withTitles: titles)
         p.target = self; p.action = action
+        p.font = UI.body
         return p
     }
 
     func check(_ title: String, _ action: Selector) -> NSButton {
-        NSButton(checkboxWithTitle: title, target: self, action: action)
-    }
-
-    /// A slider with its value written out beside it, as a settings row.
-    ///
-    /// Six of the relief controls are the same shape, and building them by hand
-    /// six times is how the labels drift out of step with the sliders.
-    /// A labelled slider row for one relief control.
-    ///
-    /// Restored as a plain row. The agent building the settings previews was
-    /// cut off after writing every call site but before defining this, so the
-    /// tree would not compile at all. The keypath argument is kept in the
-    /// signature — every call site passes one and it is what a preview
-    /// thumbnail will need to render that control in isolation — but nothing
-    /// reads it yet. Finishing the preview means using it here, not changing
-    /// the callers.
-    func reliefRow(_ title: String, _ s: LabelledSlider) -> NSView {
-        row(title, s.box)
+        let b = NSButton(checkboxWithTitle: title, target: self, action: action)
+        b.font = UI.body
+        return b
     }
 
     func slider(_ title: String, _ range: ClosedRange<Double>,
                 _ action: Selector, _ format: @escaping (Double) -> String) -> LabelledSlider {
         let ls = LabelledSlider(range: range, format: format)
         ls.slider.target = self; ls.slider.action = action
-        ls.container = row(title, ls.box)
+        ls.container = formRow(title, ls.box)
         return ls
     }
 }
@@ -201,13 +332,11 @@ final class LabelledSlider {
         self.format = format
         slider.minValue = range.lowerBound
         slider.maxValue = range.upperBound
-        // Narrower than it was: the space bought here goes to the low/medium/
-        // high preview strip beside it, which tells you more about the control
-        // than another thirty points of travel would.
-        slider.widthAnchor.constraint(equalToConstant: 148).isActive = true
-        label.font = .monospacedDigitSystemFont(ofSize: 11, weight: .regular)
+        slider.controlSize = .small
+        slider.widthAnchor.constraint(equalToConstant: 150).isActive = true
+        label.font = UI.value
         label.textColor = .secondaryLabelColor
-        label.widthAnchor.constraint(equalToConstant: 44).isActive = true
+        label.widthAnchor.constraint(equalToConstant: 40).isActive = true
         box.setViews([slider, label], in: .leading)
         box.spacing = 8
         box.alignment = .centerY
@@ -238,8 +367,6 @@ final class GeneralPane: Pane {
     private var lowPowerCheck: NSButton!
     private var lockSyncCheck: NSButton!
 
-    // Relief. Six controls over one wall of blocks; `glassOnly` are the three
-    // that need something to transmit and so mean nothing on a flat tile.
     private var depthS: LabelledSlider!
     private var emphS: LabelledSlider!
     private var lightS: LabelledSlider!
@@ -247,15 +374,10 @@ final class GeneralPane: Pane {
     private var dispersS: LabelledSlider!
     private var frostS: LabelledSlider!
     private var splayS: LabelledSlider!
-    private var glassOnly: [NSView] = []
-
-    /// The wall as currently configured, updated while a slider moves.
-    private var reliefPreview: PreviewTile!
-    /// One low/medium/high strip per relief slider, and the key path each one
-    /// varies. Held together so nothing can drift out of step with its slider.
-    private var reliefStrips: [(slider: LabelledSlider,
-                                strip: PreviewStrip,
-                                key: WritableKeyPath<PreviewSpec, Int>)] = []
+    /// The whole glass card. These three describe light passing THROUGH a
+    /// block; a flat tile is opaque, so on flat the card goes away rather than
+    /// sitting there doing nothing. A dead control is worse than a missing one.
+    private var glassCard: Card!
 
     static let fpsChoices = [10, 15, 30, 60, 120]
     static let speedChoices: [(String, Double)] = [
@@ -266,93 +388,92 @@ final class GeneralPane: Pane {
         ("Off", 0), ("Flick — 2s", 2), ("Normal — 5s", 5), ("Slow — 10s", 10), ("Cinematic — 20s", 20),
     ]
 
+    override func heroSpec(_ c: Config) -> PreviewSpec? {
+        PreviewSpec.desktop(c, pixels: ScenePreview.large)
+    }
+
     override func build() {
-        stack.addArrangedSubview(section("Startup"))
-        loginCheck = check("Open Elemental at login", #selector(loginToggled))
-        stack.addArrangedSubview(loginCheck)
-        stack.addArrangedSubview(note("Elemental has no Dock icon. Launching it again from Spotlight or "
-                                    + "Finder reopens these settings."))
-
-        stack.addArrangedSubview(divider())
-        stack.addArrangedSubview(section("Relief"))
-
-        // The wall itself, at the top of the section, tracking every slider
-        // below it. This is the control that answers "what does this do" —
-        // everything else on the section is a way of moving it.
-        reliefPreview = PreviewTile(points: NSSize(width: 300, height: 188), corner: 8)
-        stack.addArrangedSubview(reliefPreview)
-        stack.addArrangedSubview(note("A sample afternoon sky over your city, drawn with the settings "
-                                    + "below. The strip beside each slider is that setting at none, half "
-                                    + "and full — click one to jump straight to it."))
+        installHero("Your mosaic, drawn with the settings below, on a sample afternoon "
+                  + "over your city. It updates as you drag.")
 
         let pct: (Double) -> String = { "\(Int(($0 * 100).rounded()))%" }
 
+        // ---- relief
         depthS = slider("Depth", 0...1, #selector(changed), pct)
-        stack.addArrangedSubview(reliefRow("Depth", depthS))
         emphS = slider("Emphasis", 0...1, #selector(changed), pct)
-        stack.addArrangedSubview(reliefRow("Emphasis", emphS))
         lightS = slider("Light", 0...1, #selector(changed), pct)
-        stack.addArrangedSubview(reliefRow("Light", lightS))
         splayS = slider("Splay", 0...1, #selector(changed), pct)
-        stack.addArrangedSubview(reliefRow("Splay", splayS))
-        stack.addArrangedSubview(note("Every cell is a block pushed out of the wall by its own brightness, "
-                                    + "so the sky's clouds and the moon emboss the mosaic instead of only "
-                                    + "colouring it. Depth is how far they stand out; the light angle and "
-                                    + "strength shade their side faces and the crevices between them; splay "
-                                    + "unsettles the courses so the wall is not perfectly regular."))
 
+        let relief = Card("Relief", symbol: "cube")
+        relief.add(captionLabel("Every cell is a block pushed out of the wall by its own brightness, so "
+                              + "the clouds and the moon emboss the mosaic instead of only colouring it."))
+        relief.add(reliefRow("Depth", depthS, \.depth))
+        relief.add(reliefRow("Emphasis", emphS, \.emphasis))
+        relief.add(reliefRow("Light", lightS, \.light))
+        relief.add(reliefRow("Splay", splayS, \.splay))
+        relief.note("Depth is how far the blocks stand out. Emphasis decides whether they follow "
+                  + "features or plain tone. Light shades their side faces and the crevices between "
+                  + "them. Splay unsettles the courses so the wall is not perfectly regular.")
+        addCard(relief)
+
+        // ---- glass
         refractS = slider("Refraction", 0...1, #selector(changed), pct)
-        let refractRow = reliefRow("Refraction", refractS)
-        stack.addArrangedSubview(refractRow)
         dispersS = slider("Dispersion", 0...1, #selector(changed), pct)
-        let dispersRow = reliefRow("Dispersion", dispersS)
-        stack.addArrangedSubview(dispersRow)
         frostS = slider("Frost", 0...1, #selector(changed), pct)
-        let frostRow = reliefRow("Frost", frostS)
-        stack.addArrangedSubview(frostRow)
-        let glassNote = note("Refraction is how far you see THROUGH each block, so what lands on its face "
-                           + "is the wall a little way behind — the further from the centre of the screen, "
-                           + "the further off. Dispersion splits that per colour and fringes the edges; "
-                           + "frost scatters it.")
-        stack.addArrangedSubview(glassNote)
-        // These three describe light passing through a block. A flat tile is
-        // opaque, so they are hidden rather than left sitting there doing
-        // nothing — a dead control is worse than a missing one.
-        glassOnly = [refractRow, dispersRow, frostRow, glassNote]
 
-        stack.addArrangedSubview(divider())
-        stack.addArrangedSubview(section("Motion"))
+        glassCard = Card("Glass", symbol: "drop")
+        glassCard.add(captionLabel("Only for a glass finish — a flat tile is opaque and has nothing to "
+                                 + "transmit. Previewed against a full moon, which is where glass shows."))
+        glassCard.add(reliefRow("Refraction", refractS, \.refraction, night: true))
+        glassCard.add(reliefRow("Dispersion", dispersS, \.dispersion, night: true))
+        glassCard.add(reliefRow("Frost", frostS, \.frost, night: true))
+        glassCard.note("Refraction is how far you see through each block, so what lands on its face is "
+                     + "the wall a little way behind — the further from the centre of the screen, the "
+                     + "further off. Dispersion splits that per colour and fringes the edges; frost "
+                     + "scatters it. These are subtle by nature: look at the hero above, not the strips.")
+        addCard(glassCard)
+
+        // ---- startup
+        loginCheck = check("Open Elemental at login", #selector(loginToggled))
+        let startup = Card("Startup", symbol: "power")
+        startup.add(loginCheck)
+        startup.note("Elemental has no Dock icon. Launching it again from Spotlight or Finder reopens "
+                   + "these settings.")
+        addCard(startup)
+
+        // ---- motion
         fpsPop = popup(Self.fpsChoices.map { "\($0) fps" }, #selector(changed))
-        stack.addArrangedSubview(row("Frame rate", fpsPop))
         speedPop = popup(Self.speedChoices.map(\.0), #selector(changed))
-        stack.addArrangedSubview(row("Speed", speedPop))
-        stack.addArrangedSubview(note("Frame rate is how often it is drawn; speed is how fast the world "
-                                    + "runs. Lowering the frame rate saves power; slowing the motion costs "
-                                    + "nothing and simply reads calmer."))
-
         replayPop = popup(Self.replayChoices.map(\.0), #selector(changed))
-        stack.addArrangedSubview(row("Wake replay", replayPop))
-        stack.addArrangedSubview(note("After sleep or a closed lid, the scene replays the hours it missed "
-                                    + "as a time-lapse before settling into now. Gaps under ten minutes "
-                                    + "always resume instantly."))
+        let motion = Card("Motion", symbol: "waveform")
+        motion.add(row("Frame rate", fpsPop))
+        motion.add(row("Speed", speedPop))
+        motion.note("Frame rate is how often it is drawn; speed is how fast the world runs. Lowering "
+                  + "the frame rate saves power; slowing the motion costs nothing and reads calmer.")
+        motion.rule()
+        motion.add(row("Wake replay", replayPop))
+        motion.note("After sleep or a closed lid, the scene replays the hours it missed as a time-lapse "
+                  + "before settling into now. Gaps under ten minutes always resume instantly.")
+        addCard(motion)
 
-        stack.addArrangedSubview(divider())
-        stack.addArrangedSubview(section("Power"))
+        // ---- power
         occludedCheck = check("Keep drawing when fully covered", #selector(changed))
         lowPowerCheck = check("Reduce detail and frame rate in Low Power Mode", #selector(changed))
-        stack.addArrangedSubview(occludedCheck)
-        stack.addArrangedSubview(lowPowerCheck)
-        stack.addArrangedSubview(note("Behind a fullscreen app Elemental pauses but is never unloaded, so "
-                                    + "coming back is a single frame with no reload."))
+        let power = Card("Power", symbol: "battery.100")
+        power.add(occludedCheck)
+        power.add(lowPowerCheck)
+        power.note("Behind a fullscreen app Elemental pauses but is never unloaded, so coming back is a "
+                 + "single frame with no reload.")
+        addCard(power)
 
-        stack.addArrangedSubview(divider())
-        stack.addArrangedSubview(section("Lock screen"))
+        // ---- lock
         lockSyncCheck = check("Show the scene on the lock screen", #selector(changed))
-        stack.addArrangedSubview(lockSyncCheck)
-        stack.addArrangedSubview(note("Replaces your desktop picture with a still of the scene, refreshed "
-                                    + "every minute and again the moment you lock. macOS does not permit "
-                                    + "animation behind the password field — the screen saver is the only "
-                                    + "animated surface at the lock."))
+        let lock = Card("Lock screen", symbol: "lock.display")
+        lock.add(lockSyncCheck)
+        lock.note("Replaces your desktop picture with a still of the scene, refreshed every minute and "
+                + "again the moment you lock. macOS does not permit animation behind the password "
+                + "field — the screen saver is the only animated surface at the lock.")
+        addCard(lock)
     }
 
     override func sync(_ c: Config) {
@@ -373,8 +494,8 @@ final class GeneralPane: Pane {
         frostS.value = c.frost
         // The desktop's finish decides it: the lock screen and saver can differ,
         // but this is one shared wall and the pane it lives on is the general one.
-        let glass = c.finish == .glass
-        for v in glassOnly { v.isHidden = !glass }
+        UI.setHidden([glassCard], c.finish != .glass)
+        refreshPreviewsDebounced()
     }
 
     @objc private func loginToggled() {
@@ -409,6 +530,9 @@ final class GeneralPane: Pane {
         c.dispersion = dispersS.value
         c.frost = frostS.value
         for s in [depthS, emphS, lightS, splayS, refractS, dispersS, frostS] { s?.refresh() }
+        // Cheap now, expensive later — the split that keeps the window smooth.
+        updateLivePreview(c)
+        scheduleRangePreviews()
         owner?.commit(c, from: self)
     }
 }
@@ -431,8 +555,6 @@ final class SurfacePane: Pane {
     override var symbol: String { paneSymbol }
 
     private var mirrorCheck: NSButton!
-    private var shapePop: NSPopUpButton!
-    private var finishPop: NSPopUpButton!
     private var rowsField: NSTextField!
     private var rowsStepper: NSStepper!
     private var headingPop: NSPopUpButton!
@@ -443,6 +565,21 @@ final class SurfacePane: Pane {
     private var bodyViews: [NSView] = []
     private var places: [Place] = []
 
+    /// The four shape-and-finish combinations, as pictures.
+    private var styleChoices: [PreviewChoice] = []
+    private static let styleCombos: [(MosaicShape, MosaicFinish, String)] = [
+        (.square, .glass, "Square · Glass"),
+        (.square, .flat,  "Square · Flat"),
+        (.dot,    .glass, "Dot · Glass"),
+        (.dot,    .flat,  "Dot · Flat"),
+    ]
+    private var pickedShape: MosaicShape = .square
+    private var pickedFinish: MosaicFinish = .glass
+
+    /// Grid density, also as pictures.
+    private var densityStrip: PreviewStrip!
+    private static let densities: [Double] = [14, 24, 36, 56, 84]
+
     init(role: Role, title: String, symbol: String, blurb: String) {
         self.role = role
         self.paneTitle = title
@@ -452,50 +589,94 @@ final class SurfacePane: Pane {
     }
     required init?(coder: NSCoder) { fatalError() }
 
+    override func heroSpec(_ c: Config) -> PreviewSpec? {
+        PreviewSpec.surface(c, style(from: c), pixels: ScenePreview.large)
+    }
+
     override func build() {
-        stack.addArrangedSubview(note(blurb))
+        installHero(blurb)
 
         if role != .desktop {
             mirrorCheck = check("Mimic Home Screen settings", #selector(mirrorToggled))
-            stack.addArrangedSubview(mirrorCheck)
+            let m = Card()
+            m.add(mirrorCheck)
+            addCard(m)
         }
 
-        shapePop = popup(MosaicShape.allCases.map { "\($0)".capitalized }, #selector(changed))
-        finishPop = popup(MosaicFinish.allCases.map { "\($0)".capitalized }, #selector(changed))
+        // ---- shape and finish, as four thumbnails
+        let styleRow = NSStackView()
+        styleRow.orientation = .horizontal
+        styleRow.alignment = .top
+        styleRow.spacing = 8
+        styleRow.translatesAutoresizingMaskIntoConstraints = false
+        for (i, combo) in Self.styleCombos.enumerated() {
+            let c = PreviewChoice(points: NSSize(width: 108, height: 68), caption: combo.2)
+            c.onSelect = { [weak self] in self?.pickStyle(i) }
+            styleChoices.append(c)
+            styleRow.addArrangedSubview(c)
+        }
 
         rowsField = NSTextField()
         rowsField.formatter = { let f = NumberFormatter(); f.allowsFloats = false
                                 f.minimum = 12; f.maximum = 120; return f }()
-        rowsField.widthAnchor.constraint(equalToConstant: 58).isActive = true
+        rowsField.font = UI.body
+        rowsField.widthAnchor.constraint(equalToConstant: 54).isActive = true
         rowsField.target = self; rowsField.action = #selector(rowsTyped)
         rowsStepper = NSStepper()
         rowsStepper.minValue = 12; rowsStepper.maxValue = 120; rowsStepper.increment = 1
         rowsStepper.target = self; rowsStepper.action = #selector(stepperChanged)
-        let rowsBox = NSStackView(views: [rowsField, rowsStepper]); rowsBox.spacing = 4
+        let rowsBox = NSStackView(views: [rowsField, rowsStepper])
+        rowsBox.spacing = 4
+        rowsBox.alignment = .centerY
 
+        densityStrip = PreviewStrip(points: NSSize(width: 96, height: 60),
+                                    entries: Self.densities.map {
+                                        (value: $0, caption: "\(Int($0)) rows")
+                                    },
+                                    spacing: 8)
+        densityStrip.onPick = { [weak self] v in
+            guard let self else { return }
+            self.rowsField.integerValue = Int(v)
+            self.rowsStepper.integerValue = Int(v)
+            self.write(self.collect())
+        }
+
+        let mosaic = Card("Mosaic", symbol: "square.grid.3x3")
+        mosaic.add(captionLabel("The shape of a cell and whether it is glass or flat. Pick the one that "
+                              + "looks right — the four are shown exactly as they will draw."))
+        mosaic.add(styleRow)
+        mosaic.rule()
+        mosaic.add(captionLabel("Density — how many cells fit down the screen."))
+        mosaic.add(densityStrip)
+        mosaic.add(row("Rows", rowsBox))
+        mosaic.note("Cells down the screen. The Pi uses 36; more rows is a finer grid.")
+
+        // ---- sky
         headingPop = popup(HeadingMode.allCases.map(\.title), #selector(changed))
-
         facingSlider = NSSlider()
         facingSlider.minValue = 0; facingSlider.maxValue = 359
+        facingSlider.controlSize = .small
         facingSlider.target = self; facingSlider.action = #selector(changed)
         facingSlider.widthAnchor.constraint(equalToConstant: 180).isActive = true
         facingLabel = NSTextField(labelWithString: "")
-        facingLabel.font = .monospacedDigitSystemFont(ofSize: 11, weight: .regular)
+        facingLabel.font = UI.value
         facingLabel.textColor = .secondaryLabelColor
-        let facingBox = NSStackView(views: [facingSlider, facingLabel]); facingBox.spacing = 8
+        let facingBox = NSStackView(views: [facingSlider, facingLabel])
+        facingBox.spacing = 8
+        facingBox.alignment = .centerY
         facingRow = row("Facing", facingBox)
-
         placePop = popup([], #selector(changed))
 
-        bodyViews = [divider(), section("Mosaic"),
-                     row("Shape", shapePop), row("Finish", finishPop), row("Rows", rowsBox),
-                     note("Cells down the screen. The Pi uses 36; more rows is a finer grid."),
-                     divider(), section("Sky"),
-                     row("Heading", headingPop), facingRow,
-                     note("Custom looks one way and lets the sky drift past. Dynamic follows whatever is "
-                        + "up — the sun by day, the moon once it has risen — panning between them at dusk."),
-                     row("Show sky over", placePop)]
-        bodyViews.forEach { stack.addArrangedSubview($0) }
+        let sky = Card("Sky", symbol: "sun.and.horizon")
+        sky.add(row("Heading", headingPop))
+        sky.add(facingRow)
+        sky.note("Custom looks one way and lets the sky drift past. Dynamic follows whatever is up — "
+               + "the sun by day, the moon once it has risen — panning between them at dusk.")
+        sky.rule()
+        sky.add(row("Show sky over", placePop))
+
+        bodyViews = [mosaic, sky]
+        bodyViews.forEach { addCard($0) }
     }
 
     private func style(from c: Config) -> Config.SurfaceStyle {
@@ -514,8 +695,11 @@ final class SurfacePane: Pane {
         let st = style(from: c)
         places = c.allPlaces
         mirrorCheck?.state = st.mirrorsDesktop ? .on : .off
-        shapePop.selectItem(at: Int(st.shape.rawValue))
-        finishPop.selectItem(at: Int(st.finish.rawValue))
+        pickedShape = st.shape
+        pickedFinish = st.finish
+        for (i, combo) in Self.styleCombos.enumerated() {
+            styleChoices[i].isSelected = (combo.0 == st.shape && combo.1 == st.finish)
+        }
         rowsField.integerValue = st.gridRows
         rowsStepper.integerValue = st.gridRows
         headingPop.selectItem(at: Int(st.headingMode.rawValue))
@@ -532,19 +716,37 @@ final class SurfacePane: Pane {
             if let i = places.firstIndex(where: { $0.name == want }) { placePop.selectItem(at: i) }
         }
         applyVisibility(st)
+        refreshPreviewsDebounced()
+    }
+
+    /// The option tiles, which are this pane's expensive previews.
+    override func updateRangePreviews(_ c: Config) {
+        super.updateRangePreviews(c)
+        guard let base0 = heroSpec(c) else { return }
+        var base = base0
+        base.width = Int(ScenePreview.medium.width)
+        base.height = Int(ScenePreview.medium.height)
+        for (i, combo) in Self.styleCombos.enumerated() {
+            var s = base
+            s.shape = combo.0; s.finish = combo.1
+            styleChoices[i].show(s)
+        }
+        densityStrip.show(base) { s, v in s.gridRows = Int(v) }
+        densityStrip.mark(current: Double(base.gridRows), tolerance: 0.5)
     }
 
     private func applyVisibility(_ st: Config.SurfaceStyle) {
         let hidden = (role != .desktop) && st.mirrorsDesktop
-        for v in bodyViews { v.isHidden = hidden }
-        if !hidden { facingRow.isHidden = st.headingMode != .custom }
+        UI.setHidden(bodyViews, hidden)
+        if let h = hero { UI.setHidden([h], false) }
+        if !hidden { UI.setHidden([facingRow], st.headingMode != .custom) }
     }
 
     private func collect() -> Config.SurfaceStyle {
         var st = owner.map { style(from: $0.config) } ?? Config.SurfaceStyle()
         st.mirrorsDesktop = (role != .desktop) && (mirrorCheck?.state == .on)
-        st.shape = MosaicShape(rawValue: Int32(shapePop.indexOfSelectedItem)) ?? .square
-        st.finish = MosaicFinish(rawValue: Int32(finishPop.indexOfSelectedItem)) ?? .glass
+        st.shape = pickedShape
+        st.finish = pickedFinish
         st.gridRows = max(12, min(120, rowsField.integerValue))
         st.headingMode = HeadingMode(rawValue: Int32(headingPop.indexOfSelectedItem)) ?? .custom
         st.facingAz = facingSlider.doubleValue.rounded()
@@ -563,7 +765,17 @@ final class SurfacePane: Pane {
         case .lock:  c.lock = st
         case .saver: c.saver = st
         }
+        updateLivePreview(c)
+        scheduleRangePreviews()
         owner?.commit(c, from: self)
+    }
+
+    private func pickStyle(_ i: Int) {
+        guard i >= 0, i < Self.styleCombos.count else { return }
+        pickedShape = Self.styleCombos[i].0
+        pickedFinish = Self.styleCombos[i].1
+        for (j, c) in styleChoices.enumerated() { c.isSelected = (j == i) }
+        write(collect())
     }
 
     @objc private func mirrorToggled() {
@@ -576,7 +788,7 @@ final class SurfacePane: Pane {
     @objc private func changed() {
         let st = collect()
         facingLabel.stringValue = Self.bearing(st.facingAz)
-        facingRow.isHidden = st.headingMode != .custom
+        UI.setHidden([facingRow], st.headingMode != .custom)
         write(st)
     }
 
@@ -595,6 +807,116 @@ final class SurfacePane: Pane {
     static func bearing(_ deg: Double) -> String {
         let names = ["N","NE","E","SE","S","SW","W","NW"]
         return String(format: "%3d°  %@", Int(deg), names[Int((deg / 45).rounded()) % 8])
+    }
+}
+
+// MARK: - Weather on the desktop
+//
+// The wallpaper draws BEHIND the dock, the widgets and the menu bar, so weather
+// that lands on one of them shows in the space around it. Which of them you
+// want marked is a matter of taste and of what your desktop actually looks like
+// — a hidden dock has no lip to wet — so each is opt-out on its own. Until now
+// there was no UI for any of it.
+//
+// The picture here is a drawn schematic rather than a render: see the note on
+// FurnitureDiagram for why a thumbnail cannot answer this question and why
+// borrowing the global the engine reads would disturb the live wallpaper.
+
+final class WaterPane: Pane {
+
+    override var title_: String { "Weather" }
+    override var symbol: String { "cloud.rain" }
+
+    private var diagram: FurnitureDiagram!
+    private var dockCheck: NSButton!
+    private var widgetsCheck: NSButton!
+    private var menuBarCheck: NSButton!
+    private var furnitureS: LabelledSlider!
+    private var paneCheck: NSButton!
+    private var paneS: LabelledSlider!
+    private var furnitureRows: [NSView] = []
+    private var paneRows: [NSView] = []
+
+    override func build() {
+        diagram = FurnitureDiagram()
+        let cap = captionLabel("Highlighted parts of your screen are the ones weather is allowed to mark.",
+                               width: 240)
+        cap.alignment = .center
+        let col = NSStackView(views: [diagram, cap])
+        col.orientation = .vertical
+        col.alignment = .centerX
+        col.spacing = 8
+        col.translatesAutoresizingMaskIntoConstraints = false
+        addCard(centred(col))
+
+        let pct: (Double) -> String = { "\(Int(($0 * 100).rounded()))%" }
+
+        dockCheck = check("Dock", #selector(changed))
+        widgetsCheck = check("Desktop widgets", #selector(changed))
+        menuBarCheck = check("Menu bar", #selector(changed))
+        furnitureS = slider("Strength", 0...1, #selector(changed), pct)
+        furnitureRows = [furnitureS.container]
+
+        let furniture = Card("Weather on your desktop furniture", symbol: "macwindow")
+        furniture.add(captionLabel("Rain, spray and snow can gather around the edges of the things on "
+                                 + "your screen — a wet band along the lip of the dock, snow lying on "
+                                 + "a widget, frost blooming out from the menu bar."))
+        furniture.add(dockCheck)
+        furniture.add(widgetsCheck)
+        furniture.add(menuBarCheck)
+        furniture.add(furnitureS.container)
+        furniture.note("The menu bar is off by default: it is the one strip that is always there "
+                     + "whatever you are doing, and water on it reads as a UI glitch rather than as "
+                     + "weather. Strength dials the whole effect back without turning it off.")
+        addCard(furniture)
+
+        paneCheck = check("Water on the screen itself", #selector(changed))
+        paneS = slider("Strength", 0...1, #selector(changed), pct)
+        paneRows = [paneS.container]
+
+        let pane = Card("Water on the glass", symbol: "drop.degreesign")
+        pane.add(captionLabel("Droplets clinging, running and beading on the screen, as though you were "
+                            + "looking at the sky through a window."))
+        pane.add(paneCheck)
+        pane.add(paneS.container)
+        pane.note("Turning this off leaves the sky alone entirely.")
+        addCard(pane)
+    }
+
+    override func sync(_ c: Config) {
+        dockCheck.state = c.wetDock ? .on : .off
+        widgetsCheck.state = c.wetWidgets ? .on : .off
+        menuBarCheck.state = c.wetMenuBar ? .on : .off
+        furnitureS.value = c.furnitureWetness
+        paneCheck.state = c.paneWater ? .on : .off
+        paneS.value = c.paneWaterAmount
+        redraw(c)
+    }
+
+    private func redraw(_ c: Config) {
+        diagram.wetDock = c.wetDock
+        diagram.wetWidgets = c.wetWidgets
+        diagram.wetMenuBar = c.wetMenuBar
+        diagram.wetPane = c.paneWater
+        diagram.furniture = CGFloat(c.furnitureWetness)
+        diagram.pane = CGFloat(c.paneWaterAmount)
+        // A strength slider with nothing switched on has nothing to strengthen.
+        UI.setHidden(furnitureRows, !(c.wetDock || c.wetWidgets || c.wetMenuBar))
+        UI.setHidden(paneRows, !c.paneWater)
+    }
+
+    @objc private func changed() {
+        guard var c = owner?.config else { return }
+        c.wetDock = dockCheck.state == .on
+        c.wetWidgets = widgetsCheck.state == .on
+        c.wetMenuBar = menuBarCheck.state == .on
+        c.furnitureWetness = furnitureS.value
+        c.paneWater = paneCheck.state == .on
+        c.paneWaterAmount = paneS.value
+        furnitureS.refresh()
+        paneS.refresh()
+        redraw(c)
+        owner?.commit(c, from: self)
     }
 }
 
@@ -636,24 +958,24 @@ final class LocationPane: Pane, NSSearchFieldDelegate, NSTableViewDataSource, NS
     /// arrive as you type, which is the whole point.
 
     override func build() {
-        stack.addArrangedSubview(section("Your location"))
-        detectedLabel = NSTextField(labelWithString: "—")
-        stack.addArrangedSubview(row("Detected", detectedLabel))
+        detectedLabel = bodyLabel("—")
         locationButton = NSButton(title: "Use Location Services", target: self,
                                   action: #selector(requestLocation))
         locationButton.bezelStyle = .rounded
-        stack.addArrangedSubview(locationButton)
+        locationButton.font = UI.body
 
-        stack.addArrangedSubview(divider())
-        stack.addArrangedSubview(section("Cities"))
+        let yours = Card("Your location", symbol: "location.circle")
+        yours.add(row("Detected", detectedLabel))
+        yours.add(locationButton)
+        addCard(yours)
 
         searchField = NSSearchField()
         searchField.placeholderString = "Search for a city"
         searchField.delegate = self
         searchField.sendsWholeSearchString = false
         searchField.sendsSearchStringImmediately = false
-        searchField.widthAnchor.constraint(equalToConstant: 400).isActive = true
-        stack.addArrangedSubview(searchField)
+        searchField.translatesAutoresizingMaskIntoConstraints = false
+        searchField.widthAnchor.constraint(equalToConstant: 420).isActive = true
 
         search.onResults = { [weak self] found in
             guard let self, !self.searchField.stringValue.isEmpty else { return }
@@ -679,29 +1001,35 @@ final class LocationPane: Pane, NSSearchFieldDelegate, NSTableViewDataSource, NS
         table.target = self
         table.doubleAction = #selector(rowActivated)
         let col = NSTableColumn(identifier: .init("city"))
-        col.width = 380
+        col.width = 400
         table.addTableColumn(col)
 
         let scroll = NSScrollView()
         scroll.documentView = table
         scroll.hasVerticalScroller = true
-        scroll.borderType = .bezelBorder
+        scroll.borderType = .noBorder
+        scroll.drawsBackground = false
+        scroll.wantsLayer = true
+        scroll.layer?.cornerRadius = 6
         scroll.translatesAutoresizingMaskIntoConstraints = false
-        scroll.widthAnchor.constraint(equalToConstant: 400).isActive = true
-        scroll.heightAnchor.constraint(equalToConstant: 200).isActive = true
-        stack.addArrangedSubview(scroll)
+        scroll.widthAnchor.constraint(equalToConstant: 420).isActive = true
+        scroll.heightAnchor.constraint(equalToConstant: 210).isActive = true
 
-        statusLabel = note("")
-        stack.addArrangedSubview(statusLabel)
-
+        statusLabel = captionLabel("")
         removeButton = NSButton(title: "Remove City", target: self, action: #selector(removeSelected))
         removeButton.bezelStyle = .rounded
-        stack.addArrangedSubview(removeButton)
+        removeButton.font = UI.body
+        countLabel = captionLabel("")
 
-        countLabel = note("")
-        stack.addArrangedSubview(countLabel)
-        stack.addArrangedSubview(note("The sun, moon and stars are computed from the selected city, so the "
-                                    + "wallpaper can show anywhere — not just where you are."))
+        let cities = Card("Cities", symbol: "building.2")
+        cities.add(searchField)
+        cities.add(scroll)
+        cities.add(statusLabel)
+        cities.add(removeButton)
+        cities.add(countLabel)
+        cities.note("The sun, moon and stars are computed from the selected city, so the wallpaper can "
+                  + "show anywhere — not just where you are.")
+        addCard(cities)
     }
 
     // MARK: - Sync
@@ -782,7 +1110,7 @@ final class LocationPane: Pane, NSSearchFieldDelegate, NSTableViewDataSource, NS
             let title = NSTextField(labelWithString: c.title)
             title.font = .systemFont(ofSize: 13)
             let sub = NSTextField(labelWithString: c.subtitle)
-            sub.font = .systemFont(ofSize: 11)
+            sub.font = UI.caption
             sub.textColor = .secondaryLabelColor
             let text = NSStackView(views: [title, sub])
             text.orientation = .vertical; text.alignment = .leading; text.spacing = 1
@@ -807,7 +1135,7 @@ final class LocationPane: Pane, NSSearchFieldDelegate, NSTableViewDataSource, NS
         title.font = .systemFont(ofSize: 13, weight: isScene ? .semibold : .regular)
 
         let sub = NSTextField(labelWithString: subtitle(for: place))
-        sub.font = .systemFont(ofSize: 11)
+        sub.font = UI.caption
         sub.textColor = .secondaryLabelColor
 
         let text = NSStackView(views: [title, sub])
@@ -937,12 +1265,12 @@ final class SidebarController: NSViewController {
 
     override func loadView() {
         table.headerView = nil
-        table.rowHeight = 30
+        table.rowHeight = 32
         table.style = .sourceList
         table.selectionHighlightStyle = .regular
         table.backgroundColor = .clear
         let col = NSTableColumn(identifier: .init("main"))
-        col.width = 172
+        col.width = 176
         table.addTableColumn(col)
         table.dataSource = self
         table.delegate = self
@@ -951,7 +1279,23 @@ final class SidebarController: NSViewController {
         scroll.documentView = table
         scroll.drawsBackground = false
         scroll.hasVerticalScroller = false
-        view = scroll
+        scroll.translatesAutoresizingMaskIntoConstraints = false
+
+        // Sidebar material, the other half of what makes this read as a modern
+        // Mac window. `.behindWindow` so it picks up the desktop, like Finder.
+        let fx = NSVisualEffectView()
+        fx.material = .sidebar
+        fx.blendingMode = .behindWindow
+        fx.state = .followsWindowActiveState
+        fx.translatesAutoresizingMaskIntoConstraints = false
+        fx.addSubview(scroll)
+        NSLayoutConstraint.activate([
+            scroll.topAnchor.constraint(equalTo: fx.topAnchor, constant: 8),
+            scroll.leadingAnchor.constraint(equalTo: fx.leadingAnchor),
+            scroll.trailingAnchor.constraint(equalTo: fx.trailingAnchor),
+            scroll.bottomAnchor.constraint(equalTo: fx.bottomAnchor),
+        ])
+        view = fx
     }
 
     override func viewDidAppear() {
@@ -966,14 +1310,17 @@ extension SidebarController: NSTableViewDataSource, NSTableViewDelegate {
     func tableView(_ t: NSTableView, viewFor column: NSTableColumn?, row: Int) -> NSView? {
         let pane = items[row]
         let icon = NSImageView()
-        icon.image = NSImage(systemSymbolName: pane.symbol, accessibilityDescription: nil)
+        icon.image = NSImage(systemSymbolName: pane.symbol, accessibilityDescription: nil)?
+            .withSymbolConfiguration(.init(pointSize: 13, weight: .medium, scale: .medium))
         icon.contentTintColor = .controlAccentColor
-        icon.widthAnchor.constraint(equalToConstant: 18).isActive = true
+        icon.translatesAutoresizingMaskIntoConstraints = false
+        icon.widthAnchor.constraint(equalToConstant: 20).isActive = true
         let label = NSTextField(labelWithString: pane.title_)
         label.font = .systemFont(ofSize: 13)
         let s = NSStackView(views: [icon, label])
         s.spacing = 8
-        s.edgeInsets = NSEdgeInsets(top: 0, left: 4, bottom: 0, right: 0)
+        s.alignment = .centerY
+        s.edgeInsets = NSEdgeInsets(top: 0, left: 6, bottom: 0, right: 0)
         return s
     }
 
@@ -1011,6 +1358,7 @@ final class SettingsWindowController: NSObject, NSWindowDelegate {
             SurfacePane(role: .saver, title: "Screen Saver", symbol: "display",
                         blurb: "Fully animated, and the only animated surface that appears at the lock "
                              + "screen — macOS starts it after the idle timer."),
+            WaterPane(),
             LocationPane(),
         ]
         panes.forEach { $0.owner = self }
@@ -1021,8 +1369,8 @@ final class SettingsWindowController: NSObject, NSWindowDelegate {
 
         split = NSSplitViewController()
         let sideItem = NSSplitViewItem(sidebarWithViewController: sidebar)
-        sideItem.minimumThickness = 190
-        sideItem.maximumThickness = 190
+        sideItem.minimumThickness = 196
+        sideItem.maximumThickness = 196
         sideItem.canCollapse = false
         split.addSplitViewItem(sideItem)
 
@@ -1032,11 +1380,14 @@ final class SettingsWindowController: NSObject, NSWindowDelegate {
         let w = NSWindow(contentViewController: split)
         w.title = "Elemental"
         w.styleMask.insert([.closable, .resizable, .fullSizeContentView])
-        w.titlebarAppearsTransparent = false
+        w.titlebarAppearsTransparent = true
+        w.titleVisibility = .visible
         w.isReleasedWhenClosed = false
         w.delegate = self
-        w.setContentSize(NSSize(width: 720, height: 620))
-        w.minSize = NSSize(width: 660, height: 480)
+        // Wide enough that a 400pt hero, a four-thumbnail picker and a slider
+        // with its strip all sit comfortably without wrapping.
+        w.setContentSize(NSSize(width: 860, height: 700))
+        w.minSize = NSSize(width: 800, height: 560)
         w.center()
         window = w
     }
@@ -1048,6 +1399,7 @@ final class SettingsWindowController: NSObject, NSWindowDelegate {
         split.removeSplitViewItem(contentItem)
         contentItem = NSSplitViewItem(viewController: pane)
         split.addSplitViewItem(contentItem)
+        pane.refreshPreviews()
     }
 
     func show(config: Config) {
