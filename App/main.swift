@@ -655,6 +655,14 @@ if ElementsSelfTest.request != nil {
     exit(0)
 }
 
+// The density grip has the same problem: a control that steps but draws the
+// same picture at every step compiles. `--density-selftest` drives its corner
+// handle and its scroll offscreen and writes what the box shows.
+if DensitySelfTest.outDir != nil {
+    DensitySelfTest.run()
+    exit(0)
+}
+
 // `--make-icons [projectRoot]` rebakes Icons/*.icns from the three Icon
 // Composer bundles. An authoring step, not a build step: the .icns files are
 // checked in, and build.sh only copies them. Same reasoning as the shader —

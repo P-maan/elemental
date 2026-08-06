@@ -216,6 +216,23 @@ enum ElementsSelfTest {
         print("-- grid \(grid.bounds.size), \(grid.widgets.count) widgets, dock \(grid.dock != nil)")
         writePNG(render(grid), to: out.appendingPathComponent("grid-1-initial.png"))
 
+        // The full-size editor, which is where placements are actually made —
+        // the miniature above is for checking them. Rendered at the size the
+        // sheet presents it, so "are the handles big enough to grab" is a
+        // question about a picture rather than about a guess.
+        let ed = pane.makePlacementEditor()
+        if ed.grid.widgets.isEmpty { ed.grid.addWidget(); ed.grid.addWidget() }
+        let edHost = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 760, height: 700),
+                              styleMask: [.titled], backing: .buffered, defer: false)
+        edHost.contentViewController = ed
+        edHost.contentView?.layoutSubtreeIfNeeded()
+        print("-- placement editor grid \(ed.grid.bounds.size) "
+            + "(pane miniature \(grid.bounds.size))")
+        if let cv = edHost.contentView {
+            writePNG(render(cv), to: out.appendingPathComponent("placement-editor.png"))
+        }
+        edHost.contentViewController = nil
+
         guard !grid.widgets.isEmpty else { print("!! nothing to drag"); return }
 
         // Grab the middle of widget 0 and drag it toward the centre of the

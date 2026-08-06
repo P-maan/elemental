@@ -262,9 +262,10 @@ final class DesktopGridView: NSView {
                 if e.editable { drawHandles(r) }
             }
 
-            if r.height >= 13, r.width >= 26 {
+            let labelSize: CGFloat = big ? 11 : 8
+            if r.height >= labelSize + 5, r.width >= labelSize * 3 {
                 let attrs: [NSAttributedString.Key: Any] = [
-                    .font: NSFont.systemFont(ofSize: 8, weight: e.wet ? .semibold : .regular),
+                    .font: NSFont.systemFont(ofSize: labelSize, weight: e.wet ? .semibold : .regular),
                     .foregroundColor: e.wet ? NSColor.labelColor : NSColor.secondaryLabelColor,
                 ]
                 let str = NSAttributedString(string: e.label, attributes: attrs)
@@ -298,9 +299,21 @@ final class DesktopGridView: NSView {
         screen.stroke()
     }
 
+    // ---- handle size
+    //
+    // A 3pt dot with a 12pt hit box is fine on a 320pt thumbnail and impossible
+    // on the full-size editor, where the same rectangle is more than twice as
+    // wide and the pointer has real room to work in. Both scale with the
+    // miniature so a handle is always worth aiming at.
+
+    private var big: Bool { bounds.width >= 560 }
+    private var handleRadius: CGFloat { big ? 5.5 : 3 }
+    private var handleSlop: CGFloat { big ? 11 : 6 }
+
     private func drawHandles(_ r: NSRect) {
+        let hr = handleRadius
         for p in handlePoints(r) {
-            let box = NSRect(x: p.x - 3, y: p.y - 3, width: 6, height: 6)
+            let box = NSRect(x: p.x - hr, y: p.y - hr, width: hr * 2, height: hr * 2)
             NSColor.controlBackgroundColor.setFill()
             NSBezierPath(ovalIn: box).fill()
             NSColor.controlAccentColor.setStroke()
@@ -433,8 +446,10 @@ final class DesktopGridView: NSView {
         // A handle of the current selection wins over anything underneath it.
         if let r = rect(of: selection) {
             let vr = toView(r)
+            let slop = handleSlop
             for (i, hp) in handlePoints(vr).enumerated()
-            where NSRect(x: hp.x - 6, y: hp.y - 6, width: 12, height: 12).contains(p) {
+            where NSRect(x: hp.x - slop, y: hp.y - slop,
+                         width: slop * 2, height: slop * 2).contains(p) {
                 grabbed = i
                 dragOrigin = toFrac(p)
                 rectAtGrab = r
@@ -523,13 +538,17 @@ final class DesktopGridView: NSView {
     // MARK: - Keyboard
 
     override func keyDown(with event: NSEvent) {
-        let step: CGFloat = event.modifierFlags.contains(.shift) ? 0.02 : 0.004
+        // Three speeds, so fine adjustment never needs pixel-accurate mousing:
+        // ⌥ a hair, plain a step, ⇧ a stride. On a 4112px display ⌥ is about
+        // four pixels.
+        let step: CGFloat = event.modifierFlags.contains(.shift) ? 0.02
+                          : event.modifierFlags.contains(.option) ? 0.001 : 0.004
         var handled = true
         switch event.keyCode {
-        case 123: nudge(dx: -step, dy: 0)        // left
-        case 124: nudge(dx: step, dy: 0)         // right
-        case 125: nudge(dx: 0, dy: step)         // down
-        case 126: nudge(dx: 0, dy: -step)        // up
+        case 123: nudge(dx: -step, dy: 0, pull: step)   // left
+        case 124: nudge(dx: step, dy: 0, pull: step)    // right
+        case 125: nudge(dx: 0, dy: step, pull: step)    // down
+        case 126: nudge(dx: 0, dy: -step, pull: step)   // up
         case 51, 117: removeSelected()           // delete / forward delete
         case 48: cycleSelection()                // tab
         default: handled = false
@@ -537,7 +556,10 @@ final class DesktopGridView: NSView {
         if !handled { super.keyDown(with: event) }
     }
 
-    private func nudge(dx: CGFloat, dy: CGFloat) {
+    /// `pull` is how far a nudge is allowed to be dragged onto a guide — one
+    /// step, so a fine ⌥-nudge is not yanked back onto a line it was trying to
+    /// creep away from.
+    private func nudge(dx: CGFloat, dy: CGFloat, pull: CGFloat = 0.004) {
         guard var r = rect(of: selection) else { return }
         r = r.offsetBy(dx: dx, dy: dy)
         // A keyboard nudge that lands exactly on a guide should feel like the
@@ -547,8 +569,8 @@ final class DesktopGridView: NSView {
             guides.removeAll()
             let sx = snapOffset([r.minX, r.midX, r.maxX], vertical: true, excluding: k, into: &names)
             let sy = snapOffset([r.minY, r.midY, r.maxY], vertical: false, excluding: k, into: &names)
-            if abs(sx) < 0.004 { r.origin.x += sx }
-            if abs(sy) < 0.004 { r.origin.y += sy }
+            if abs(sx) < pull { r.origin.x += sx }
+            if abs(sy) < pull { r.origin.y += sy }
             if !names.subtracting(engaged).isEmpty { Haptics.alignment() }
             engaged = names
             guides.removeAll()

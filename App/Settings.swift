@@ -687,6 +687,11 @@ final class SurfacePane: Pane {
     private var densityStrip: PreviewStrip!
     private static let densities: [Double] = [14, 24, 36, 56, 84]
 
+    /// Density by grabbing it — the primary control. `grip` is exposed for the
+    /// offscreen harness, which cannot click.
+    private(set) var grip: DensityGripView!
+    private var densityLabel: NSTextField!
+
     init(role: Role, title: String, symbol: String, blurb: String) {
         self.role = role
         self.paneTitle = title
@@ -743,20 +748,42 @@ final class SurfacePane: Pane {
                                     spacing: 8)
         densityStrip.onPick = { [weak self] v in
             guard let self else { return }
-            self.rowsField.integerValue = Int(v)
-            self.rowsStepper.integerValue = Int(v)
+            self.setRows(Int(v))
             self.write(self.collect())
         }
+
+        // Density by direct manipulation. See DensityGrip.swift — the field and
+        // stepper above stay as the typeable, keyboard-reachable way in.
+        grip = DensityGripView()
+        grip.onLiveChange = { [weak self] q in
+            guard let self else { return }
+            self.setRows(q)
+            // Live half only: the picture follows the drag, the config settles
+            // on mouse-up. Committing per step would re-sync every other pane
+            // on every detent crossed.
+            self.write(self.collect(), live: true)
+        }
+        grip.onCommit = { [weak self] q in
+            guard let self else { return }
+            self.setRows(q)
+            self.write(self.collect())
+        }
+        densityLabel = captionLabel("", width: 300)
 
         let mosaic = Card("Mosaic", symbol: "square.grid.3x3")
         mosaic.add(captionLabel("The shape of a cell and whether it is glass or flat. Pick the one that "
                               + "looks right — the four are shown exactly as they will draw."))
         mosaic.add(styleRow)
         mosaic.rule()
-        mosaic.add(captionLabel("Density — how many cells fit down the screen."))
-        mosaic.add(densityStrip)
+        mosaic.add(captionLabel("Density — drag the corner of the box to stretch the cells, or scroll "
+                              + "over it. It clicks as it passes each size."))
+        mosaic.add(grip)
+        mosaic.add(densityLabel)
         mosaic.add(row("Rows", rowsBox))
-        mosaic.note("Cells down the screen. The Pi uses 36; more rows is a finer grid.")
+        mosaic.add(densityStrip)
+        mosaic.note("Cells down the screen. The Pi uses 36; more rows is a finer grid. The engine picks "
+                  + "a cell pitch that divides your display exactly, so the count it settles on can be "
+                  + "a row or two off what was asked for — the box shows the real one.")
 
         // ---- sky
         headingPop = popup(HeadingMode.allCases.map(\.title), #selector(changed))
@@ -807,8 +834,7 @@ final class SurfacePane: Pane {
         for (i, combo) in Self.styleCombos.enumerated() {
             styleChoices[i].isSelected = (combo.0 == st.shape && combo.1 == st.finish)
         }
-        rowsField.integerValue = st.gridRows
-        rowsStepper.integerValue = st.gridRows
+        setRows(st.gridRows)
         headingPop.selectItem(at: Int(st.headingMode.rawValue))
         facingSlider.doubleValue = st.facingAz
         facingLabel.stringValue = Self.bearing(st.facingAz)
@@ -824,6 +850,29 @@ final class SurfacePane: Pane {
         }
         applyVisibility(st)
         refreshPreviewsDebounced()
+    }
+
+    /// Put a row count into every control that shows one, without committing.
+    ///
+    /// The grip is the odd one out: it snaps to a density the display can
+    /// actually produce, so the number it ends up on may not be the one handed
+    /// in — and the read-out has to say the real one or the control looks
+    /// broken when it "moves on its own". See DensityGrip.swift.
+    private func setRows(_ q: Int) {
+        let v = max(12, min(120, q))
+        rowsField.integerValue = v
+        rowsStepper.integerValue = v
+        grip.setRequested(v)
+        let s = grip.step
+        densityLabel.stringValue = String(
+            format: "%d rows on your display — %.0fpx cells.", s.rows, s.cellPixels)
+    }
+
+    /// The grip's picture is live, like the hero: it IS the control, so it may
+    /// not be debounced away.
+    override func updateLivePreview(_ c: Config) {
+        super.updateLivePreview(c)
+        if let spec = heroSpec(c) { grip?.show(spec) }
     }
 
     /// The option tiles, which are this pane's expensive previews.
@@ -862,7 +911,9 @@ final class SurfacePane: Pane {
         return st
     }
 
-    private func write(_ st: Config.SurfaceStyle) {
+    /// `live` is the cheap half of a drag: the picture follows, nothing is
+    /// committed and no other pane is re-synced. The commit lands on mouse-up.
+    private func write(_ st: Config.SurfaceStyle, live: Bool = false) {
         guard var c = owner?.config else { return }
         switch role {
         case .desktop:
@@ -873,6 +924,7 @@ final class SurfacePane: Pane {
         case .saver: c.saver = st
         }
         updateLivePreview(c)
+        guard !live else { return }
         scheduleRangePreviews()
         owner?.commit(c, from: self)
     }
@@ -900,14 +952,12 @@ final class SurfacePane: Pane {
     }
 
     @objc private func stepperChanged() {
-        rowsField.integerValue = rowsStepper.integerValue
+        setRows(rowsStepper.integerValue)
         write(collect())
     }
 
     @objc private func rowsTyped() {
-        let v = max(12, min(120, rowsField.integerValue))
-        rowsField.integerValue = v
-        rowsStepper.integerValue = v
+        setRows(rowsField.integerValue)
         write(collect())
     }
 

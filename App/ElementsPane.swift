@@ -373,15 +373,25 @@ final class ElementsPane: Pane {
         selectionLabel.textColor = .secondaryLabelColor
         selectionLabel.preferredMaxLayoutWidth = 420
 
-        let buttons = NSStackView(views: [addButton, removeButton, clearButton])
+        // The one that matters. The miniature in the header is big enough to
+        // CHECK a placement and far too small to make one — a widget on a
+        // 4112px display is a few points across up there — so the real editing
+        // happens in a sheet that gives it the whole window.
+        let bigButton = NSButton(title: "Edit at Full Size…", target: self,
+                                 action: #selector(editPlacements))
+        bigButton.bezelStyle = .rounded
+        bigButton.keyEquivalent = "\r"
+        bigButton.font = UI.body
+
+        let buttons = NSStackView(views: [bigButton, addButton, removeButton, clearButton])
         buttons.spacing = 8
 
         let edit = Card("Placement", symbol: "hand.draw")
         edit.add(buttons)
         edit.add(selectionLabel)
-        edit.note("Arrow keys nudge the selection, Shift-arrow moves it further, Tab steps through "
-                + "them. Rectangles snap to the screen's edges and centre, to a twelfth-of-a-screen "
-                + "grid, and to each other"
+        edit.note("Arrow keys nudge the selection, ⌥-arrow moves it a hair, ⇧-arrow moves it "
+                + "further, Tab steps through them. Rectangles snap to the screen's edges and "
+                + "centre, to a twelfth-of-a-screen grid, and to each other"
                 + (Haptics.available ? ", and the trackpad clicks each time one catches." : "."))
         addCard(edit)
 
@@ -573,6 +583,27 @@ final class ElementsPane: Pane {
     @objc private func removeSelected() { grid.removeSelected() }
     @objc private func clearAll() { grid.clearAll() }
 
+    /// Open the full-size editor. Exposed for the harness, which cannot click.
+    @objc func editPlacements() {
+        let ed = PlacementEditor()
+        ed.adopt(grid)
+        ed.onChange = { [weak self] g in
+            guard let self else { return }
+            self.grid.widgets = g.widgets
+            self.grid.dock = g.dock
+            self.gridEdited()
+        }
+        presentAsSheet(ed)
+    }
+
+    /// The editor as it would be presented, for the harness. Not used by the
+    /// app, which goes through `editPlacements`.
+    func makePlacementEditor() -> PlacementEditor {
+        let ed = PlacementEditor()
+        ed.adopt(grid)
+        return ed
+    }
+
     /// The grid finished a gesture. One commit per gesture, never per frame.
     private func gridEdited() {
         guard var c = owner?.config else { return }
@@ -608,4 +639,131 @@ final class ElementsPane: Pane {
         redraw(c)
         owner?.commit(c, from: self)
     }
+}
+
+// MARK: - The full-size editor
+
+/// Placements, on a sheet, at a size you can actually work at.
+///
+/// The complaint was exact: correcting a widget rectangle inside a 320pt strip
+/// pinned to the top of a settings pane means dragging something a handful of
+/// points across, and that is not editing, it is fiddling. So the pane's
+/// miniature keeps its job — showing at a glance what is placed and what is lit
+/// up — and the actual work moves here, where the same screen is drawn more
+/// than twice as wide and four and a half times the area, with handles scaled
+/// to match (see `DesktopGridView.handleRadius`).
+///
+/// Nothing about the interaction changes. This is the same `DesktopGridView`
+/// class with the same snapping, the same dashed guides, the same haptic on the
+/// transition into a snap and the same commit on mouse-up. Only the size and
+/// the reach are different.
+final class PlacementEditor: NSViewController {
+
+    /// Points across. Sized to sit inside the settings window's 860pt content
+    /// width with room for the sheet's own margins.
+    static let gridWidth: CGFloat = 700
+
+    let grid = DesktopGridView(width: PlacementEditor.gridWidth)
+
+    /// Fires on every committed gesture, so the wallpaper follows the edit
+    /// rather than waiting for the sheet to be dismissed.
+    var onChange: ((DesktopGridView) -> Void)?
+
+    private let selectionLabel = NSTextField(wrappingLabelWithString: "")
+    private var removeButton: NSButton!
+
+    /// Copy the pane's grid in, state and all.
+    func adopt(_ other: DesktopGridView) {
+        grid.widgets = other.widgets
+        grid.dock = other.dock
+        grid.menuBarHeight = other.menuBarHeight
+        grid.wetDock = other.wetDock
+        grid.wetWidgets = other.wetWidgets
+        grid.wetMenuBar = other.wetMenuBar
+        grid.strength = other.strength
+        grid.backdrop = other.backdrop
+    }
+
+    override func loadView() {
+        grid.onLiveChange = { [weak self] in self?.refreshLabels() }
+        grid.onCommit = { [weak self] in
+            guard let self else { return }
+            self.refreshLabels()
+            self.onChange?(self.grid)
+        }
+        grid.onSelectionChange = { [weak self] in self?.refreshLabels() }
+
+        let add = NSButton(title: "Add Widget", target: self, action: #selector(addWidget))
+        add.bezelStyle = .rounded
+        add.font = UI.body
+        removeButton = NSButton(title: "Remove", target: self, action: #selector(removeSelected))
+        removeButton.bezelStyle = .rounded
+        removeButton.font = UI.body
+        let clear = NSButton(title: "Clear All", target: self, action: #selector(clearAll))
+        clear.bezelStyle = .rounded
+        clear.font = UI.body
+        let done = NSButton(title: "Done", target: self, action: #selector(finish))
+        done.bezelStyle = .rounded
+        done.keyEquivalent = "\r"
+        done.font = UI.body
+
+        let spacer = NSView()
+        spacer.translatesAutoresizingMaskIntoConstraints = false
+        spacer.setContentHuggingPriority(.defaultLow, for: .horizontal)
+
+        let buttons = NSStackView(views: [add, removeButton, clear, spacer, done])
+        buttons.spacing = 8
+        buttons.alignment = .centerY
+        buttons.translatesAutoresizingMaskIntoConstraints = false
+
+        selectionLabel.font = UI.caption
+        selectionLabel.textColor = .secondaryLabelColor
+        selectionLabel.preferredMaxLayoutWidth = Self.gridWidth
+
+        let column = NSStackView(views: [
+            headlineLabel("Placements"),
+            captionLabel("Drag a rectangle to move it, take a corner to resize it. Arrow keys nudge "
+                       + "the selection, ⌥-arrow a hair, ⇧-arrow further; Tab steps through them and "
+                       + "⌫ removes one." + (Haptics.available
+                            ? " The trackpad clicks each time an edge catches a guide." : ""),
+                         width: Self.gridWidth),
+            grid,
+            selectionLabel,
+            buttons,
+        ])
+        column.orientation = .vertical
+        column.alignment = .leading
+        column.spacing = 12
+        column.edgeInsets = NSEdgeInsets(top: 20, left: 20, bottom: 20, right: 20)
+        column.translatesAutoresizingMaskIntoConstraints = false
+
+        let host = NSView()
+        host.addSubview(column)
+        NSLayoutConstraint.activate([
+            column.topAnchor.constraint(equalTo: host.topAnchor),
+            column.leadingAnchor.constraint(equalTo: host.leadingAnchor),
+            column.trailingAnchor.constraint(equalTo: host.trailingAnchor),
+            column.bottomAnchor.constraint(equalTo: host.bottomAnchor),
+            buttons.widthAnchor.constraint(equalTo: grid.widthAnchor),
+        ])
+        view = host
+        refreshLabels()
+    }
+
+    override func viewDidAppear() {
+        super.viewDidAppear()
+        // So the arrow keys work without the user having to find something to
+        // click on first.
+        view.window?.makeFirstResponder(grid)
+    }
+
+    private func refreshLabels() {
+        selectionLabel.stringValue = grid.selectionDescription
+        removeButton?.isEnabled = grid.canRemoveSelection
+    }
+
+    @objc private func addWidget() { grid.addWidget() }
+    @objc private func removeSelected() { grid.removeSelected() }
+    @objc private func clearAll() { grid.clearAll() }
+    @objc private func finish() { dismiss(self) }
 }

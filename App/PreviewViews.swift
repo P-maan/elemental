@@ -65,6 +65,22 @@ class PreviewTile: NSView {
             self.imageView.image = img
         }
     }
+
+    /// Render `s` on THIS thread and show it, whatever is already on screen.
+    ///
+    /// For the offscreen harnesses only, and it exists because of a bug the
+    /// harness caught: `show` hands the work to a background queue that answers
+    /// on the main queue, so with no runloop the picture never arrives — and
+    /// then `show`'s "same spec, already have an image" guard keeps the STALE
+    /// one, which is a control that appears to step through densities while
+    /// drawing one density. Never call this from the app.
+    func showBlocking(_ s: PreviewSpec) {
+        spec = s
+        shown = issued
+        if let img = ScenePreview.shared.cached(s) ?? ScenePreview.shared.renderBlocking(s) {
+            imageView.image = img
+        }
+    }
 }
 
 // MARK: - A thumbnail you choose
