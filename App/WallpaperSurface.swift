@@ -33,6 +33,27 @@ final class WallpaperSurface: NSObject, CAMetalDisplayLinkDelegate {
     private var paused = true
     private var lastSize: CGSize = .zero
 
+    /// The surfaces currently on screen, weakly, keyed by display.
+    ///
+    /// Exists for one caller: the furniture detector, which finds the dock and
+    /// the widgets by DIFFERENCING a screenshot against our own render of the
+    /// same moment, and therefore has to be able to ask what that moment
+    /// actually was. Nothing here may mutate a live surface.
+    private static var registry: [CGDirectDisplayID: () -> WallpaperSurface?] = [:]
+
+    static func live(display: CGDirectDisplayID) -> WallpaperSurface? {
+        registry[display]?()
+    }
+
+    /// Any live surface, preferring the main display's. Settings has one pane
+    /// and the user has one screenshot; this is what it was taken of.
+    static var anyLive: WallpaperSurface? {
+        if let main = NSScreen.main,
+           let n = main.deviceDescription[NSDeviceDescriptionKey("NSScreenNumber")] as? NSNumber,
+           let s = live(display: CGDirectDisplayID(n.uint32Value)) { return s }
+        return registry.values.compactMap { $0() }.first
+    }
+
     // MARK: - Init
 
     init?(screen: NSScreen, config: Config, device: MTLDevice) {
@@ -77,6 +98,9 @@ final class WallpaperSurface: NSObject, CAMetalDisplayLinkDelegate {
         // Sets up the furniture as well as the size and appearance — see apply.
         apply(config: config, screen: screen)
         window.orderFrontRegardless()
+
+        let id = displayID
+        Self.registry[id] = { [weak self] in self }
 
         let dl = CAMetalDisplayLink(metalLayer: metalLayer)
         dl.delegate = self

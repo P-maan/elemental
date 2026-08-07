@@ -473,12 +473,28 @@ final class SceneSimulation {
     ///
     /// This is not stretching: `sp` is still one number used for both axes, so
     /// the cells stay square. It is only the pitch that stops being an integer.
-    func resize(pixelWidth: Float, pixelHeight: Float, gridRows: Int) {
-        var sp = max(6, (pixelHeight / Float(gridRows)).rounded())
+    /// The mosaic grid a display of this size and row count produces.
+    ///
+    /// Static and public because the furniture detector needs to know where the
+    /// grout lines are — it finds the dock and the widgets by asking which of
+    /// OUR cell boundaries the screenshot has lost. Two independent derivations
+    /// of the same grid is exactly the kind of thing that drifts, so there is
+    /// one.
+    static func gridGeometry(pixelWidth: Float, pixelHeight: Float,
+                             gridRows: Int) -> (cols: Int, rows: Int, pitch: Float) {
+        var sp = max(6, (pixelHeight / Float(max(1, gridRows))).rounded())
         let r = max(1, Int((pixelHeight / sp).rounded()))
         sp = pixelHeight / Float(r)
-        rows = max(1, Int((pixelHeight / sp).rounded()))
-        cols = max(1, Int((pixelWidth / sp).rounded()))
+        return (max(1, Int((pixelWidth / sp).rounded())),
+                max(1, Int((pixelHeight / sp).rounded())), sp)
+    }
+
+    func resize(pixelWidth: Float, pixelHeight: Float, gridRows: Int) {
+        let g = SceneSimulation.gridGeometry(pixelWidth: pixelWidth,
+                                             pixelHeight: pixelHeight, gridRows: gridRows)
+        let sp = g.pitch
+        rows = g.rows
+        cols = g.cols
         SP = sp
         H = Float(rows) * sp
         W = Float(cols) * sp
@@ -2109,13 +2125,51 @@ final class SceneSimulation {
         guard strength > 0.003 else { return }
         let sw = surfaceWeather
 
+        // WHY THIS DOES NOT WRITE WHOLE CELLS ANY MORE.
+        //
+        // Every deposit here used to be stamped as `glassCells[k] = ...`: a
+        // whole cell, at full strength, for every cell from one end of the
+        // furniture to the other, ending dead on a cell boundary at each end
+        // and on a cell boundary at the top. That is the description of a
+        // RECTANGLE, and it is what the user was looking at — the marks read as
+        // an outlined box drawn on the wallpaper rather than as water lying on
+        // a surface. Three things were doing it, and all three are fixed here:
+        //
+        //   1. THE ENDS. The band started and stopped at whole cells, at full
+        //      amplitude. Now the end cells carry the fraction of themselves
+        //      the furniture actually covers, and the outermost cell and a half
+        //      is tapered on top of that, so the run of water thins out where
+        //      the panel does instead of being guillotined.
+        //   2. THE TOP. `reach` was an integer number of cells, so the upper
+        //      edge of the band was a ruled line along a cell boundary. It is
+        //      fractional now, jittered per column, and the topmost cell
+        //      carries how much of ITSELF is wet in `by` — which the
+        //      presentation pass uses to dissolve the deposit inside that cell.
+        //      That is what the subdivision is for.
+        //   3. THE OVERWRITE. `=` meant the last layer to run replaced whatever
+        //      was under it, with a hard seam wherever two deposits met. A
+        //      deposit now only takes a cell it is stronger in, and takes the
+        //      louder of the two amplitudes, so the layers meet by blending.
+        //
+        // `by` is the fraction of the cell, measured from its TOP, that is NOT
+        // covered by this deposit. Zero means the whole cell, which is what
+        // every caller that does not care passes.
+
         @inline(__always)
         func put(_ cx: Int, _ cy: Int, _ v: Float, _ kind: Float,
                  _ bx: Float = 0, _ by: Float = 0) {
             guard cx >= 0, cx < cols, cy >= 0, cy < rows else { return }
             let a = min(1, v * strength)
             guard a > 0.02 else { return }
-            glassCells[cy * cols + cx] = SIMD4<Float>(a, kind, bx, by)
+            let k = cy * cols + cx
+            let old = glassCells[k]
+            // Pane water (kinds 1-5) is atmosphere and always yields to the
+            // furniture; between two furniture deposits the stronger one wins
+            // the cell, but it inherits the louder amplitude so the join is a
+            // blend rather than a step.
+            if old.x > 0.02, old.y >= 6, old.x > a * 1.15 { return }
+            glassCells[k] = SIMD4<Float>(max(a, old.y >= 6 ? old.x * 0.55 : 0),
+                                         kind, bx, by)
         }
 
         for i in 0..<surfaces.count {
@@ -2127,18 +2181,41 @@ final class SceneSimulation {
             let c1 = min(cols - 1, Int((s.right - 0.001) / SP))
             guard c0 <= c1 else { continue }
             let span = Float(c1 - c0 + 1)
-            // The cell the top edge falls in. The furniture covers its lower
-            // part, so this is the row the meniscus shows in; everything else
-            // stacks upward from it.
-            let lipRow = Int(s.top / SP)
+
+            // How much of cell `cx` the furniture actually spans, and how far
+            // in from the ends it is. Furniture does not land on cell
+            // boundaries and the marks must not pretend it does.
+            let leftC = s.left / SP, rightC = s.right / SP
+            @inline(__always)
+            func endWeight(_ cx: Int) -> Float {
+                let covered = min(Float(cx) + 1, rightC) - max(Float(cx), leftC)
+                let cover = max(0, min(1, covered))
+                // A run of water thins toward the corner of a panel rather than
+                // reaching the very end at full depth: the meniscus has less to
+                // hold on to there. A cell and a half of taper.
+                let inFromEnd = min(Float(cx) + 0.5 - leftC, rightC - Float(cx) - 0.5)
+                let soft = max(0, min(1, inFromEnd / 1.5))
+                return cover * (0.42 + 0.58 * soft)
+            }
+
+            // The cell the top edge falls in, and where inside it the edge
+            // actually is. The furniture covers everything below `lipFrac`, so
+            // that part of the cell is hidden whatever we draw there.
+            let lipF = s.top / SP
+            let lipRow = Int(lipF)
 
             // ---- dirt. Underneath everything, and the widest band, because
             // dry deposition settles rather than being thrown at an edge.
             if f.grime > 0.05 {
                 for cx in c0...c1 {
-                    let g = f.grime * (0.55 + 0.45 * jitter(Float(cx) * 5.1 + Float(i)))
+                    let e = endWeight(cx)
+                    guard e > 0.02 else { continue }
+                    let g = f.grime * e * (0.55 + 0.45 * jitter(Float(cx) * 5.1 + Float(i)))
                     put(cx, lipRow, g * 0.7, Deposit.grime)
-                    put(cx, lipRow - 1, g * 0.32, Deposit.grime)
+                    // Dry deposition has no meniscus to hold an edge, so the
+                    // upper limit of the band is the raggedest thing here.
+                    let up = 0.30 + 0.55 * jitter(Float(cx) * 2.7 + Float(i) * 1.9)
+                    put(cx, lipRow - 1, g * 0.32, Deposit.grime, 0, 1 - up)
                 }
             }
 
@@ -2171,9 +2248,18 @@ final class SceneSimulation {
                 // raining, and Int() then rounded 3.0 and 3.9 to the same
                 // number of cells — a fifty-kilometre-an-hour squall and a dead
                 // calm drew a byte-identical band.
-                let reach = 1 + Int(min(2.4, lipAmt * 1.4 + filmAmt * 1.0))
-                          + Int(sw.driven * 2.4)
+                //
+                // FRACTIONAL, not a whole number of cells. Rounding it was the
+                // second half of why the marks read as a drawn rectangle: every
+                // column reached the same integer height, so the top of the
+                // band was a ruled line lying exactly along a cell boundary.
+                // Water does not have a straight upper edge, and the engine can
+                // already draw a partial cell.
+                let reach = 1 + min(2.4, lipAmt * 1.4 + filmAmt * 1.0)
+                          + sw.driven * 2.4
                 for cx in c0...c1 {
+                    let endW = endWeight(cx)
+                    guard endW > 0.02 else { continue }
                     let ph = jitter(Float(cx) * 1.37 + Float(i) * 7.13)
                     let ph2 = jitter(Float(cx) * 3.71 + Float(i) * 2.90 + 11)
                     // Roughly half the lip carries a fat bead and the rest a
@@ -2203,24 +2289,37 @@ final class SceneSimulation {
                     // and the whole lip is wetted alike, which is why this term
                     // is scaled by `driven` and vanishes with it rather than
                     // always asserting a gradient.
-                    var reachC = reach
+                    patch *= endW
+
+                    // Every column reaches its own height, by a good margin —
+                    // a third either way. This is the difference between a band
+                    // of water and a line ruled along the top of the dock.
+                    var reachC = reach * (0.68 + 0.64 * jitter(Float(cx) * 6.1 + Float(i) * 2.3))
                     if sw.driven > 0.05 && span > 1 {
                         let along = Float(cx - c0) / (span - 1)
                         let windward = sw.drive > 0 ? along : 1 - along
                         let expo = 1 - sw.driven * 0.70 * (1 - windward)
                         patch *= expo
-                        reachC = max(1, Int((Float(reach) * expo).rounded()))
+                        reachC *= expo
                     }
+                    reachC = max(0.45, reachC)
 
-                    for k in 0..<max(reachC, runLen) {
+                    for k in 0..<max(Int(reachC.rounded(.up)), runLen) {
                         let cy = lipRow - k
                         guard cy >= 0 else { break }
                         let up = Float(k)
+                        // How much of THIS cell the water actually covers,
+                        // measured up from the lip. The remainder is handed to
+                        // the shader in `by` so the topmost cell of the band
+                        // dissolves inside itself instead of ending on the
+                        // boundary — which is what the subdivision is for.
+                        let cover = max(0, min(1, reachC - up))
+                        let byFrac = 1 - cover
                         // Strongest AT the edge, thinning upward, and it has to
                         // stay legible for the two or three cells it reaches or
                         // the whole band collapses back to the single ruled row
                         // a square falloff gives.
-                        let fall = max(0, 1 - up / Float(reachC))
+                        let fall = max(0, 1 - (up + 0.5) / reachC)
                         let sheen = filmAmt * patch * fall * (0.60 + 0.40 * fall)
                         let runV = k < runLen
                             ? f.runoff * (1 - up / Float(max(runLen, 1))) * 0.85 : 0
@@ -2238,11 +2337,12 @@ final class SceneSimulation {
                         // never reaches the bead branches above and fog only
                         // does once its film has genuinely gathered.
                         if condensing {
-                            put(cx, cy, min(0.95, sheen * 0.75 + 0.20), Deposit.bloom)
+                            put(cx, cy, min(0.95, sheen * 0.75 + 0.20 * endW),
+                                Deposit.bloom, 0, byFrac)
                             continue
                         }
                         if matte {
-                            put(cx, cy, sheen * 0.85, Deposit.matte)
+                            put(cx, cy, sheen * 0.85, Deposit.matte, 0, byFrac)
                             continue
                         }
                         // The meniscus sits IN the lip row and nowhere else, so
@@ -2264,9 +2364,9 @@ final class SceneSimulation {
                             put(cx, cy, min(0.8, 0.25 + bead * 0.45), Deposit.lipBead,
                                 (ph - 0.5) * 0.7, 0.45)
                         } else if runV > sheen {
-                            put(cx, cy, runV * 0.85, Deposit.film)
+                            put(cx, cy, runV * 0.85, Deposit.film, 0, byFrac)
                         } else {
-                            put(cx, cy, sheen * 0.88, Deposit.sheen)
+                            put(cx, cy, sheen * 0.88, Deposit.sheen, 0, byFrac)
                         }
                     }
                 }
@@ -2276,13 +2376,20 @@ final class SceneSimulation {
             // not bead, so it is a smooth even skin over the whole lip that
             // simply thickens.
             if f.glaze > 0.04 {
-                let depth = 1 + Int(min(2, f.glaze * 2.4))
+                // Fractional for the same reason the film's reach is: a glaze
+                // is smooth, but its upper limit is where the runback froze,
+                // and that is not a cell boundary.
+                let depth = 1 + min(2, f.glaze * 2.4)
                 for cx in c0...c1 {
-                    for k in 0..<depth {
+                    let e = endWeight(cx)
+                    guard e > 0.02 else { continue }
+                    let d = depth * (0.82 + 0.36 * jitter(Float(cx) * 4.4 + Float(i)))
+                    for k in 0..<Int(d.rounded(.up)) {
                         let cy = lipRow - k
                         guard cy >= 0 else { break }
-                        let fall = 1 - Float(k) / Float(depth + 1)
-                        put(cx, cy, min(0.95, f.glaze * fall * 0.95), Deposit.glaze)
+                        let fall = 1 - Float(k) / (d + 1)
+                        put(cx, cy, min(0.95, f.glaze * e * fall * 0.95), Deposit.glaze,
+                            0, 1 - max(0, min(1, d - Float(k))))
                     }
                 }
             }
@@ -2292,17 +2399,22 @@ final class SceneSimulation {
             // first and the bloom starts there and creeps inward.
             if f.frost > 0.04 {
                 let bloom = max(1.5, span * 0.35 * min(1, 0.3 + f.frost))
-                let depth = 1 + Int(min(2, f.frost * 2.6))
+                let depth = 1 + min(2, f.frost * 2.6)
                 for cx in c0...c1 {
+                    let e = endWeight(cx)
                     let fromEnd = Float(min(cx - c0, c1 - cx))
                     let edgeness = max(0, 1 - fromEnd / bloom)
                     let crystal = 0.55 + 0.45 * jitter(Float(cx) * 9.7 + Float(i) * 3.3)
-                    let a = f.frost * (0.25 + 0.75 * edgeness * edgeness) * crystal
+                    let a = f.frost * e * (0.25 + 0.75 * edgeness * edgeness) * crystal
                     guard a > 0.05 else { continue }
-                    for k in 0..<depth {
+                    // Crystals grow to their own height. A bloom with a level
+                    // top is paint, not frost.
+                    let d = depth * (0.70 + 0.60 * crystal)
+                    for k in 0..<Int(d.rounded(.up)) {
                         let cy = lipRow - k
                         guard cy >= 0 else { break }
-                        put(cx, cy, a * (1 - Float(k) / Float(depth + 1)), Deposit.frost)
+                        put(cx, cy, a * (1 - Float(k) / (d + 1)), Deposit.frost,
+                            0, 1 - max(0, min(1, d - Float(k))))
                     }
                 }
             }

@@ -467,7 +467,13 @@ inline float3 skyRGB(float sAlt, float yFrac, float dAzDeg,
         // rain by up to two hours. Reaching the sky COLOUR and not only the
         // cloud tone is what makes the frame darken BEFORE the first drop —
         // which is the order the sky does it in.
-        tgt *= 1.0f - 0.45f * gloomF;
+        // 0.45 double-counted. `day` above ALREADY darkens with deck thickness
+        // (216 down to 148), so multiplying by another 0.55 landed a daytime
+        // overcast near 81 — dusk brightness at five in the afternoon. An
+        // overcast day is dim, not dark; you can still read outside under one.
+        // This is a modulation on top of a target that has already been dimmed,
+        // so it has to be gentle or the two compound.
+        tgt *= 1.0f - 0.22f * gloomF;
         // Not dead flat: an overcast is brightest overhead, where the sight line
         // through the deck is shortest, and greys down toward the horizon.
         tgt *= 1.05f - 0.17f * hk;
@@ -1201,7 +1207,9 @@ fragment CellOut cellPass(VOut in [[stage_in]],
     // Mid: banded, moderate opacity, structure without a hard edge.
     if (midAmt > 0.0f) {
         float rim = midAmt * (1.0f - midAmt * 0.55f) * bodyLight;   // part way between
-        float shade = min(210.0f, U.cbase * (0.78f + 0.30f * midN) + rim * 90.0f);
+        // Recentred on 1.0 for the same reason as the low deck below: a mottle
+        // whose mean is 0.93 is a 7% dimming wearing a texture's clothes.
+        float shade = min(210.0f, U.cbase * (0.85f + 0.30f * midN) + rim * 90.0f);
         float3 mc = cloudTint(sAlt, 0.55f + rim * 0.45f, shade);
         L += midAmt * (skyBrAmt > 0.5f ? 26.0f : 6.0f) + rim * 62.0f;
         float a = midAmt * 0.72f;
@@ -1243,9 +1251,26 @@ fragment CellOut cellPass(VOut in [[stage_in]],
         // is what breaks the contours up.
         float lowN = 0.5f + 0.30f * sin(cxp * 0.0061f + cyp * 0.0113f + sec * 0.011f)
                           + 0.20f * sin(cxp * 0.0134f - cyp * 0.0072f - sec * 0.008f + 2.3f);
-        float shade = min(235.0f, U.cbase * (0.78f + 0.30f * (1.0f - lowD2))
-                                * (0.75f + 0.55f * light)
-                                * (0.84f + 0.32f * lowN) + rim * 70.0f);
+        // THE SAME DOUBLE-COUNT AGAIN, and this one was worth 25% of the whole
+        // frame. `(0.75 + 0.55 * light)` is inherited verbatim from
+        // roomstand.py:2643, where it was correct: there the deck was a STRIP
+        // along the top of the frame, `light` was the sun's lobe on it, and 0.75
+        // was the shaded floor of a band with open sky underneath. Here the deck
+        // can CLOSE over the whole picture, and then `light` is ~0 across nearly
+        // all of it — so the floor stopped being the shading of a band and
+        // became a flat 25% dimming of everything, applied on top of `cbase`,
+        // which is already exactly "how much light is getting through the deck
+        // at this hour". The attenuation was counted twice and a hundred per
+        // cent overcast at noon painted at 0.70 x cbase: 119 against a cbase of
+        // 170, i.e. below mid grey at midday.
+        //
+        // So the sun's term is a LIFT rather than a floor — unity away from it,
+        // brighter toward it, which is the shape the Pi actually wanted — and
+        // both mottles are recentred on 1.0 instead of 0.93, since a texture is
+        // meant to vary the tone, not to quietly lower it.
+        float shade = min(235.0f, U.cbase * (0.85f + 0.30f * (1.0f - lowD2))
+                                * (1.0f + 0.42f * light)
+                                * (0.85f + 0.30f * lowN) + rim * 70.0f);
         float3 cc = cloudTint(sAlt, light + rim, shade);
         L += lowAmt * (skyBrAmt > 0.5f ? 55.0f : 12.0f) + rim * 26.0f;
         float a = lowAmt * 0.97f;
@@ -2228,6 +2253,35 @@ fragment float4 presentPass(VOut in [[stage_in]],
                 // these are allowed to be seen.
                 float  k    = min(wetness, 1.0f);
                 float  lumv = dot(col, float3(0.299f, 0.587f, 0.114f));
+
+                // ---- THE PARTIAL EDGE CELL.
+                //
+                // What stopped these marks looking like water. Every deposit
+                // used to occupy WHOLE cells, so the top of a wet band was a
+                // ruled line lying exactly along a cell boundary and the marks
+                // read as a rectangle drawn on the wallpaper rather than as
+                // something lying on a surface. The simulation now sends how
+                // much of this cell the deposit actually covers — `gcell.w` is
+                // the bare fraction measured down from the cell's top — and the
+                // deposit dissolves inside the cell instead of ending at its
+                // edge. Furniture does not land on cell boundaries; this is the
+                // half of that which the shader owns.
+                //
+                // Deliberately soft rather than a clean cut: a meniscus has a
+                // gradient, not a border. A third of a cell of feather is ~16px
+                // at production density, which is enough to read as material.
+                // The bead (kind 12) is excluded — it spends z and w on where
+                // the drop sits, and it is a discrete object anyway.
+                if (kind != 12) {
+                    float bare = gcell.w;
+                    if (bare > 0.02f) {
+                        // Cell-local v, recomputed rather than taken from `dc`:
+                        // the moon and the streaks may already have subdivided
+                        // that, and this has to be the COARSE cell's own uv.
+                        float cv = px.y / SPv.y - cid.y;
+                        k *= smoothstep(bare - 0.24f, bare + 0.14f, cv);
+                    }
+                }
 
                 if (kind == 7) {
                     // Liquid water on a lip. Wet is DARKER and more saturated —

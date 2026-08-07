@@ -419,3 +419,81 @@ final class ScenePreview {
                        intent: .defaultIntent)
     }
 }
+
+// MARK: - The reference frame
+//
+//  What the furniture detector differences a screenshot against.
+//
+//  Elemental IS the wallpaper, so the one thing it never has to guess at is
+//  what it drew. Rendering the same scene at the screenshot's dimensions turns
+//  "find the rectangles in this picture" — which over a mosaic of hard-edged
+//  rectangles is close to hopeless — into "find where this picture stopped
+//  agreeing with ours", which is nearly free.
+//
+//  Two rules, both learned the hard way in the detector itself:
+//
+//    * NO FURNITURE IN THE REFERENCE. If the render carries the wetness marks
+//      of the rectangles we already have, and those rectangles are wrong, the
+//      difference lights up where the OLD rects are and detection converges on
+//      its own previous mistake. The reference is the bare wall.
+//    * NEVER TOUCH THE LIVE RENDERER. Its grid, its drifting light pockets and
+//      its integrators are the wallpaper the user is looking at; resizing it to
+//      match a screenshot would visibly hitch the desktop. This builds its own.
+
+enum DesktopReference {
+
+    /// Render the scene the wallpaper is currently drawing, at `pixels`.
+    ///
+    /// Returns nil when there is no live wallpaper to copy the scene from and
+    /// no device to draw with — the detector then falls back to edge detection.
+    static func render(pixels: CGSize, config: Config) -> CGImage? {
+        guard pixels.width >= 64, pixels.height >= 64 else { return nil }
+        guard let device = MTLCreateSystemDefaultDevice(),
+              let r = ElementalRenderer(device: device, colorFormat: .rgba8Unorm)
+        else { return nil }
+
+        // The live scene if there is one — that is the whole point, since the
+        // screenshot was taken of it. Otherwise the config's own settings with
+        // the sky worked out for right now, which is the same thing the
+        // wallpaper would be drawing if it were running.
+        var s: SceneState
+        if let live = WallpaperSurface.anyLive {
+            s = live.renderer.state
+        } else {
+            s = SceneState()
+            config.apply(to: &s)
+        }
+        r.state = s
+        r.playbackOnWake = false
+        r.surfaces = []
+        r.fixedTimeStep = 1.0 / 60.0
+        r.resize(width: Int(pixels.width), height: Int(pixels.height))
+
+        let d = MTLTextureDescriptor.texture2DDescriptor(
+            pixelFormat: .rgba8Unorm, width: Int(pixels.width), height: Int(pixels.height),
+            mipmapped: false)
+        d.usage = [.renderTarget, .shaderRead]
+        d.storageMode = .shared
+        guard let tex = device.makeTexture(descriptor: d) else { return nil }
+
+        // Two frames, as everywhere else: the first settles the integrators the
+        // shader reads, the second is the one we keep.
+        r.render(to: tex)
+        r.render(to: tex, waitForCompletion: true)
+
+        let width = Int(pixels.width), height = Int(pixels.height)
+        let rowBytes = width * 4
+        var buf = [UInt8](repeating: 0, count: rowBytes * height)
+        buf.withUnsafeMutableBytes { p in
+            tex.getBytes(p.baseAddress!, bytesPerRow: rowBytes,
+                         from: MTLRegionMake2D(0, 0, width, height), mipmapLevel: 0)
+        }
+        guard let provider = CGDataProvider(data: Data(buf) as CFData) else { return nil }
+        return CGImage(width: width, height: height, bitsPerComponent: 8, bitsPerPixel: 32,
+                       bytesPerRow: rowBytes,
+                       space: CGColorSpace(name: CGColorSpace.sRGB)!,
+                       bitmapInfo: CGBitmapInfo(rawValue: CGImageAlphaInfo.noneSkipLast.rawValue),
+                       provider: provider, decode: nil, shouldInterpolate: false,
+                       intent: .defaultIntent)
+    }
+}

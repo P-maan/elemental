@@ -87,6 +87,16 @@ enum FurnitureDetector {
 
     // MARK: - Entry point
 
+    /// Analyse a screenshot the old way: edges, pairing and calmness, over the
+    /// screenshot alone.
+    ///
+    /// Superseded by `detect(_:reference:cols:rows:)` and kept because it is
+    /// the only thing that can run when no reference render is available — and
+    /// because the harness measures the two against each other.
+    static func detectByEdges(_ image: CGImage) -> DetectedDesktop {
+        detect(image)
+    }
+
     /// Analyse a screenshot. Pure computation; safe on any background queue,
     /// and belongs on one.
     static func detect(_ image: CGImage) -> DetectedDesktop {
@@ -610,5 +620,675 @@ enum FurnitureDetector {
             let ia = i.width * i.height
             return ia / (a.width * a.height + b.width * b.height - ia)
         }
+    }
+}
+
+// MARK: - Differencing against our own render
+//
+//  THE OBSERVATION THAT MAKES THIS WORK: Elemental *is* the wallpaper, so it
+//  knows exactly what it drew. Render the same scene at the screenshot's size
+//  and the two pictures agree everywhere the user has put nothing — and
+//  disagree, in a very specific way, everywhere they have.
+//
+//  The specific way matters. The dock and the widgets are FROSTED: they do not
+//  replace the wallpaper, they blur it. So the signal is not "the colour
+//  changed" — the sky drifts between the capture and the compare and that alone
+//  changes every colour on the screen. The signal is that OUR RENDER HAS HARD
+//  MOSAIC CELL EDGES WHERE THE SCREENSHOT HAS NONE. We know where every one of
+//  those edges is, to the pixel, because we chose the grid. Measuring the
+//  contrast that survives across each known grout line is therefore a direct
+//  question about frosting and nothing else, and it is indifferent to:
+//
+//    * the sky drifting (a smooth change either side of a grout line leaves the
+//      step across it intact),
+//    * the widget's own content (text and charts put edges in the middle of
+//      cells, not along the grid),
+//    * desktop icons (an icon ADDS structure, it does not take it away),
+//    * and above all the mosaic's own rectangles, which is the entire class of
+//      false positive the edge detector could never get rid of. A grout line is
+//      not evidence of furniture here. Its DISAPPEARANCE is.
+//
+//  ---- Pixel extents, not cells
+//
+//  Furniture does not land on cell boundaries and must not be reported as
+//  though it did: the engine subdivides partial edge cells, and that is exactly
+//  what the subdivision is for. So the grid only ever finds a coarse mask; the
+//  four edges of every rectangle are then refined against the per-pixel
+//  difference field, which steps sharply at the panel's real border.
+
+extension FurnitureDetector {
+
+    /// Long edge of the working image for the differencing path. Larger than
+    /// the edge detector's 480: this one is measuring across individual grout
+    /// lines, so the cell pitch has to survive the downscale. At 720 across a
+    /// 54-row grid a cell is still ~8.5px, which is four resolvable pixels
+    /// either side of every boundary.
+    static let diffWidth = 720
+
+    /// Analyse a screenshot against our own render of the same scene.
+    ///
+    /// `cols`/`rows` are the mosaic's grid — ask `SceneSimulation.gridGeometry`
+    /// for them so there is one source of truth about where the grout is.
+    /// Falls back to the edge detector when there is no reference to compare
+    /// against, which is what happens if the renderer could not be built.
+    static func detect(_ image: CGImage, reference: CGImage?,
+                       cols: Int, rows: Int) -> DetectedDesktop {
+        guard let reference, cols > 3, rows > 3,
+              let d = DiffGrid(shot: image, reference: reference, cols: cols, rows: rows)
+        else {
+            var out = detect(image)
+            out.log.insert("no reference render — fell back to edge detection", at: 0)
+            return out
+        }
+        let diffed = d.run(pixelSize: CGSize(width: image.width, height: image.height))
+
+        // NEVER WORSE THAN WHAT IT REPLACED.
+        //
+        // The differencing pass is the better instrument when the reference is
+        // contemporaneous with the screenshot, which is the case it is built
+        // for: the pane renders it moments after the user hands the picture in.
+        // It degrades when it is not — a screenshot saved an hour ago and
+        // compared against tonight's sky has rain in one and not the other, and
+        // the structure difference that finds a widget also finds every streak
+        // that moved. Measured on a pair ten minutes apart it fragments into
+        // hundreds of specks and finds nothing.
+        //
+        // So it has to be able to say it failed. Finding neither a dock nor a
+        // pair of widgets, or finding a great many small ones, is that
+        // admission, and the edge detector — which needs no reference and is
+        // therefore immune to this whole failure — gets the screenshot instead.
+        let credible = (diffed.dock != nil || diffed.widgets.count >= 2)
+                    && diffed.widgets.count <= 16
+        if credible { return diffed }
+        var out = detect(image)
+        out.log.insert("differencing found "
+            + "\(diffed.widgets.count) widgets and \(diffed.dock == nil ? "no" : "a") dock — "
+            + "not credible, so this is the edge detector's answer", at: 0)
+        out.log.append(contentsOf: diffed.log.map { "  (differencing) " + $0 })
+        return out
+    }
+
+    // MARK: - The differenced pair
+
+    struct DiffGrid {
+
+        let w: Int, h: Int
+        let cols: Int, rows: Int
+        /// Luminance of the screenshot and of our render, 0...1, y down.
+        var S: [Float]
+        var R: [Float]
+
+        /// Per pixel: local gradient magnitude of each picture. THE difference
+        /// field — not |S - R|, which is a colour difference and therefore
+        /// measures the sky drifting between the capture and the compare far
+        /// more loudly than it measures a widget. Structure is what frosting
+        /// takes away and structure is what a drifting sky leaves alone.
+        var gS: [Float]
+        var gR: [Float]
+
+        /// Per cell: how much of our grout contrast the screenshot has lost.
+        var loss: [Float]
+        /// Per cell: how much of our INTERIOR structure it has lost, 0...1.
+        var dm: [Float]
+        /// Per cell: whether our own render had a grout edge worth measuring.
+        var lit: [Bool]
+        /// Per cell: how much edge energy the screenshot has that we do not.
+        /// Positive means something was drawn ON the wallpaper rather than
+        /// blurred over it — an icon, a filename, a chart.
+        var added: [Float]
+
+        var dmFloor: Float = 0
+
+        init?(shot: CGImage, reference: CGImage, cols: Int, rows: Int) {
+            let ww = FurnitureDetector.diffWidth
+            let hh = max(8, Int((Double(shot.height) * Double(ww) / Double(shot.width)).rounded()))
+            guard let a = FurnitureDetector.luma(shot, ww, hh),
+                  let b = FurnitureDetector.luma(reference, ww, hh) else { return nil }
+            w = ww; h = hh
+            self.cols = cols; self.rows = rows
+            S = a; R = b
+            gS = FurnitureDetector.gradient(a, ww, hh)
+            gR = FurnitureDetector.gradient(b, ww, hh)
+            loss  = [Float](repeating: 0, count: cols * rows)
+            dm    = [Float](repeating: 0, count: cols * rows)
+            lit   = [Bool](repeating: false, count: cols * rows)
+            added = [Float](repeating: 0, count: cols * rows)
+            measure()
+        }
+
+        // ---- grid geometry, in working pixels
+
+        @inline(__always) func bx(_ i: Int) -> Float { Float(i) * Float(w) / Float(cols) }
+        @inline(__always) func by(_ j: Int) -> Float { Float(j) * Float(h) / Float(rows) }
+
+        var pitchX: Float { Float(w) / Float(cols) }
+        var pitchY: Float { Float(h) / Float(rows) }
+
+        /// Contrast across a vertical grout line at working column `px`, over
+        /// the rows `y0..<y1`. A window of three columns rather than one,
+        /// because the downscale puts the line somewhere inside a pixel and a
+        /// single-column probe lands beside it as often as on it.
+        private func vEdge(_ img: [Float], _ px: Int, _ y0: Int, _ y1: Int) -> Float {
+            guard px >= 2, px < w - 2, y1 > y0 else { return 0 }
+            var sum: Float = 0
+            var n = 0
+            for y in y0..<y1 {
+                let row = y * w
+                var best: Float = 0
+                for dx in -1...1 {
+                    best = max(best, abs(img[row + px + dx + 1] - img[row + px + dx - 1]))
+                }
+                sum += best; n += 1
+            }
+            return n > 0 ? sum / Float(n) : 0
+        }
+
+        private func hEdge(_ img: [Float], _ py: Int, _ x0: Int, _ x1: Int) -> Float {
+            guard py >= 2, py < h - 2, x1 > x0 else { return 0 }
+            var sum: Float = 0
+            var n = 0
+            for x in x0..<x1 {
+                var best: Float = 0
+                for dy in -1...1 {
+                    let a = img[(py + dy + 1) * w + x], b = img[(py + dy - 1) * w + x]
+                    best = max(best, abs(a - b))
+                }
+                sum += best; n += 1
+            }
+            return n > 0 ? sum / Float(n) : 0
+        }
+
+        /// Fill `loss`, `dm` and `lit`.
+        private mutating func measure() {
+            // Our own grout contrast is what sets the scale. On a bright day it
+            // is large; on a clear night the whole wall is nearly black and the
+            // step across a grout line is a couple of levels. A fixed floor
+            // tuned on one is meaningless on the other, so the floor is a
+            // fraction of what THIS render actually has.
+            var refEdges: [Float] = []
+            refEdges.reserveCapacity(cols * rows)
+
+            var vS = [Float](repeating: 0, count: cols * rows)
+            var vR = [Float](repeating: 0, count: cols * rows)
+            var busyR = [Float](repeating: 0, count: cols * rows)
+
+            for j in 0..<rows {
+                let y0 = max(1, Int(by(j).rounded()) + 1)
+                let y1 = min(h - 1, Int(by(j + 1).rounded()) - 1)
+                for i in 0..<cols {
+                    let x0 = max(1, Int(bx(i).rounded()) + 1)
+                    let x1 = min(w - 1, Int(bx(i + 1).rounded()) - 1)
+                    guard x1 > x0, y1 > y0 else { continue }
+
+                    // Use the cell's own left and top boundary; the outermost
+                    // rank has only the far one to work with.
+                    let vx = i > 0 ? Int(bx(i).rounded()) : Int(bx(i + 1).rounded())
+                    let hy = j > 0 ? Int(by(j).rounded()) : Int(by(j + 1).rounded())
+                    let eSv = vEdge(S, vx, y0, y1), eRv = vEdge(R, vx, y0, y1)
+                    let eSh = hEdge(S, hy, x0, x1), eRh = hEdge(R, hy, x0, x1)
+                    let eS = (eSv + eSh) * 0.5, eR = (eRv + eRh) * 0.5
+
+                    let k = j * cols + i
+                    vS[k] = eS; vR[k] = eR
+                    refEdges.append(eR)
+
+                    // Interior structure, in both pictures. The cell's whole
+                    // area, not just its border: a frosted panel flattens
+                    // everything under it, and the grout lines are only the
+                    // part of that we happen to know the position of.
+                    var bS: Float = 0, bR: Float = 0
+                    var n = 0
+                    for y in stride(from: y0, to: y1, by: 2) {
+                        let row = y * w
+                        for x in stride(from: x0, to: x1, by: 2) {
+                            bS += gS[row + x]; bR += gR[row + x]; n += 1
+                        }
+                    }
+                    if n > 0 {
+                        bS /= Float(n); bR /= Float(n)
+                        busyR[k] = bR
+                        // Normalised, so it is a FRACTION of the structure that
+                        // was there rather than an absolute amount — the dark
+                        // corners of a night frame have very little of it and
+                        // still lose all of it under a widget.
+                        dm[k] = max(0, bR - bS) / max(bR, 0.004)
+                        added[k] = max(0, bS - bR)
+                    }
+                }
+            }
+
+            // A cell is worth judging on STRUCTURE when our render put a real
+            // step across its boundary. At night, in the dark corners of the
+            // frame, the grout is a level or two of 255 and the ratio of two
+            // such numbers is quantisation noise, not evidence — those cells are
+            // marked unlit and judged a different way below.
+            refEdges.sort()
+            let medEdge = refEdges.isEmpty ? 0 : refEdges[refEdges.count / 2]
+            let floorE = max(0.012, medEdge * 0.55)
+
+            for k in 0..<(cols * rows) {
+                lit[k] = vR[k] >= floorE
+                loss[k] = lit[k] ? max(0, 1 - vS[k] / max(vR[k], 1e-5)) : 0
+                // A cell where our own render has almost no structure at all
+                // cannot report having lost any: the ratio is quantisation
+                // noise. Say nothing rather than something random.
+                if busyR[k] < 0.006 { dm[k] = 0; added[k] = 0 }
+            }
+
+            // Everything above is a FRACTION of what was there, so the bar is
+            // an absolute one and the median only guards against a reference
+            // that is systematically softer than the screenshot — a resample,
+            // a colour profile, a frame of motion blur.
+            var sorted = dm.sorted()
+            let med = sorted.isEmpty ? 0 : sorted[sorted.count / 2]
+            dmFloor = min(0.60, max(0.32, med + 0.22))
+        }
+
+        // MARK: - Mask, components, rectangles
+
+        /// Cells that are behind something frosted.
+        ///
+        /// Two tiers, because the frame has two kinds of place in it and one
+        /// rule cannot serve both:
+        ///
+        ///   LIT — our render has real grout contrast here, so the question can
+        ///     be asked directly: did the screenshot keep it? A frosted panel
+        ///     loses most of it. An icon keeps it and adds more.
+        ///   UNLIT — our render is nearly flat here (a dark corner at night,
+        ///     the bottom of the frame), so there is no contrast to lose and
+        ///     the ratio is noise. All that is left is that the picture changed
+        ///     a great deal AND nothing sharp was drawn on it. That second half
+        ///     is what keeps the icon field out: an icon changes the pixels and
+        ///     ADDS structure, and frosting never does the latter.
+        func mask() -> [Bool] {
+            var m = [Bool](repeating: false, count: cols * rows)
+            for k in 0..<(cols * rows) {
+                let changed = dm[k] > dmFloor
+                guard changed else { continue }
+                m[k] = lit[k] ? (loss[k] > 0.30 || dm[k] > dmFloor + 0.20)
+                              : (dm[k] > dmFloor + 0.15 && added[k] < 0.010)
+            }
+            // Close single-cell holes: a widget with a hard graphic in it can
+            // keep one cell's worth of contrast and punch a pinhole in an
+            // otherwise solid slab.
+            var out = m
+            for j in 1..<(rows - 1) {
+                for i in 1..<(cols - 1) {
+                    let k = j * cols + i
+                    guard !m[k] else { continue }
+                    let n = (m[k - 1] ? 1 : 0) + (m[k + 1] ? 1 : 0)
+                          + (m[k - cols] ? 1 : 0) + (m[k + cols] ? 1 : 0)
+                    if n >= 3 { out[k] = true }
+                }
+            }
+            return out
+        }
+
+        /// Four-connected components of the mask, as cell-space boxes.
+        func components(_ m: [Bool]) -> [(cells: [Int], box: (Int, Int, Int, Int))] {
+            var seen = [Bool](repeating: false, count: cols * rows)
+            var out: [(cells: [Int], box: (Int, Int, Int, Int))] = []
+            var stack: [Int] = []
+            for start in 0..<(cols * rows) where m[start] && !seen[start] {
+                stack.removeAll(keepingCapacity: true)
+                stack.append(start); seen[start] = true
+                var cells: [Int] = []
+                var i0 = cols, i1 = 0, j0 = rows, j1 = 0
+                while let k = stack.popLast() {
+                    cells.append(k)
+                    let i = k % cols, j = k / cols
+                    i0 = min(i0, i); i1 = max(i1, i); j0 = min(j0, j); j1 = max(j1, j)
+                    if i > 0, m[k - 1], !seen[k - 1] { seen[k - 1] = true; stack.append(k - 1) }
+                    if i < cols - 1, m[k + 1], !seen[k + 1] { seen[k + 1] = true; stack.append(k + 1) }
+                    if j > 0, m[k - cols], !seen[k - cols] { seen[k - cols] = true; stack.append(k - cols) }
+                    if j < rows - 1, m[k + cols], !seen[k + cols] { seen[k + cols] = true; stack.append(k + cols) }
+                }
+                out.append((cells, (i0, j0, i1, j1)))
+            }
+            return out
+        }
+
+        // MARK: - Pixel-accurate edges
+        //
+        // The mask is cell-resolution and the furniture is not, so every box
+        // that survives has its four sides walked back onto the real border.
+        // The difference field is what carries that border: inside a frosted
+        // panel it is high and roughly level, outside it collapses to the sky's
+        // drift, and the step between the two is one or two pixels wide.
+
+        /// Mean structure LOST down a column, over the rows `y0..<y1`. The same
+        /// drift-tolerant quantity the mask is built on, at pixel resolution:
+        /// high inside a frosted panel, near zero on bare wallpaper however far
+        /// the sky has moved on, and it steps within a pixel or two at the
+        /// panel's border — which is what makes a pixel-accurate edge possible
+        /// at all.
+        private func colDiff(_ x: Int, _ y0: Int, _ y1: Int) -> Float {
+            guard x >= 0, x < w, y1 > y0 else { return 0 }
+            var s: Float = 0
+            for y in y0..<y1 { s += max(0, gR[y * w + x] - gS[y * w + x]) }
+            return s / Float(y1 - y0)
+        }
+
+        private func rowDiff(_ y: Int, _ x0: Int, _ x1: Int) -> Float {
+            guard y >= 0, y < h, x1 > x0 else { return 0 }
+            let row = y * w
+            var s: Float = 0
+            for x in x0..<x1 { s += max(0, gR[row + x] - gS[row + x]) }
+            return s / Float(x1 - x0)
+        }
+
+        /// Walk outward from `from` in `step`s while the profile stays above
+        /// half the inside level, and return the last position that did.
+        /// `probe` gives the profile value at a position.
+        private func walk(from: Int, step: Int, limit: Int,
+                          inside: Float, outside: Float,
+                          probe: (Int) -> Float) -> Int {
+            let half = (inside + outside) * 0.5
+            var best = from
+            var p = from
+            var slack = 0
+            while p != limit {
+                let next = p + step
+                if next < 0 || next >= max(w, h) { break }
+                let v = probe(next)
+                if v >= half { best = next; slack = 0 }
+                else {
+                    slack += 1
+                    // One pixel of noise must not end the walk, but three
+                    // consecutive pixels below half is the border.
+                    if slack >= 3 { break }
+                }
+                p = next
+            }
+            return best
+        }
+
+        /// Turn a cell box into a pixel-accurate rectangle in working pixels.
+        func refine(_ box: (Int, Int, Int, Int)) -> CGRect {
+            let (i0, j0, i1, j1) = box
+            var x0 = Int(bx(i0).rounded()), x1 = Int(bx(i1 + 1).rounded())
+            var y0 = Int(by(j0).rounded()), y1 = Int(by(j1 + 1).rounded())
+            x0 = max(0, min(w - 2, x0)); x1 = max(x0 + 1, min(w - 1, x1))
+            y0 = max(0, min(h - 2, y0)); y1 = max(y0 + 1, min(h - 1, y1))
+
+            // Sample the interior over the middle 60% of the far axis, so a
+            // rounded corner or a neighbour abutting one end cannot set the
+            // level for the whole side.
+            let iy0 = y0 + (y1 - y0) * 2 / 10, iy1 = y1 - (y1 - y0) * 2 / 10
+            let ix0 = x0 + (x1 - x0) * 2 / 10, ix1 = x1 - (x1 - x0) * 2 / 10
+            let reachX = Int(pitchX.rounded()) + 2
+            let reachY = Int(pitchY.rounded()) + 2
+
+            func level(_ vals: [Float]) -> Float {
+                guard !vals.isEmpty else { return 0 }
+                let s = vals.sorted()
+                return s[s.count / 2]
+            }
+
+            // Inside level, measured a little way in from every side.
+            let insideV = level((ix0..<ix1).map { colDiff($0, iy0, iy1) })
+            let insideH = level((iy0..<iy1).map { rowDiff($0, ix0, ix1) })
+
+            // Outside level, measured a little way beyond every side.
+            let outL = level(((x0 - reachX)..<max(x0 - reachX + 1, x0 - 2)).map { colDiff($0, iy0, iy1) })
+            let outR = level((min(w - 1, x1 + 2)..<min(w, x1 + reachX)).map { colDiff($0, iy0, iy1) })
+            let outT = level(((y0 - reachY)..<max(y0 - reachY + 1, y0 - 2)).map { rowDiff($0, ix0, ix1) })
+            let outB = level((min(h - 1, y1 + 2)..<min(h, y1 + reachY)).map { rowDiff($0, ix0, ix1) })
+
+            let nx0 = walk(from: max(1, x0 + 1), step: -1, limit: max(0, x0 - reachX),
+                           inside: insideV, outside: outL) { colDiff($0, iy0, iy1) }
+            let nx1 = walk(from: min(w - 2, x1 - 1), step: 1, limit: min(w - 1, x1 + reachX),
+                           inside: insideV, outside: outR) { colDiff($0, iy0, iy1) }
+            let ny0 = walk(from: max(1, y0 + 1), step: -1, limit: max(0, y0 - reachY),
+                           inside: insideH, outside: outT) { rowDiff($0, ix0, ix1) }
+            let ny1 = walk(from: min(h - 2, y1 - 1), step: 1, limit: min(h - 1, y1 + reachY),
+                           inside: insideH, outside: outB) { rowDiff($0, ix0, ix1) }
+
+            return CGRect(x: CGFloat(nx0), y: CGFloat(ny0),
+                          width: CGFloat(max(1, nx1 - nx0)), height: CGFloat(max(1, ny1 - ny0)))
+        }
+
+        // MARK: - Splitting a slab into the widgets that make it up
+        //
+        // macOS stacks widgets edge to edge: on the test desktop the seven of
+        // them form one contiguous frosted column with no wallpaper between
+        // them at all, so the mask sees one slab. What separates them is a
+        // hairline in the SCREENSHOT — each panel has its own border. Looking
+        // for that inside a region already known to be furniture is safe in a
+        // way that looking for it over the whole wallpaper never was: the
+        // mosaic's own rectangles cannot get in, because the mosaic is not
+        // here.
+
+        /// Rows (or columns) inside `r` where the screenshot has a straight
+        /// line right across it. Working-pixel coordinates.
+        private func seams(in r: CGRect, horizontal: Bool) -> [Int] {
+            let x0 = Int(r.minX), x1 = Int(r.maxX), y0 = Int(r.minY), y1 = Int(r.maxY)
+            let n = horizontal ? (y1 - y0) : (x1 - x0)
+            guard n > 12 else { return [] }
+            var profile = [Float](repeating: 0, count: n)
+            for t in 0..<n {
+                var s: Float = 0
+                var m = 0
+                if horizontal {
+                    let y = y0 + t
+                    guard y > 1, y < h - 2 else { continue }
+                    for x in x0..<x1 {
+                        s += abs(S[(y + 1) * w + x] - S[(y - 1) * w + x]); m += 1
+                    }
+                } else {
+                    let x = x0 + t
+                    guard x > 1, x < w - 2 else { continue }
+                    for y in y0..<y1 {
+                        s += abs(S[y * w + x + 1] - S[y * w + x - 1]); m += 1
+                    }
+                }
+                profile[t] = m > 0 ? s / Float(m) : 0
+            }
+            let sorted = profile.sorted()
+            let med = sorted[sorted.count / 2]
+            let top = sorted[Int(Double(sorted.count) * 0.98)]
+            guard top > med * 2.2, top > 0.012 else { return [] }
+            let cut = med + (top - med) * 0.55
+            // Peaks only, and never within a widget's minimum size of the ends
+            // or of each other — a border is one line, and a chart inside a
+            // widget can put a run of strong rows anywhere.
+            let guardBand = max(6, Int((horizontal ? pitchY : pitchX) * 2.5))
+            // A slab has to be wider than two guard bands before there is any
+            // room left in the middle for a seam. Without this the range below
+            // is inverted and Swift traps — which is a crash, not a miss.
+            guard n > guardBand * 2 + 2 else { return [] }
+            var picks: [Int] = []
+            for t in guardBand..<(n - guardBand) where profile[t] >= cut {
+                if profile[t] < profile[t - 1] || profile[t] < profile[t + 1] { continue }
+                if let last = picks.last, t - last < guardBand { 
+                    if profile[t] > profile[last] { picks[picks.count - 1] = t }
+                    continue
+                }
+                picks.append(t)
+            }
+            return picks.map { (horizontal ? y0 : x0) + $0 }
+        }
+
+        /// Cut one slab into the panels it is made of, recursively, alternating
+        /// axes. Returns working-pixel rectangles.
+        func split(_ r: CGRect, depth: Int = 0) -> [CGRect] {
+            guard depth < 4, r.width > 12, r.height > 12 else { return [r] }
+            for horizontal in [true, false] {
+                let cuts = seams(in: r, horizontal: horizontal)
+                guard !cuts.isEmpty else { continue }
+                var parts: [CGRect] = []
+                var prev = horizontal ? Int(r.minY) : Int(r.minX)
+                let end = horizontal ? Int(r.maxY) : Int(r.maxX)
+                for c in cuts + [end] {
+                    guard c - prev > 6 else { prev = c; continue }
+                    let piece = horizontal
+                        ? CGRect(x: r.minX, y: CGFloat(prev), width: r.width, height: CGFloat(c - prev))
+                        : CGRect(x: CGFloat(prev), y: r.minY, width: CGFloat(c - prev), height: r.height)
+                    parts.append(piece)
+                    prev = c
+                }
+                guard parts.count > 1 else { continue }
+                return parts.flatMap { split($0, depth: depth + 1) }
+            }
+            return [r]
+        }
+
+        // MARK: - The dock
+        //
+        // Its own pass, for the same reason the edge detector needed one: the
+        // dock is not a slab of frosting over wallpaper, it is a slab of
+        // frosting with two dozen high-contrast icons sitting ON it. The
+        // structure test therefore says "something was added here", which is
+        // true and which is exactly wrong — so the dock is found by what makes
+        // it the dock instead: it is the band along the bottom edge of the
+        // display where the picture stops agreeing with ours.
+        func dockBand() -> CGRect? {
+            var rowsHit: [Int] = []
+            var j = rows - 1
+            let need = Int(Double(cols) * 0.20)
+            while j >= 0 {
+                var n = 0
+                for i in 0..<cols where dm[j * cols + i] > dmFloor { n += 1 }
+                if n < need { break }
+                rowsHit.append(j)
+                j -= 1
+            }
+            guard let top = rowsHit.last, rowsHit.count >= 1 else { return nil }
+            // A dock is shallow. Anything deeper is a window, or a wallpaper
+            // that simply disagrees down there, and taking it would swallow
+            // half the screen.
+            guard Double(rowsHit.count) / Double(rows) < 0.20 else { return nil }
+
+            // Horizontal extent: the columns that are actually part of it,
+            // taken over the whole band rather than any single row — the dock's
+            // separator gaps leave individual rows short.
+            var lo = cols, hi = -1
+            for i in 0..<cols {
+                var n = 0
+                for r in rowsHit where dm[r * cols + i] > dmFloor { n += 1 }
+                if n >= max(1, rowsHit.count / 3) { lo = min(lo, i); hi = max(hi, i) }
+            }
+            guard hi >= lo, hi - lo >= Int(Double(cols) * 0.15) else { return nil }
+            return refine((lo, top, hi, rows - 1))
+        }
+
+        // MARK: - Run
+
+        func run(pixelSize: CGSize) -> DetectedDesktop {
+            var out = DetectedDesktop()
+            out.pixelSize = pixelSize
+            out.log.append(String(format:
+                "differencing %dx%d against our own render, grid %dx%d, "
+              + "cell %.1fx%.1f px, background |Δ| floor %.4f",
+                w, h, cols, rows, pitchX, pitchY, dmFloor))
+
+            @inline(__always)
+            func toFrac(_ r: CGRect) -> CGRect {
+                CGRect(x: r.minX / CGFloat(w), y: r.minY / CGFloat(h),
+                       width: r.width / CGFloat(w), height: r.height / CGFloat(h))
+            }
+
+            // The dock first, so its rows can be kept out of everything else.
+            var dockTopPx = CGFloat(h)
+            if let band = dockBand() {
+                out.dock = toFrac(band)
+                dockTopPx = band.minY
+                out.log.append("dock \(FurnitureDetector.pretty(out.dock!)) (bottom band)")
+            }
+
+            let m = mask()
+            let comps = components(m)
+            let masked = m.filter { $0 }.count
+            out.log.append("\(masked) of \(cols * rows) cells lost their grout "
+                         + "(\(comps.count) connected regions)")
+
+            // A widget is 180pt on its short side, which is a third of the
+            // screen height's tenth — four cells at any sane row count. Below
+            // that it is a desktop icon, and an icon is not furniture.
+            let minCells = 3
+            var kept: [(kind: String, rect: CGRect)] = []
+
+            for c in comps {
+                let (i0, j0, i1, j1) = c.box
+                let cw = i1 - i0 + 1, ch = j1 - j0 + 1
+                guard c.cells.count >= 8, cw >= minCells, ch >= 2 else { continue }
+                // Solidity: a real slab fills its box. A scatter of unrelated
+                // cells that happen to touch does not.
+                let fill = Double(c.cells.count) / Double(cw * ch)
+                guard fill > 0.55 else { continue }
+
+                let px = refine(c.box)
+                let r = toFrac(px)
+
+                // Anything inside the dock's band is the dock.
+                if px.midY >= dockTopPx { continue }
+
+                // The menu bar is the strip along the very top: it is bounded
+                // above by the display edge and by nothing else.
+                if r.minY < 0.012 && r.width > 0.5 && r.height < 0.09 {
+                    out.menuBar = r.maxY
+                    out.log.append(String(format: "menu bar %.2f%% tall", r.maxY * 100))
+                    continue
+                }
+                // Everything else is one or more widgets stacked together.
+                for piece in split(px) {
+                    let pr = toFrac(piece)
+                    guard pr.width > 0.02, pr.height > 0.02 else { continue }
+                    out.widgets.append(pr)
+                    kept.append(("widget", pr))
+                }
+            }
+
+            out.widgets.sort { $0.minY == $1.minY ? $0.minX < $1.minX : $0.minY < $1.minY }
+            for (i, wr) in out.widgets.enumerated() {
+                out.log.append("widget \(i + 1) \(FurnitureDetector.pretty(wr))")
+            }
+            return out
+        }
+    }
+
+    // MARK: - Shared rasteriser
+
+    /// Draw `image` into a `w` x `h` luminance buffer, y down.
+    static func luma(_ image: CGImage, _ w: Int, _ h: Int) -> [Float]? {
+        let bytes = w * 4
+        var pixels = [UInt8](repeating: 0, count: bytes * h)
+        guard let space = CGColorSpace(name: CGColorSpace.sRGB) else { return nil }
+        let ok: Bool = pixels.withUnsafeMutableBytes { buf -> Bool in
+            guard let ctx = CGContext(
+                data: buf.baseAddress, width: w, height: h, bitsPerComponent: 8,
+                bytesPerRow: bytes, space: space,
+                bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue) else { return false }
+            ctx.interpolationQuality = .medium
+            ctx.translateBy(x: 0, y: CGFloat(h))
+            ctx.scaleBy(x: 1, y: -1)
+            ctx.draw(image, in: CGRect(x: 0, y: 0, width: CGFloat(w), height: CGFloat(h)))
+            return true
+        }
+        guard ok else { return nil }
+        var out = [Float](repeating: 0, count: w * h)
+        for i in 0..<(w * h) {
+            out[i] = 0.2126 * Float(pixels[i * 4]) / 255
+                   + 0.7152 * Float(pixels[i * 4 + 1]) / 255
+                   + 0.0722 * Float(pixels[i * 4 + 2]) / 255
+        }
+        return out
+    }
+}
+
+extension FurnitureDetector {
+    /// |d/dx| + |d/dy| of a luminance buffer. The one measurement everything in
+    /// the differencing detector is built on.
+    static func gradient(_ img: [Float], _ w: Int, _ h: Int) -> [Float] {
+        var g = [Float](repeating: 0, count: w * h)
+        guard w > 2, h > 2 else { return g }
+        for y in 1..<(h - 1) {
+            let row = y * w
+            for x in 1..<(w - 1) {
+                let i = row + x
+                g[i] = abs(img[i + 1] - img[i - 1]) + abs(img[i + w] - img[i - w])
+            }
+        }
+        return g
     }
 }

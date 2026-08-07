@@ -561,8 +561,22 @@ final class ElementsPane: Pane {
         spinner.startAnimation(nil)
         statusLabel.stringValue = "Reading the screenshot…"
         let started = CFAbsoluteTimeGetCurrent()
+
+        // The reference frame: our own render of the same scene at the
+        // screenshot's dimensions. Metal work, so it happens here on the main
+        // thread — building a device on a background queue while the wallpaper
+        // is drawing is not something to do casually — and the comparison
+        // itself, which is all the time, still goes to a background queue.
+        let cfg = owner?.config ?? Config()
+        let reference = DesktopReference.render(
+            pixels: CGSize(width: cg.width, height: cg.height), config: cfg)
+        let grid = SceneSimulation.gridGeometry(
+            pixelWidth: Float(cg.width), pixelHeight: Float(cg.height),
+            gridRows: cfg.gridRows)
+
         DispatchQueue.global(qos: .userInitiated).async { [weak self] in
-            let result = FurnitureDetector.detect(cg)
+            let result = FurnitureDetector.detect(cg, reference: reference,
+                                                  cols: grid.cols, rows: grid.rows)
             let ms = (CFAbsoluteTimeGetCurrent() - started) * 1000
             DispatchQueue.main.async {
                 guard let self else { return }
