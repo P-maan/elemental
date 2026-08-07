@@ -441,6 +441,7 @@ final class GeneralPane: Pane {
     private var replayPop: NSPopUpButton!
     private var occludedCheck: NSButton!
     private var lowPowerCheck: NSButton!
+    private var hdrCheck: NSButton!
     private var lockSyncCheck: NSButton!
 
     private var depthS: LabelledSlider!
@@ -570,6 +571,35 @@ final class GeneralPane: Pane {
                  + "single frame with no reload.")
         addCard(power)
 
+        // ---- HDR
+        //
+        // Kept honest rather than kept quiet. macOS does not hand extended
+        // dynamic range to a window below the normal window level, and the
+        // wallpaper sits at the desktop level, far below it — so on the desktop
+        // this setting is measured, found to be refused, and says so.
+        //
+        // The screen saver DOES run above the normal level (measured: level
+        // 1000 is granted the display's full headroom), so it is the one
+        // surface that could use this. It does not yet — Saver/ElementalSaver
+        // still builds its renderer and layer as bgra8Unorm/sRGB, and wiring it
+        // is the same three lines used in WallpaperSurface.
+        hdrCheck = check("Let the sun, the moon and lightning go brighter than white",
+                         #selector(hdrToggled))
+        let hdr = Card("Brightness beyond white", symbol: "sun.max.trianglebadge.exclamationmark")
+        hdr.add(hdrCheck)
+        hdr.note("Experimental. Renders the genuinely bright things — the sun's disc, lightning, the "
+               + "moon — into the display's HDR headroom instead of clipping them at white. It works "
+               + "the GPU noticeably harder and is not recommended for long stretches on battery.")
+        hdr.rule()
+        hdr.note("Honest caveat, and please read it before turning this on: macOS only grants HDR "
+               + "headroom to windows at or above the normal window level, and a wallpaper has to sit "
+               + "below the desktop icons to be a wallpaper at all. Measured on this Mac, the very "
+               + "same layer is given no headroom at the desktop level and the display's full "
+               + "headroom one level above it. So on the desktop this currently costs power and "
+               + "changes nothing you can see. Elemental asks anyway and reads back what it was "
+               + "actually granted, so if a future macOS allows it, it starts working by itself.")
+        addCard(hdr)
+
         // ---- lock
         lockSyncCheck = check("Show the scene on the lock screen", #selector(changed))
         let lock = Card("Lock screen", symbol: "lock.display")
@@ -588,6 +618,7 @@ final class GeneralPane: Pane {
             ? (Self.replayChoices.firstIndex { abs($0.1 - c.playbackMaxSeconds) < 0.001 } ?? 2) : 0)
         occludedCheck.state = c.renderWhenOccluded ? .on : .off
         lowPowerCheck.state = c.lowPowerOnBattery ? .on : .off
+        hdrCheck.state = c.hdr ? .on : .off
         lockSyncCheck.state = c.syncLockScreen ? .on : .off
         iconPicker.select(c.appIcon)
         depthS.value = c.reliefDepth
@@ -618,8 +649,41 @@ final class GeneralPane: Pane {
         }
     }
 
+    /// Turning HDR ON warns first; turning it off is free and silent.
+    @objc private func hdrToggled() {
+        if hdrCheck.state == .on {
+            let a = NSAlert()
+            a.alertStyle = .warning
+            a.messageText = "This will hammer the GPU."
+            a.informativeText =
+                "Drawing into HDR headroom means a 16-bit floating point surface, a wider colour "
+                + "space and an extra compositor pass, every frame, all day. Expect the GPU to work "
+                + "considerably harder and the machine to run warmer. Not recommended for prolonged "
+                + "use on battery.\n\n"
+                + "It is experimental and off by default for that reason.\n\n"
+                + "Note also that macOS refuses HDR headroom to the desktop wallpaper — it only "
+                + "grants it at or above the normal window level, and a wallpaper must sit below "
+                + "that. So on the desktop this setting will cost you the power and change nothing "
+                + "you can see. It is here so the engine is ready the day that changes."
+            a.addButton(withTitle: "Turn It On Anyway")
+            a.addButton(withTitle: "Cancel")
+            guard a.runModal() == .alertFirstButtonReturn else {
+                hdrCheck.state = .off
+                return
+            }
+            let after = NSAlert()
+            after.messageText = "Quit and reopen Elemental to apply."
+            after.informativeText =
+                "The render pipelines are compiled for one pixel format, so the change takes effect "
+                + "the next time Elemental starts."
+            after.runModal()
+        }
+        changed()
+    }
+
     @objc private func changed() {
         guard var c = owner?.config else { return }
+        c.hdr = hdrCheck.state == .on
         c.maxFPS = Self.fpsChoices[max(0, min(Self.fpsChoices.count - 1, fpsPop.indexOfSelectedItem))]
         c.motionSpeed = Self.speedChoices[max(0, min(Self.speedChoices.count - 1, speedPop.indexOfSelectedItem))].1
         let rp = Self.replayChoices[max(0, min(Self.replayChoices.count - 1, replayPop.indexOfSelectedItem))]

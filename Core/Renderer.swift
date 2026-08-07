@@ -214,6 +214,21 @@ final class ElementalRenderer {
     /// more slowly, which reads as calmer without costing any less to draw.
     var motionSpeed: Double = 1.0
 
+    /// Display headroom to render the emissive sources into: 1 is plain SDR and
+    /// anything above is how far past white this frame may go.
+    ///
+    /// Set by whoever owns the surface, from
+    /// `NSScreen.maximumExtendedDynamicRangeColorComponentValue`, EVERY FRAME —
+    /// it is not a property of the panel. It moves with the brightness slider,
+    /// with Low Power Mode and with thermal state, and it collapses to 1 the
+    /// moment the compositor stops granting EDR. Left at 1 the shader's EDR
+    /// path is inert and the render is bit-identical to the SDR one.
+    ///
+    /// Note that the WALLPAPER can never raise this above 1: macOS does not
+    /// grant EDR to windows below the normal window level. Measured, not
+    /// assumed — see `WallpaperSurface.refreshHeadroom`.
+    var edrHeadroom: Float = 1
+
     private(set) var pixelWidth: Int = 0
     private(set) var pixelHeight: Int = 0
     /// Grid pitch the current textures were built for. Tracked separately from
@@ -778,6 +793,10 @@ final class ElementalRenderer {
         // Fog is observed, not read off the WMO code: model visibility is a
         // grid-box average and fog is famously not.
         u.fogOn = w.isFoggy ? 1 : 0
+        // Headroom the display is granting this instant. Floored at 1 so the
+        // shader's EDR branch stays inert on SDR, and capped so a bogus reading
+        // cannot ask for an absurd exposure.
+        u.edrHead = max(1, min(16, edrHeadroom))
 
         uniformBuf.contents().copyMemory(from: &u, byteCount: MemoryLayout<Uniforms>.stride)
     }

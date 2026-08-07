@@ -330,6 +330,24 @@ inline float3 skyRGB(float sAlt, float yFrac, float dAzDeg,
     chroma = powr(max(chroma, 1e-4f), pureK);
     chroma /= max(dot(chroma, LUMW), 1e-6f);
 
+    // ---- no sky is GREEN.
+    //
+    // The exponent above is a purity restoration: it takes whatever direction
+    // the chroma already points and pushes it further. That is right when the
+    // chroma runs blue-to-warm, which is the only axis a sky actually lives on.
+    // But at a low sun there is a band, part way up, where the beam's reddening
+    // (which favours red) and the view path's accumulation (which favours blue)
+    // very nearly cancel — and what is left standing is GREEN, by a percent or
+    // two. The exponent then faithfully amplifies that into a khaki cast, which
+    // is what put an olive band across the sky at sunrise and sunset.
+    //
+    // Green may sit anywhere BETWEEN red and blue — that is an ordinary warm or
+    // cool sky — but it may never be the largest of the three, because no sky
+    // is green. Capping only the upper side leaves the magenta-leaning deep
+    // twilight, where green legitimately falls below both, completely alone.
+    chroma.g = min(chroma.g, max(chroma.r, chroma.b));
+    chroma /= max(dot(chroma, LUMW), 1e-6f);
+
     // ---- exposure
     //
     // Kept as it was. `skyBr` is the verified time-of-day ramp and the scene is
@@ -1629,6 +1647,16 @@ fragment CellOut cellPass(VOut in [[stage_in]],
 
     float R0 = L, G0 = L + 4.0f, B0 = L + 11.0f;
     if (w > 0.0f) { R0 += (cr - R0) * w; G0 += (cg - G0) * w; B0 += (cb - B0) * w; }
+    // How far the genuinely EMISSIVE sources pushed this cell past display
+    // white, measured before the clamp throws it away. Everything that has
+    // added to L above is either the sky (which lives well inside the range) or
+    // one of the four things that are actually brighter than white — the solar
+    // disc, the moon, a lightning flash and a shooting star. On an SDR display
+    // this excess is clipped, exactly as it always was; it is spent at the end
+    // of the pass, and only up to the headroom the display is granting this
+    // instant. See the return.
+    float overWhite = max(0.0f, max(R0, max(G0, B0)) - 255.0f);
+
     R0 = clamp(R0, 6.0f, 255.0f); G0 = clamp(G0, 8.0f, 255.0f); B0 = clamp(B0, 12.0f, 255.0f);
     float lum = (R0 + G0 + B0) * 0.333f;
 
@@ -1644,16 +1672,41 @@ fragment CellOut cellPass(VOut in [[stage_in]],
     float dAzSun    = cellRelAz - sunRelAz;
 
     // Aerosol optical depth from MEASURED visibility, via Koschmieder's law:
-    // V = 3.912 / sigma_ext, and a 1km aerosol scale height turns that surface
-    // extinction coefficient into a vertical optical depth. This replaces a
-    // hand-set haze constant with the number a station actually reports, and it
-    // is why a 2km-visibility monsoon morning comes out white rather than blue.
-    // Sanity: 45km visibility -> 0.087, 20km -> 0.20, 5km -> 0.78, all inside
-    // the range aerosol optical depth is actually measured over. Floored at a
-    // clean-air 0.02 and capped at 1.3, past which the sky is uniform white and
-    // more depth only removes what structure is left.
+    // V = 3.912 / sigma_ext gives the SURFACE extinction coefficient, per km.
+    //
+    // Two corrections turn that into a vertical optical depth, and without them
+    // this term was the single biggest reason a clear day rendered as a grey
+    // wall — a noon zenith came out (74,79,93), a blue-minus-red of 19, where
+    // it should be several times that.
+    //
+    // ---- 1. Aerosol does not fill the column.
+    //
+    // This used to divide by a 1 km scale height, i.e. charge the whole column
+    // the surface concentration. Aerosol lives in the boundary layer and the
+    // effective depth is nearer 0.6 km, so every reading was roughly double
+    // what it should have been.
+    //
+    // ---- 2. Reported visibility is CENSORED at the top of its range.
+    //
+    // This is the one that actually did the damage. A METAR reports visibility
+    // in statute miles and tops out at 10 — "10SM" means "ten or more", not
+    // "ten" (see Observation.swift, which converts it). Model visibility fields
+    // saturate a few tens of km up. So the clearest day of the year arrives
+    // here as 16 km and the old formula read that saturated sensor value as a
+    // measurement of haze, asserting a hazy sky whatever the air was actually
+    // doing. Above the reporting ceiling the number carries almost no aerosol
+    // information, so the derived load rolls off toward clean air instead of
+    // continuing to scale.
+    //
+    // Sanity, against the range aerosol optical depth is really measured over
+    // (clean continental 0.05, average clear 0.10-0.15, hazy 0.3-0.4, heavy
+    // smoke 0.6+):
+    //     45 km -> 0.023    24 km -> 0.044    16 km -> 0.10
+    //     10 km -> 0.22      5 km -> 0.47      2 km -> 1.17
     float visKm  = clamp(U.vis, 200.0f, 60000.0f) / 1000.0f;
-    float tauVis = clamp(3.912f / visKm, 0.02f, 1.3f);
+    float sigma  = 3.912f / visKm;                       // surface, per km
+    float censored = saturate((visKm - 8.0f) / 14.0f);   // into the "or more" range
+    float tauVis = clamp(sigma * 0.60f * mix(1.0f, 0.45f, censored), 0.015f, 1.3f);
     // Pollution and smoke add load of their own on top of what visibility sees.
     float tauA   = min(1.3f, tauVis + aqiF * 0.25f + smokeF * 0.9f);
 
@@ -1705,7 +1758,24 @@ fragment CellOut cellPass(VOut in [[stage_in]],
     }
     g = round(g / U.posterQ) * U.posterQ;
 
-    return CellOut{ float4(clamp(g / 255.0f, 0.0f, 1.0f), lum / 255.0f), seeThrough };
+    // ---- EDR. Give the clipped emissive excess back, up to the headroom the
+    // display is ACTUALLY offering right now (U.edrHead, read from NSScreen
+    // every frame — it moves with the brightness slider, Low Power Mode and
+    // thermal state, so it cannot be assumed).
+    //
+    // Strictly gated on edrHead > 1. At headroom 1.0 not one instruction here
+    // changes the result, so an SDR display — and the desktop wallpaper, which
+    // macOS never grants EDR to at all — renders bit-identically to before.
+    //
+    // `lum` is deliberately NOT lifted: it is the alpha channel, and both the
+    // height field and presentPass read it as a 0..1 tonal value. Relief and
+    // styling must not change just because the sun is allowed to be brighter.
+    float3 gOut = g;
+    if (U.edrHead > 1.0f) {
+        gOut += min(overWhite, 255.0f * (U.edrHead - 1.0f));
+    }
+    return CellOut{ float4(clamp(gOut / 255.0f, 0.0f, max(1.0f, U.edrHead)),
+                           lum / 255.0f), seeThrough };
 }
 
 // ================================================================ DETAIL

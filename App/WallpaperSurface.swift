@@ -33,6 +33,35 @@ final class WallpaperSurface: NSObject, CAMetalDisplayLinkDelegate {
     private var paused = true
     private var lastSize: CGSize = .zero
 
+    // MARK: - EDR
+    //
+    // Whether this surface was BUILT to carry values above white. Fixed at
+    // init, because the render pipelines are compiled against the pixel format.
+    let builtForHDR: Bool
+
+    /// The largest headroom the compositor has actually granted this surface
+    /// since launch. 1.0 means it has never granted any.
+    private(set) var edrObserved: Float = 1
+
+    /// Frames drawn since we started asking for EDR. Used only to decide when
+    /// "not yet" has become "never" — the compositor ramps headroom over about
+    /// a second, so a verdict before then would be wrong.
+    private var edrFrames = 0
+
+    /// What the toggle actually achieved, for Settings to report truthfully.
+    enum EDRStatus {
+        case off                 // the user has not asked for it
+        case granted(Float)      // the compositor is giving us this much
+        case refused             // asked, drew for seconds, never got any
+        case waiting             // asked, too early to say
+    }
+
+    var edrStatus: EDRStatus {
+        guard builtForHDR else { return .off }
+        if edrObserved > 1.001 { return .granted(edrObserved) }
+        return edrFrames > 180 ? .refused : .waiting
+    }
+
     /// The surfaces currently on screen, weakly, keyed by display.
     ///
     /// Exists for one caller: the furniture detector, which finds the dock and
@@ -57,14 +86,21 @@ final class WallpaperSurface: NSObject, CAMetalDisplayLinkDelegate {
     // MARK: - Init
 
     init?(screen: NSScreen, config: Config, device: MTLDevice) {
+        // Values above white only survive presentation on a float surface;
+        // bgra8Unorm clamps them at 1.0. The pipelines are built for whichever
+        // format is chosen here, so this is fixed for the life of the surface —
+        // turning the setting on or off takes effect at the next launch.
+        let wantsHDR = config.hdr
         guard let num = screen.deviceDescription[
                 NSDeviceDescriptionKey("NSScreenNumber")] as? NSNumber,
-              let r = ElementalRenderer(device: device, colorFormat: .bgra8Unorm)
+              let r = ElementalRenderer(device: device,
+                                        colorFormat: wantsHDR ? .rgba16Float : .bgra8Unorm)
         else { return nil }
 
         self.displayID = CGDirectDisplayID(num.uint32Value)
         self.renderer = r
         self.config = config
+        self.builtForHDR = wantsHDR
 
         // Borderless, non-interactive, and at the desktop window level — above
         // the system wallpaper, below the Finder's icon layer, so icons stay on
@@ -86,10 +122,26 @@ final class WallpaperSurface: NSObject, CAMetalDisplayLinkDelegate {
         let view = NSView(frame: screen.frame)
         view.wantsLayer = true
         metalLayer.device = device
-        metalLayer.pixelFormat = .bgra8Unorm
+        metalLayer.pixelFormat = wantsHDR ? .rgba16Float : .bgra8Unorm
         metalLayer.framebufferOnly = true
         metalLayer.isOpaque = true
-        metalLayer.colorspace = CGColorSpace(name: CGColorSpace.sRGB)
+        // The three things that together opt a layer into EDR: the flag, an
+        // extended-range colour space, and a float pixel format above.
+        //
+        // Asked for, and then MEASURED — see refreshHeadroom. On every macOS
+        // tested this request is refused at the desktop window level, so the
+        // measurement is the part that matters.
+        metalLayer.wantsExtendedDynamicRangeContent = wantsHDR
+        // extendedSRGB, NOT extendedLinearSRGB. The scene is authored and
+        // presented as sRGB-encoded values; the linear variant would have the
+        // compositor read those same numbers as linear light and the whole
+        // wallpaper would come out washed out and pale. Extended sRGB keeps the
+        // sRGB transfer function for 0..1 — so everything inside the existing
+        // range is presented exactly as it is today — and mirrors that curve
+        // beyond 1.0, which is the part EDR uses.
+        metalLayer.colorspace = CGColorSpace(name: wantsHDR
+                                             ? CGColorSpace.extendedSRGB
+                                             : CGColorSpace.sRGB)
         metalLayer.needsDisplayOnBoundsChange = true
         metalLayer.autoresizingMask = [.layerWidthSizable, .layerHeightSizable]
         view.layer = metalLayer
@@ -226,7 +278,51 @@ final class WallpaperSurface: NSObject, CAMetalDisplayLinkDelegate {
     // MARK: - Frame
 
     func metalDisplayLink(_ link: CAMetalDisplayLink, needsUpdate update: CAMetalDisplayLink.Update) {
+        refreshHeadroom()
         renderer.render(to: update.drawable.texture, presenting: update.drawable)
+    }
+
+    /// Read the headroom the display is granting RIGHT NOW and hand it to the
+    /// renderer, which passes it to the shader as `edrHead`.
+    ///
+    /// Every frame, not once: headroom is not a property of the panel. It moves
+    /// with the brightness slider, with Low Power Mode and with thermal state,
+    /// and the compositor withdraws it entirely when nothing on screen is using
+    /// EDR. A wallpaper that assumed the potential headroom would simply clip.
+    ///
+    /// ---- The honest part.
+    ///
+    /// This will not rise above 1.0 for a wallpaper, and that is not a bug in
+    /// this code. macOS grants EDR only to windows at or above the NORMAL
+    /// window level. Measured on an M1 Pro with 16.0 of potential headroom, one
+    /// CAMetalLayer with the EDR flag set and a constant 6.0 written into it:
+    ///
+    ///     level -2147483623 (desktop, where the wallpaper lives)  ->  1.2
+    ///     level -2147483603 (Finder's desktop icons)              ->  1.2
+    ///     level        -100                                       ->  1.2
+    ///     level          -1                                       ->  1.2
+    ///     level           0 (normal)                              -> 16.0
+    ///     level        1000 (screen saver)                        -> 14.7
+    ///
+    /// The cutoff is exactly at level 0, and a wallpaper has to be below the
+    /// icon layer to be a wallpaper at all. So the setting can do nothing here
+    /// and everything in the saver. We still ask, and still measure, rather
+    /// than hard-coding the refusal: if a future macOS starts granting it, this
+    /// picks it up on the next frame with no change to the code.
+    private func refreshHeadroom() {
+        guard builtForHDR else { renderer.edrHeadroom = 1; return }
+        edrFrames += 1
+        let h = Float(screenForDisplay()?
+            .maximumExtendedDynamicRangeColorComponentValue ?? 1)
+        renderer.edrHeadroom = max(1, h)
+        edrObserved = max(edrObserved, max(1, h))
+    }
+
+    private func screenForDisplay() -> NSScreen? {
+        NSScreen.screens.first {
+            ($0.deviceDescription[NSDeviceDescriptionKey("NSScreenNumber")]
+                as? NSNumber)?.uint32Value == displayID
+        }
     }
 
     /// Render a single frame on demand, ignoring the paused state. Used by the

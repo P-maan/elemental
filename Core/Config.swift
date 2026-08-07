@@ -211,6 +211,25 @@ struct Config: Codable, Equatable {
     /// 1.0 is real time; lower is calmer.
     var motionSpeed: Double = 1.0
 
+    /// EXPERIMENTAL. Let the sun's disc, the moon, lightning and glints on wet
+    /// glass go brighter than display white, into whatever headroom the panel
+    /// is offering at that moment.
+    ///
+    /// Off by default, and deliberately so: it costs a 16-bit float surface,
+    /// an extended colour space and a compositor path that all draw more power,
+    /// which is unkind to a battery and works the GPU harder for a wallpaper.
+    ///
+    /// Read the honest caveat before wiring anything else to this: macOS does
+    /// NOT grant EDR to a window below the normal window level, and the
+    /// wallpaper sits far below it, at the desktop level. Measured on an M1 Pro
+    /// with 16.0 of potential headroom — the identical Metal layer at desktop
+    /// level never rises above the 1.2 idle floor, and at normal level reaches
+    /// 16.0 within a second. So this setting can only ever do something in the
+    /// SCREEN SAVER, which runs above the normal level. The wallpaper honours
+    /// it by asking, measuring, and reporting that it was refused, rather than
+    /// by pretending. See `WallpaperSurface.refreshHeadroom`.
+    var hdr: Bool = false
+
     /// Desktop widget rectangles, as fractions of the screen. Water lands on
     /// these the way it lands on the dock. macOS will not tell us where widgets
     /// are, so they are configured rather than detected.
@@ -529,6 +548,7 @@ extension Config {
         reliefRise         = c.lenient(.reliefRise, d.reliefRise)
         maxFPS             = c.lenient(.maxFPS, d.maxFPS)
         motionSpeed        = c.lenient(.motionSpeed, d.motionSpeed)
+        hdr                = c.lenient(.hdr, d.hdr)
         widgets            = c.lenient(.widgets, d.widgets)
         dockRect           = try? c.decodeIfPresent(WidgetRect.self, forKey: .dockRect)
         wetDock            = c.lenient(.wetDock, d.wetDock)
