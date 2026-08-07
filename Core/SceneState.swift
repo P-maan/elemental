@@ -61,6 +61,16 @@ struct Uniforms {
     var pform: Float = 0
     /// `WeatherState.gloom`, 0..1. How much light the deck is taking out.
     var gloomF: Float = 0
+    // ---- the second block of four, taking the struct from 224 to 240 bytes.
+    /// `SurfaceWeather.dropDiameter`, mm. Inverted from the MEASURED fall speed,
+    /// so it is what decides whether a sunlit shower gives a vivid spectral bow
+    /// or a broad white fogbow.
+    var dropMM: Float = 0
+    /// Display headroom actually available right now: 1 means plain SDR, and
+    /// anything above is how far past white this frame may go. Read from
+    /// `NSScreen` every frame rather than assumed — see `WallpaperSurface`.
+    var edrHead: Float = 1
+    var pad0: Float = 0, pad1: Float = 0
 }
 
 struct GPUBreather { var ax, ay, R, per, s1, s2, ph, ph2: Float }

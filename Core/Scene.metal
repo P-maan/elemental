@@ -61,6 +61,16 @@ struct Uniforms {
     float pform;               // PrecipForm: 0 none 1 drizzle 2 rain 3 freezing
                                // 4 ice pellets 5 snow 6 snow grains 7 graupel 8 hail
     float gloomF;              // 0..1, light the deck is taking out
+    // ---- a second block of four, taking the struct from 224 to 240 bytes.
+    float dropMM;              // SurfaceWeather.dropDiameter, mm. Inverted from
+                               // the MEASURED fall speed, so it is what says
+                               // whether a sunlit shower gives a vivid spectral
+                               // bow or a broad white fogbow.
+    float edrHead;             // display headroom actually available right now.
+                               // 1 = plain SDR; above that is how far past white
+                               // this frame may go. Read from NSScreen every
+                               // frame, never assumed — see WallpaperSurface.
+    float pad0, pad1;
 };
 
 // Rain is rasterised at this multiple of the cell grid in each axis.
@@ -641,6 +651,221 @@ inline float2 astroXY(float alt, float az, float facing, float W, float H) {
     return float2((0.5f + relAz / 190.0f) * W, (1.0f - alt / 85.0f) * H);
 }
 
+// How much of the dome sits behind something you cannot see the sun through.
+//
+// Lives here rather than inline in cellPass because the rainbow needs the same
+// number in the presentation pass, and a duplicated copy of this weighting is
+// exactly the kind of law that drifts out of step and then disagrees with
+// itself across two passes.
+inline float deckOpaque(constant Uniforms &U) {
+    return 1.0f - (1.0f - U.cloudLow)
+                * (1.0f - U.cloudMid  * 0.80f)
+                * (1.0f - U.cloudHigh * 0.22f);
+}
+
+// ================================================================ RAINBOW
+//
+// Strictly geometric, so it is GATED rather than faked. Three conditions, and
+// not one of them is a preference:
+//
+//   SUNLIT RAIN     liquid drops falling AND the direct beam reaching them.
+//                   Broken cloud, in other words — an overcast has no beam and
+//                   a clear sky has no drops, so the bow lives in the narrow
+//                   band between the two where a shower is lit from the side.
+//   SUN BEHIND YOU  the figure is centred on the ANTISOLAR point, the direction
+//                   exactly opposite the sun, so it is in frame only when the
+//                   sun is at your back. Projected with astroXY like every
+//                   other body, which is what makes it track the heading.
+//   SUN BELOW 42    the primary arc sits 42 degrees from that centre, and the
+//                   centre is at altitude -sunAlt. Past a sun altitude of 42 the
+//                   whole ring is under the horizon. NOTHING enforces this: the
+//                   frame stops at alt 0 and a midday bow simply has no cells to
+//                   land on. It is why a rainbow is a morning and late-afternoon
+//                   thing and never a midday-in-June one.
+//
+// Radii are the measured Descartes angles for water spheres, per wavelength.
+// One internal reflection gives the primary at 40.5 (400nm) to 42.4 (700nm),
+// RED OUTSIDE. Two give the secondary at 50.4 (700nm) to 53.9 (400nm) — the
+// order back to front, and about a tenth of the light, because the second
+// reflection is lossy and the same flux is spread over a wider ring. Between
+// them lies Alexander's dark band: not a painted shadow but the range of
+// deviations no ray can leave a sphere at, so the sky there really is darker
+// than the sky on either side of it.
+
+// Wavelength (nm) to RGB — Bruton's piecewise fit, with the eye's roll-off at
+// both ends so 400nm reads as a dim violet rather than a bright one. Nothing
+// else in the scene is spectral; this exists only for the bow.
+inline float3 spectrumRGB(float nm) {
+    float3 c;
+    if      (nm < 440.0f) c = float3(-(nm - 440.0f) / 60.0f, 0.0f, 1.0f);
+    else if (nm < 490.0f) c = float3(0.0f, (nm - 440.0f) / 50.0f, 1.0f);
+    else if (nm < 510.0f) c = float3(0.0f, 1.0f, -(nm - 510.0f) / 20.0f);
+    else if (nm < 580.0f) c = float3((nm - 510.0f) / 70.0f, 1.0f, 0.0f);
+    else if (nm < 645.0f) c = float3(1.0f, -(nm - 645.0f) / 65.0f, 0.0f);
+    else                  c = float3(1.0f, 0.0f, 0.0f);
+    float f = 1.0f;
+    if      (nm < 420.0f) f = 0.30f + 0.70f * (nm - 380.0f) / 40.0f;
+    else if (nm > 700.0f) f = 0.30f + 0.70f * (780.0f - nm) / 80.0f;
+    return saturate(c) * clamp(f, 0.0f, 1.0f);
+}
+
+// Angular distance from the ANTISOLAR point to the sky direction one screen
+// point looks at.
+//
+// astroXY is an equirectangular map — 190 degrees of azimuth across the width,
+// 85 of altitude down the height — so screen distance is NOT angle, and
+// measuring the ring there would squash it into an ellipse a third too flat.
+// So: astroXY places the centre, because that is what carries the heading, and
+// the separation itself comes from the spherical law of cosines on the two
+// coordinates read back out. The azimuth difference needs no wrapping, cosine
+// being periodic in it.
+inline float bowTheta(float2 p, constant Uniforms &U) {
+    const float DEG = M_PI_F / 180.0f;
+    float2 antiP = astroXY(-U.sunAlt, U.sunAz + 180.0f, U.facingAz, U.pixW, U.pixH);
+    float dAz  = (p.x - antiP.x) / max(U.pixW, 1.0f) * 190.0f;
+    float cAlt = (1.0f - p.y / max(U.pixH, 1.0f)) * 85.0f;
+    float ca = cos(cAlt * DEG), sa = sin(cAlt * DEG);
+    float cb = cos(-U.sunAlt * DEG), sb = sin(-U.sunAlt * DEG);
+    return acos(clamp(sa * sb + ca * cb * cos(dAz * DEG), -1.0f, 1.0f)) / DEG;
+}
+
+/// Half the angular footprint of one cell at this altitude, in degrees. The
+/// azimuth pitch narrows toward the zenith on a sphere even though the
+/// projection's does not, hence the cosine.
+inline float bowFootprint(float2 p, constant Uniforms &U, float pitchScale) {
+    float cAlt = (1.0f - p.y / max(U.pixH, 1.0f)) * 85.0f;
+    float ca = cos(cAlt * (M_PI_F / 180.0f));
+    return 0.25f * pitchScale * (190.0f / max(U.cols, 1.0f) * max(ca, 0.30f)
+                               + 85.0f / max(U.rows, 1.0f));
+}
+
+// How much of one CELL's angular footprint falls inside an annulus.
+//
+// This is most of what drawing a rainbow into a mosaic actually is. The primary
+// bow is a couple of degrees wide; a cell at production density spans nearly
+// three, so the bow is THINNER THAN THE SAMPLING GRID, and point-testing the
+// cell centre against it gives a dashed line of whichever cells happened to
+// land on the band — confetti, not an arc. So the cell is integrated over
+// instead: it takes the band in proportion to how much of it the band really
+// covers. Raise the grid density, or split the cell in the detail pass, and it
+// sharpens on its own.
+inline float bandCover(float theta, float halfW, float lo, float hi) {
+    float a = max(lo, theta - halfW), b = min(hi, theta + halfW);
+    return max(0.0f, b - a) / max(2.0f * halfW, 1e-3f);
+}
+
+/// Is what is falling LIQUID? Ice has no Descartes angle in the visible — a
+/// sunlit snow shower gives haloes around the SUN, which is a different
+/// phenomenon in the opposite half of the sky. Forms 1/2/3 are drizzle, rain
+/// and freezing rain; 4 and up are all frozen.
+inline bool bowLiquid(constant Uniforms &U) {
+    return U.pform > 0.5f && U.pform < 3.5f;
+}
+
+/// Drop size decides which KIND of bow. `dropMM` is inverted from the measured
+/// fall speed, so this follows the observation rather than the label on the hour.
+inline float bowVivid(constant Uniforms &U) {
+    return saturate((U.dropMM - 0.30f) / 1.20f);
+}
+
+/// How sunlit the rain is, and how much of that reaches the eye.
+///
+/// The beam is the whole gate: `deckF` is how much of the dome sits behind
+/// something you cannot see the sun through, so what is left is the chance the
+/// beam is coming through a gap. Zero under a closed overcast — which is the
+/// "raining hard, no bow" case anyone has watched out of a window — and one in
+/// a clear-sky sunshower. Broken cloud is plenty, hence the low knee.
+inline float bowLit(constant Uniforms &U, float deckF, float sunDim, float seeThrough) {
+    float beam = smoothstep(0.02f, 0.45f, 1.0f - deckF)
+               * sunDim * saturate(U.sunAlt / 2.0f);
+    // Already past the liquid gate, so it IS raining: `pform` only leaves
+    // .none once 0.05mm is actually falling. The floor covers showers, which
+    // the model files under a different field than `rain`.
+    float rainF = clamp(U.rain / 1.2f, 0.35f, 1.0f);
+    return beam * rainF * seeThrough;
+}
+
+/// What the bow does to one cell: a colour to blend toward, how strongly, how
+/// much light it adds, and what it does to the sky behind it.
+struct Bow {
+    float3 col;
+    float  amt;    // blend weight, 0..1
+    float  lum;    // luminance added, in the pass's 0..255 units
+    float  gain;   // multiplier on the sky behind — above 1 inside the primary,
+                   // below 1 through Alexander's band
+};
+
+/// theta   angular distance from the antisolar point, degrees
+/// halfW   half the angular footprint being integrated over
+/// vivid   0 drizzle .. 1 large drops
+/// lit     how sunlit the rain is, and how much of it reaches the eye
+inline Bow bowAt(float theta, float halfW, float vivid, float lit) {
+    Bow b; b.col = float3(1.0f); b.amt = 0.0f; b.lum = 0.0f; b.gain = 1.0f;
+
+    // Large drops refract cleanly and land on the textbook radii. Below about
+    // half a millimetre diffraction across the drop is comparable to the
+    // deviation itself, the orders smear together, and what is left is a
+    // fogbow: broader, sitting inward of 42, and white.
+    float p0 = mix(34.5f, 40.2f, vivid), p1 = mix(42.0f, 42.4f, vivid);
+    float s0 = mix(47.5f, 50.4f, vivid), s1 = mix(56.0f, 53.9f, vivid);
+
+    // Alexander's band, and the brighter disc inside the primary. Both are real
+    // and both are relative to the surrounding sky, so they are a MULTIPLIER:
+    // that way the band is darker than its surroundings at any exposure and
+    // cannot bottom a dim sky out.
+    b.gain = 1.0f + saturate((p0 - theta) / 7.0f) * lit * 0.11f
+                  - bandCover(theta, halfW, p1, s0) * lit * 0.26f;
+
+    // A fogbow is not merely a colourless rainbow, it is a FAINTER one: the
+    // diffraction that smears the orders together also spreads the same flux
+    // over three times the angular width, so what any one direction returns is
+    // well down on a large-drop bow.
+    lit *= 0.45f + 0.55f * vivid;
+
+    // Chroma is deliberately short of the full spectrum. A rainbow is a pale
+    // thing — a few per cent of contrast against a bright sky — and the weather
+    // tint downstream multiplies whatever saturation arrives here by up to 0.97,
+    // so a fully saturated band comes out of the far end as pure primaries laid
+    // in squares. Pastel in, correct out.
+    float chroma = 0.58f * (0.14f + 0.86f * vivid);
+
+    float pCov = bandCover(theta, halfW, p0, p1);
+    if (pCov > 0.004f) {
+        // The hue at the MIDPOINT of the overlap, not at the cell centre
+        // clamped into the band. Clamping snaps every cell that straddles an
+        // edge to pure violet or pure red, so neighbouring cells along the arc
+        // flip between the two ends of the spectrum and the band reads as noise.
+        // The midpoint moves smoothly and monotonically with theta, which is
+        // what puts violet on the inside, green in the middle and red on the
+        // outside in that order.
+        float mid = 0.5f * (max(p0, theta - halfW) + min(p1, theta + halfW));
+        float t   = saturate((mid - p0) / max(p1 - p0, 1e-3f));
+        b.col = mix(float3(1.0f), spectrumRGB(mix(400.0f, 700.0f, t)), chroma);
+        b.amt = min(0.72f, pCov * lit * 1.30f);
+        b.lum = pCov * lit * 74.0f;
+    }
+
+    // Secondary: the same figure with one more internal reflection, so the
+    // order is REVERSED — red on the inside now — and it is roughly a tenth as
+    // bright. Scaled by vivid as well, because a fogbow has barely any.
+    float sCov = bandCover(theta, halfW, s0, s1) * (0.18f + 0.82f * vivid);
+    if (sCov > 0.004f) {
+        float mid = 0.5f * (max(s0, theta - halfW) + min(s1, theta + halfW));
+        float t   = saturate((mid - s0) / max(s1 - s0, 1e-3f));
+        float3 sc = mix(float3(1.0f), spectrumRGB(mix(700.0f, 400.0f, t)), chroma * 0.8f);
+        float a   = min(0.20f, sCov * lit * 0.26f);
+        // Laid over whatever the primary left, so the two never fight for one
+        // winning weight. They do not overlap in theta, so in practice only one
+        // of them is ever non-zero.
+        b.col = mix(b.col, sc, a / max(a + b.amt, 1e-3f));
+        b.amt = b.amt + (1.0f - b.amt) * a;
+        // A twelfth of the primary's, which is the order the second reflection
+        // and the wider ring between them leave.
+        b.lum += sCov * lit * 6.0f;
+    }
+    return b;
+}
+
 // Stars are projected here rather than on the CPU, because with a moving
 // heading the view can swing at any time and reprojecting the catalog per frame
 // on the CPU would be both wasteful and a frame behind. Returns false when the
@@ -720,9 +945,7 @@ fragment CellOut cellPass(VOut in [[stage_in]],
     // ceiling, altostratus is a translucent sheet, cirrus is a veil you read the
     // sun straight through — so they are weighted by what they actually block,
     // and they overlap multiplicatively rather than summing past one.
-    float deckF = 1.0f - (1.0f - U.cloudLow)
-                       * (1.0f - U.cloudMid  * 0.80f)
-                       * (1.0f - U.cloudHigh * 0.22f);
+    float deckF = deckOpaque(U);
     float humidF   = saturate((U.humid - 50.0f) / 50.0f);
     float aqiF     = U.aqiF, smokeF = U.smokeF;
     float skyBrAmt = U.skyBrAmt;
@@ -1140,6 +1363,35 @@ fragment CellOut cellPass(VOut in [[stage_in]],
                 // between an object sitting IN the sky and one pasted ON it.
                 float ring = max(0.0f, 1.0f - abs(t - 0.72f) / 0.28f);
                 L -= ring * ring * 9.0f * lit * seeThrough;
+            }
+        }
+    }
+
+    // ---- rainbow. The physics is in the block above spectrumRGB.
+    //
+    // Drawn HERE, after the bodies and before the cloud, because that is where
+    // it is: the bow is painted on the rain curtain, which is nearer than the
+    // sun that lights it and further than any cloud drifting across the front
+    // of it. The layers below composite OVER it, so a deck hides it exactly as
+    // it hides the moon, and `seeThrough` dims whatever is left.
+    //
+    // The whole figure is drawn in this pass, at cell resolution, so it is made
+    // of the same quantised blocks as everything else and its height goes into
+    // the relief field like any other bright feature. presentPass only refines
+    // the hue INSIDE the cells this pass has already claimed.
+    if (bowLiquid(U) && sAlt > 0.0f) {
+        float lit   = bowLit(U, deckF, sunDim, seeThrough);
+        float vivid = bowVivid(U);
+        if (lit > 0.01f) {
+            float2 cp = float2(cxp, cyp);
+            Bow b = bowAt(bowTheta(cp, U), bowFootprint(cp, U, 1.0f), vivid, lit);
+            L *= b.gain;
+            if (b.amt > 0.004f) {
+                L  += b.lum;
+                cr += (b.col.r * 255.0f - cr) * b.amt;
+                cg += (b.col.g * 255.0f - cg) * b.amt;
+                cb += (b.col.b * 255.0f - cb) * b.amt;
+                w = w + (1.0f - w) * b.amt;
             }
         }
     }
@@ -2143,6 +2395,63 @@ fragment float4 presentPass(VOut in [[stage_in]],
                         col *= ratio;
                         lum *= ratio;
                     }
+                    phase = cellPhase(uint(dc.id.y * U.cols * float(depth) + dc.id.x));
+                }
+            }
+        }
+
+        // ---- The rainbow.
+        //
+        // Third use of the same primitive, and the bow needs it more than either
+        // of the others. The primary spans about two degrees from violet to red
+        // and a cell at production density spans nearly three, so at cell
+        // resolution the ENTIRE spectrum fits inside one block: the coarse pass
+        // integrates it and correctly hands back the average, which is a green
+        // line. The colour order — the thing that makes it a rainbow rather than
+        // a stripe — only exists below the cell.
+        //
+        // So the coarse pass owns WHICH cells are bow and how bright they are,
+        // exactly as it owns the moon's limb, and this owns the hue inside them.
+        // The sub-cell's own chroma is substituted at the cell's OWN luminance,
+        // so a split cell averages back to the unsplit one and leaves no seam
+        // against a neighbour that did not split.
+        //
+        // One lattice for the whole arc: depth is read from the scene-level lit
+        // factor, not the per-cell one, because reading it per cell puts 4x4
+        // blocks where the cloud happens to be thin and 2x2 beside them, and a
+        // patchwork of pitches is the exact noise this pass exists to avoid.
+        if (bowLiquid(U) && U.sunAlt > 0.0f) {
+            float deckF = deckOpaque(U);
+            float sunDim = 1.0f - U.covF * 0.25f;
+            float vis = saturate(cellAux.sample(nearestS, cid + 0.5f).r);
+            float litCell  = bowLit(U, deckF, sunDim, vis);
+            float litScene = bowLit(U, deckF, sunDim, 1.0f);
+            float2 ccen = (cid + 0.5f) * SPv;
+            Bow bc = bowAt(bowTheta(ccen, U), bowFootprint(ccen, U, 1.0f),
+                           bowVivid(U), litCell);
+            if (bc.amt > 0.015f) {
+                // 8 px for the same reason the moon uses 8: below that a
+                // sub-cell is more glass rim than face and the arc turns into
+                // graph paper.
+                int affordable = min(4, int(floor(SP / 8.0f)));
+                int depth = int(round(mix(1.0f, float(max(affordable, 1)),
+                                          smoothstep(0.06f, 0.32f, litScene))));
+                depth = clamp(depth, 1, 4);
+                if (depth > 1) {
+                    dc = splitCell(px, SPv, depth);
+                    float2 scen = (dc.id + 0.5f) * dc.sizev;
+                    Bow bf = bowAt(bowTheta(scen, U),
+                                   bowFootprint(scen, U, 1.0f / float(depth)),
+                                   bowVivid(U), litCell);
+                    // Swap the chroma, keep the value. A sub-cell the finer
+                    // band misses tends toward white here, which desaturates it
+                    // back toward the sky it should have been — the coarse cell
+                    // only carried a tint because PART of it was bow.
+                    const float3 LW = float3(0.2126f, 0.7152f, 0.0722f);
+                    float3 tint = mix(float3(1.0f), bf.col, saturate(bf.amt * 1.7f));
+                    float3 want = tint * (dot(col, LW) / max(dot(tint, LW), 1e-3f));
+                    col = mix(col, saturate(want),
+                              0.85f * smoothstep(0.015f, 0.10f, bc.amt));
                     phase = cellPhase(uint(dc.id.y * U.cols * float(depth) + dc.id.x));
                 }
             }

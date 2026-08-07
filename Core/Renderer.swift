@@ -770,6 +770,11 @@ final class ElementalRenderer {
         // was tuned in; this is the unclamped signal, used only for bounded
         // shading under the deck.
         u.gloomF = max(0, min(1, w.gloom))
+        // Median drop diameter, mm, from the measured fall speed. The rainbow is
+        // the only thing that reads it: big drops give a saturated spectrum,
+        // drizzle gives a broad white fogbow, and the difference between those
+        // two is a measurement rather than a style.
+        u.dropMM = max(0, min(8, sim.surfaceWeather.dropDiameter))
         // Fog is observed, not read off the WMO code: model visibility is a
         // grid-box average and fog is famously not.
         u.fogOn = w.isFoggy ? 1 : 0
