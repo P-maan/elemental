@@ -93,7 +93,16 @@ final class ElementalRenderer {
                 // So a write is a reading only when it matches neither what we
                 // are showing nor what we are already heading for.
                 if incoming != easer.target && incoming != easer.shown {
-                    easer.retarget(incoming)
+                    // A move to a different place adopts its sky outright — see
+                    // `locationChanged()`. The flag is consumed here rather than
+                    // at the move itself because this is the first moment the
+                    // NEW place's weather actually exists.
+                    if snapNextReading {
+                        snapNextReading = false
+                        easer.snap(to: incoming)
+                    } else {
+                        easer.retarget(incoming)
+                    }
                 }
                 _state.weather = easer.shown
             } else {
@@ -467,7 +476,31 @@ final class ElementalRenderer {
 
     /// The scene is now somewhere else. Drops anything still falling from the
     /// old sky, and leaves the water already on the glass alone.
-    func locationChanged() { sim.locationChanged(now: Float(sceneTime)) }
+    /// The scene is now drawing somewhere else.
+    ///
+    /// Clears the falling rain — that water belonged to the sky we just left —
+    /// and, critically, ARMS THE EASER TO SNAP rather than ease.
+    ///
+    /// Easing exists for weather EVOLVING IN ONE PLACE: cloud thickening over
+    /// half an hour, rain ramping in over minutes. A different city is not an
+    /// evolution of the old one, it is a different sky, and easing between them
+    /// means the old city's weather stays on screen while it crawls toward the
+    /// new reading — precipitation over 45 to 300 seconds, cloud over 7 to 45
+    /// minutes. Switch from a wet city to a dry one and it keeps raining for
+    /// minutes, which reads as "location switching is broken" and is exactly
+    /// what it looked like.
+    ///
+    /// A flag rather than a snap here, because the new reading has not arrived
+    /// yet: the fetch is still in flight. Snapping now would only re-adopt the
+    /// weather we are trying to leave. The next genuinely new reading takes
+    /// effect immediately, and easing resumes after it.
+    func locationChanged() {
+        sim.locationChanged(now: Float(sceneTime))
+        snapNextReading = true
+    }
+
+    /// Set by `locationChanged()`, consumed by the next reading. See above.
+    private var snapNextReading = false
 
     var debugCounts: String { sim.debugCounts }
 
