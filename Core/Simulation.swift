@@ -721,6 +721,45 @@ final class SceneSimulation {
             }
             precipField[c] = max(0, min(1, v))
         }
+
+        // ---- What the radar actually sees, over the top of what we invented.
+        //
+        // Everything above is a plausible distribution: patchiness and
+        // bandedness shaped into showers and gaps that are statistically right
+        // for the weather type and spatially arbitrary. It has to be, because
+        // nothing else in this project knows where the rain IS — a model gives
+        // a rate for a grid box tens of kilometres wide and a METAR gives one
+        // aerodrome.
+        //
+        // Radar knows. The profile is echo across roughly 900 km centred on the
+        // user, so resampling it onto the frame's columns puts the shower that
+        // is off to the west off to the west, and makes the gap between two
+        // cells a real gap. This is the difference between a sky that is
+        // statistically like the one outside and the one that is outside.
+        //
+        // BLENDED, not substituted, and for two honest reasons. The radar window
+        // is far wider than the strip of sky a window actually shows, so using it
+        // raw would compress a whole frontal system into the frame; and radar has
+        // speckle and beam artefacts that the procedural field does not. So it
+        // biases where the rain falls rather than dictating it, and with no radar
+        // at all the field is exactly what it was.
+        let prof = w.radarProfile
+        guard prof.count >= 4 else { return }
+        for c in 0..<cols {
+            // Centre of the frame maps to the centre of the radar window, and
+            // the frame spans a modest slice of it — a window looks at a piece
+            // of sky, not at a synoptic chart.
+            let t = (Float(c) / Float(max(1, cols - 1)) - 0.5) * 0.42 + 0.5
+            let fi = t * Float(prof.count - 1)
+            let i0 = max(0, min(prof.count - 1, Int(fi)))
+            let i1 = min(prof.count - 1, i0 + 1)
+            let f = fi - Float(i0)
+            let echo = prof[i0] * (1 - f) + prof[i1] * f
+            // Echo is thin in absolute terms even in steady rain, so it is
+            // taken as a PRESENCE curve rather than an amplitude.
+            let here = min(1, echo / 0.22)
+            precipField[c] = max(0, min(1, precipField[c] * (0.35 + 0.65 * here)))
+        }
     }
 
     private func updateStreaks(dt: Float, kind: SceneKind,

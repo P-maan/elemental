@@ -116,6 +116,7 @@ final class WeatherService {
         if let r = await echo {
             w.radarEcho = r.here
             w.radarCoverage = r.coverage
+            w.radarProfile = r.profile
             NSLog("Elemental: %@", SkyImagery.describe(r))
         } else {
             _ = await echo

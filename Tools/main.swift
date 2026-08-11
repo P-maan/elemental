@@ -425,6 +425,23 @@ wx.cloudLow  = Float(num("low",  Double(wx.cover)))
 wx.cloudMid  = Float(num("mid",  0))
 wx.cloudHigh = Float(num("high", 0))
 wx.aqi = Float(num("aqi", 30))
+// --useradar: fetch the real radar composite for this coordinate and let it
+// place the precipitation, so the whole pipeline — tiles, profile, precipField
+// — can be exercised offscreen instead of only in the running app.
+if args["useradar"] != nil {
+    let sem = DispatchSemaphore(value: 0)
+    var got: RadarLook?
+    Task { got = await SkyImagery.radar(lat: lat, lon: lon); sem.signal() }
+    _ = sem.wait(timeout: .now() + 60)
+    if let r = got {
+        wx.radarEcho = r.here
+        wx.radarCoverage = r.coverage
+        wx.radarProfile = r.profile
+        print("  " + SkyImagery.describe(r))
+    } else {
+        print("  radar unavailable — field stays procedural")
+    }
+}
 wx.smoke = Float(num("smoke", 0))
 // ---- the inputs the presentation layer actually keys off.
 //

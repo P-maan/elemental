@@ -492,6 +492,15 @@ struct WeatherState: Equatable, Codable {
     /// because a wallpaper that rains when the forecast merely thought it might
     /// is wrong in the most visible way available.
     var radarEcho: Float = -1
+    /// Where the echo actually is, west to east across the sampled window,
+    /// normalised 0..1. Empty when radar is unavailable.
+    ///
+    /// This is the half of radar that the point measurement can never give: not
+    /// how much rain there is, but WHERE. It is resampled onto the frame's
+    /// columns so a shower off to the west is drawn off to the west and the gap
+    /// between two cells is a real gap rather than a plausible one.
+    var radarProfile: [Float] = []
+
     /// Fraction of the surrounding ~900 km carrying echo, 0..1. -1 unmeasured.
     var radarCoverage: Float = -1
 
