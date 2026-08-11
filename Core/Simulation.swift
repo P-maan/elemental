@@ -2733,8 +2733,13 @@ final class SceneSimulation {
             // untouched, so the confetti that the material approach was written
             // to remove cannot come back.
             if d.splashLife > 0 {
+                // Kind 20: spray, which the presentation pass refines further
+                // than anything else and gives relief of its own. A splash is
+                // the one water element small enough that the coarse grid
+                // destroys it outright, and the engine already has the mechanism
+                // for exactly that — see the DETAIL note in Scene.metal.
                 stamp(x: d.x, y: d.y, r: max(d.r * 1.15, SP * 0.85),
-                      kind: 1,
+                      kind: 20,
                       strength: min(1, 0.55 + 0.45 * intensity),
                       bead: true)
                 continue

@@ -2875,6 +2875,50 @@ fragment float4 presentPass(VOut in [[stage_in]],
                     }
                     lum = saturate(lum * (1.0f - k * 0.20f) + k * 0.12f);
 
+                } else if (kind == 20) {
+                    // Spray thrown off a lip — the one water element the coarse
+                    // grid destroys outright.
+                    //
+                    // Everything else on the pane is a FIELD: a film, a track, a
+                    // pool, all of them larger than a cell and correctly drawn by
+                    // modulating the cell's material. A splash droplet is smaller
+                    // than a cell and lasts under a second, so stamping it as a
+                    // wetter cell renders a fleck of damp mosaic and not a drop
+                    // of water. This is precisely what the DETAIL mechanism is
+                    // for, and it is refined harder than the moon: a droplet is
+                    // maximum contrast against whatever it is flying over.
+                    //
+                    // The refinement is nested — the sub-cell is then shaded as
+                    // a sphere from `gcell.zw`, which records where this cell
+                    // sits inside the drop — so the shell of sub-cells around
+                    // the droplet's rim gets its own curvature rather than the
+                    // whole thing reading as one flat bright square.
+                    int sdepth = detailDepth(1.0f, 0.05f, SP, 3.0f, 5);
+                    if (sdepth > 1) {
+                        dc = splitCell(px, SPv, sdepth);
+                        phase = cellPhase(uint(dc.id.y * U.cols * float(sdepth) + dc.id.x));
+                    }
+                    float2 rel = gcell.zw;
+                    float  q   = min(length(rel) * 1.20f, 1.0f);
+                    // Water is a lens: it takes what is behind it, inverted
+                    // through its own curvature, and adds a specular cap.
+                    float2 src = clamp(cid - rel * (q * q * 3.1f), float2(0.0f),
+                                       float2(U.cols - 1.0f, U.rows - 1.0f));
+                    float3 thru = cells.sample(nearestS, src + 0.5f).rgb;
+                    col = mix(col, mix(col * 0.62f, thru, 0.55f), k);
+                    col = mix(col, lumv + (col - lumv) * 1.70f, k * 0.85f);
+                    float spec = saturate(1.0f - length(rel - float2(-0.28f, -0.34f)) / 0.40f);
+                    col += spec * spec * 0.42f * k;
+                    // Rim darkening, so the droplet has an edge and reads round.
+                    col *= 1.0f - saturate((q - 0.55f) / 0.45f) * 0.30f * k;
+                    // DEPTH. `lum` is the alpha the height pass reads, so
+                    // lifting it here is what makes each sub-cell of the droplet
+                    // stand out of the wall as its own small shell rather than
+                    // being a bright patch painted on a flat one. Highest at the
+                    // droplet's centre and falling to its rim, which is the
+                    // shape of the drop.
+                    lum = saturate(lum + k * (0.42f * (1.0f - q * q) + 0.10f));
+
                 } else if (kind == 8) {
                     // Clear ice. A glaze is the one deposit that BRIGHTENS what
                     // it covers: it is transparent, so the surface shows
