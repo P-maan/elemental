@@ -57,6 +57,31 @@ func int(_ k: String, _ d: Int) -> Int { args[k].flatMap(Int.init) ?? d }
 //
 //   elemental-render --check --lat 28.4453 --lon 77.5148
 //
+// ---------------------------------------------------------------- --saverhealth
+//
+// Why the screen saver is wrong, named specifically.
+//
+// Every failure the saver has had looks identical from the user's chair — "the
+// saver is wrong" — and the causes are not remotely the same: a stale bundle
+// after a rebuild, settings that never arrived, weather published for a
+// different place, a reading hours old. This separates them.
+if args["saverhealth"] != nil {
+    let cfg = Config.load()
+    let appURL = Bundle.main.bundleURL
+    let built = (try? appURL.resourceValues(forKeys: [.contentModificationDateKey]))?
+        .contentModificationDate
+    let h = SaverHealth.check(config: cfg, appBuildDate: built)
+    print("saver health for \(cfg.scenePlace.name)")
+    if h.isHealthy {
+        print("  OK — installed, settings delivered, weather present and current")
+    } else {
+        for f in h.findings {
+            print("  \(f.isRepairable ? "[repairable]" : "[needs you]  ") \(f.summary)")
+        }
+    }
+    exit(0)
+}
+
 // ---------------------------------------------------------------- --edr
 //
 // What headroom this machine's displays actually offer.

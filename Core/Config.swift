@@ -632,6 +632,20 @@ enum SaverWeather {
                                  kCFPreferencesCurrentUser, kCFPreferencesCurrentHost)
     }
 
+    /// The raw published payload, for the health check. Nil if nothing is there.
+    static func published() -> (weather: WeatherState, lat: Double, lon: Double,
+                                at: Double, place: String?)? {
+        CFPreferencesSynchronize(Config.saverDomain as CFString,
+                                 kCFPreferencesCurrentUser, kCFPreferencesCurrentHost)
+        guard let json = CFPreferencesCopyValue(Config.saverWeatherKey as CFString,
+                                                Config.saverDomain as CFString,
+                                                kCFPreferencesCurrentUser,
+                                                kCFPreferencesCurrentHost) as? String,
+              let data = json.data(using: .utf8),
+              let p = try? JSONDecoder().decode(Payload.self, from: data) else { return nil }
+        return (p.weather, p.lat, p.lon, p.at, p.place)
+    }
+
     /// Read by the saver, for the place it is actually drawing.
     ///
     /// `maxAge` is deliberately generous. A reading three hours old is a far
@@ -662,5 +676,133 @@ enum SaverWeather {
         if let a = p.place, let b = place, a == b { return p.weather }
         guard abs(p.lat - lat) < 0.35, abs(p.lon - lon) < 0.35 else { return nil }
         return p.weather
+    }
+}
+
+// MARK: - Is the screen saver actually working?
+
+/// A diagnosis of the saver, from the desktop side.
+///
+/// The saver is the hardest surface to reason about from here: it runs in
+/// another process, inside a sandbox, only while the screen is locked or idle,
+/// and it cannot write anywhere the app can read. Every failure it has had this
+/// far — a stale bundle after a rebuild, config that never arrived, weather that
+/// arrived for the wrong place, a reading three hours old — looks identical from
+/// the user's chair, which is "the saver is wrong". So each is checked
+/// separately and named separately, because the fixes are not the same.
+///
+/// Deliberately read-only. Repair is a user action, never a side effect of
+/// looking: installing into ~/Library/Screen Savers is exactly the kind of
+/// thing that should not happen because someone opened a settings pane.
+struct SaverHealth {
+
+    enum Finding: Equatable {
+        case notInstalled
+        case bundleStale(installed: Date, current: Date)
+        case configMissing
+        case configStale(age: TimeInterval)
+        case weatherMissing
+        case weatherStale(age: TimeInterval)
+        case weatherWrongPlace(published: String?, expected: String)
+
+        /// What the user should be told, in one line.
+        var summary: String {
+            switch self {
+            case .notInstalled:
+                return "Elemental.saver is not installed in ~/Library/Screen Savers."
+            case .bundleStale:
+                return "The installed screen saver is older than this app — reinstall it."
+            case .configMissing:
+                return "The screen saver has never received your settings."
+            case .configStale(let age):
+                return String(format: "The screen saver's settings are %.0f minutes old.", age / 60)
+            case .weatherMissing:
+                return "The screen saver has no weather from the desktop; it will fetch its own."
+            case .weatherStale(let age):
+                return String(format: "The weather handed to the screen saver is %.0f minutes old.", age / 60)
+            case .weatherWrongPlace(let p, let e):
+                return "The screen saver's weather is for \(p ?? "an unknown place"), not \(e)."
+            }
+        }
+
+        /// Whether the app can put this right on its own.
+        var isRepairable: Bool {
+            switch self {
+            case .configMissing, .configStale, .weatherMissing, .weatherStale, .weatherWrongPlace:
+                return true
+            case .notInstalled, .bundleStale:
+                return false            // needs a file written to ~/Library — ask first
+            }
+        }
+    }
+
+    var findings: [Finding] = []
+    var isHealthy: Bool { findings.isEmpty }
+
+    /// Where a saver bundle would be installed.
+    static var installedSaverURL: URL {
+        FileManager.default.urls(for: .libraryDirectory, in: .userDomainMask)[0]
+            .appendingPathComponent("Screen Savers/Elemental.saver", isDirectory: true)
+    }
+
+    /// Look, and report. Never writes.
+    static func check(config: Config, appBuildDate: Date? = nil) -> SaverHealth {
+        var h = SaverHealth()
+        let fm = FileManager.default
+        let saverURL = installedSaverURL
+
+        if !fm.fileExists(atPath: saverURL.path) {
+            h.findings.append(.notInstalled)
+        } else if let appDate = appBuildDate,
+                  let inst = (try? saverURL.resourceValues(forKeys: [.contentModificationDateKey]))?
+                      .contentModificationDate,
+                  // A minute of slack: the two are copied moments apart by the
+                  // same build, and a sub-minute difference is not staleness.
+                  inst < appDate.addingTimeInterval(-60) {
+            h.findings.append(.bundleStale(installed: inst, current: appDate))
+        }
+
+        // Settings reach it through the ByHost domain, which is the one channel
+        // the legacyScreenSaver sandbox allows.
+        let cfgJSON = CFPreferencesCopyValue(
+            "config" as CFString, Config.saverDomain as CFString,
+            kCFPreferencesCurrentUser, kCFPreferencesCurrentHost) as? String
+        if cfgJSON == nil {
+            h.findings.append(.configMissing)
+        }
+
+        // Weather travels the same way. A saver that mirrors the desktop and has
+        // no published reading will fetch its own, which is not wrong but is not
+        // mirroring either — so it is reported rather than passed silently.
+        let want = config.scenePlace
+        if let shared = SaverWeather.published() {
+            if Date().timeIntervalSince1970 - shared.at > 3 * 3600 {
+                h.findings.append(.weatherStale(age: Date().timeIntervalSince1970 - shared.at))
+            }
+            let sameName = shared.place != nil && shared.place == want.name
+            let sameSpot = abs(shared.lat - want.latitude) < 0.35
+                        && abs(shared.lon - want.longitude) < 0.35
+            if !sameName && !sameSpot {
+                h.findings.append(.weatherWrongPlace(published: shared.place, expected: want.name))
+            }
+        } else {
+            h.findings.append(.weatherMissing)
+        }
+        return h
+    }
+
+    /// Put right everything that can be put right without touching ~/Library.
+    ///
+    /// Republishing is the whole repair: both the settings and the weather reach
+    /// the saver through the same domain, and every failure mode above that is
+    /// not "the bundle is wrong" is really "that domain is empty or stale".
+    @discardableResult
+    static func repair(config: Config, weather: WeatherState?) -> Bool {
+        config.save()                       // rewrites the ByHost config copy
+        if let w = weather {
+            let p = config.scenePlace
+            SaverWeather.publish(w, lat: p.latitude, lon: p.longitude, place: p.name)
+        }
+        return true
     }
 }
