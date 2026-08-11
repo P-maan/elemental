@@ -315,7 +315,7 @@ final class ElementsPane: Pane {
         model.observe(self) { [weak self] change in
             guard let self else { return }
             switch change {
-            case .geometry, .selection, .dragging:
+            case .geometry, .selection, .dragging, .suggestions:
                 self.updateSelectionLabel()
                 self.updateRemoveState()
             case .commit:
@@ -496,10 +496,18 @@ final class ElementsPane: Pane {
         // rectangle out from under them.
         if model.dragging == nil {
             model.setWidgetRects(c.widgets)
+            // The derived rectangle is kept whether or not it is in use: it is
+            // the snap target that lets somebody correcting the dock work
+            // outwards from the automatic answer instead of from nothing.
+            model.derivedDock = Self.estimatedDock()
+            // A stored `dockRect` IS the user's measurement — see the comment in
+            // `placementsEdited` about why the estimate is never stored — so it
+            // is also what tells a suggestion to keep its hands off.
+            model.dockIsUserPlaced = c.dockRect != nil
             model.dock = c.dockRect.map {
                 CGRect(x: CGFloat($0.x), y: CGFloat($0.y),
                        width: CGFloat($0.w), height: CGFloat($0.h))
-            } ?? model.dock ?? Self.estimatedDock()
+            } ?? model.dock ?? model.derivedDock
             model.menuBarHeight = Self.estimatedMenuBar()
         }
         redraw(c)
@@ -659,7 +667,8 @@ final class ElementsPane: Pane {
         let settings = view.window
         let restoreLevel = settings?.level ?? .normal
         settings?.level = .floating
-        WidgetSetupOverlay.present(model: model) { [weak self] _ in
+        WidgetSetupOverlay.present(model: model, config: owner?.config ?? Config()) {
+            [weak self] _ in
             settings?.level = restoreLevel
             settings?.makeKeyAndOrderFront(nil)
             // Nothing to read back. The overlay edited this pane's model

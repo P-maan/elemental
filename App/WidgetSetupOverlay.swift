@@ -4,11 +4,9 @@
 //  engine needs to collide with, it can ask the system for: the menu bar and the
 //  dock's THICKNESS come out of `NSScreen.visibleFrame` exactly. Widgets come
 //  from nowhere, and the dock's extent along its edge is a guess made from
-//  com.apple.dock that measures about a quarter short in practice. Both have
-//  been coming from `FurnitureDetector` — a contrast heuristic run over a
-//  screenshot, which finds roughly half the widgets and invents a couple.
+//  com.apple.dock that measures about a quarter short.
 //
-//  This is the other way round, and it is the user's idea: stop inferring, and
+//  This is the direct way round, and it is the user's idea: stop inferring, and
 //  let them SHOW us. A translucent sheet over the real desktop, drag a box round
 //  each widget, pull the dock out to its real length, done.
 //
@@ -16,27 +14,39 @@
 //
 //  This is not a separate editor from the miniature in the Elements pane. Both
 //  are views onto one `PlacementModel` (see Placements.swift): the same
-//  placements, the same snapping rules, the same commit path. The settings
-//  window deliberately stays up while this is on screen, floating above it, so a
-//  widget dragged here moves on the miniature under your eyes and a widget
-//  dragged there lights up here — `PlacementModel.dragging` is what carries
-//  that, and every drag sets it.
+//  placements, the same snapping rules, the same resize solver, the same commit
+//  path. The settings window deliberately stays up while this is on screen,
+//  floating above it, so a widget dragged here moves on the miniature under your
+//  eyes and a widget dragged there lights up here — `PlacementModel.dragging` is
+//  what carries that, and every drag sets it.
 //
-//  ---- Why snapping is the whole feature
+//  ---- Sizes: magnets, not a cage
 //
-//  A freehand rectangle drawn over a widget is a worse measurement than the
-//  detector's, because a hand is not a ruler and nobody drags to the pixel. But
-//  a macOS desktop widget cannot be an arbitrary size: there are exactly FOUR,
-//  they are fixed sizes in points, and the system lays them out on a grid. So
-//  the drawn rectangle never has to be believed — only classified. Drag
-//  something roughly 300 by 150 and it becomes a medium widget, exactly 329 x
-//  155 points, which is exactly what is on screen. The user supplies the
-//  position, which they know and we cannot; the presets supply the size, which
-//  they do not know and we can.
+//  A freehand rectangle drawn over a widget is a worse measurement than a
+//  preset, because a hand is not a ruler and nobody drags to the pixel. macOS
+//  has exactly four desktop widget sizes and they are fixed numbers of points,
+//  so a rubber-banded rectangle is CLASSIFIED to the nearest of them: drag
+//  something roughly 300 by 150 and you get a medium widget, exactly 329 × 155,
+//  which is exactly what is on the screen underneath it.
 //
-//  The dock is the one thing here that stays a free rectangle, because its
-//  extent is the one measurement that is genuinely unknown rather than merely
-//  unpublished. It gets resize handles; widgets get four presets.
+//  But it is a magnet and not a cage, because this is a description of what is
+//  actually there rather than of what the system offers. Every placement can be
+//  resized by its handles to any size at all; the four presets simply pull hard
+//  as a resize passes them, one axis at a time, and the readout says plainly
+//  whether what you have is "Medium, 4 × 2" or "Custom, 340 × 160 pt". Hold ⌥
+//  while drawing to keep exactly the rectangle you drew.
+//
+//  The dock never gets the size magnets — it has no presets — but it does get
+//  the derived rectangle `Furniture.desktop` computed as a snap target, so
+//  correcting the automatic answer starts from the automatic answer.
+//
+//  ---- Suggestions
+//
+//  Opening this captures the screen and runs `FurnitureDetector` over it, every
+//  time. The result is drawn as a dashed, dimmer layer that is taken or dropped
+//  a rectangle at a time and never overwrites anything already placed. See
+//  DesktopSuggestions.swift for why it is a suggestion and not an answer, and
+//  for what happens when Screen Recording is off.
 //
 //  ---- Click-through
 //
@@ -76,7 +86,7 @@ final class WidgetSetupCanvas: NSView {
     /// than something the user discovers by clicking and having nothing happen.
     var isPassive = false { didSet { needsDisplay = true } }
 
-    /// Fires whenever the placement count changes, for the HUD's running total.
+    /// Fires whenever the placement or suggestion count changes, for the HUD.
     var onChange: (() -> Void)?
 
     // ---- drag state
@@ -85,17 +95,18 @@ final class WidgetSetupCanvas: NSView {
         case none
         /// Rubber-banding a new rectangle. `anchor` is where the mouse went
         /// down and is the corner that stays put when the size snaps.
-        case creating(anchor: CGPoint, current: CGPoint)
-        /// Moving an existing one. `grab` is the pointer's offset inside it.
+        /// `freehand` is ⌥ held: keep exactly what was drawn.
+        case creating(anchor: CGPoint, current: CGPoint, freehand: Bool)
+        /// Moving an existing one. `grab` is the pointer's offset inside it,
+        /// in fractions.
         case moving(ref: PlacementModel.Ref, grab: CGSize)
-        /// Pulling one of the dock's eight handles. Indexed exactly as
-        /// `handlePoints` below returns them.
+        /// Pulling one of its handles, indexed as `ResizeHandle` numbers them.
         case resizing(ref: PlacementModel.Ref, handle: Int, start: CGPoint, rect: CGRect)
     }
     private var drag: Drag = .none
 
-    /// Exactly the placement a mouse-up would commit, kept up to date by the
-    /// drag rather than worked out again in `draw`.
+    /// Exactly the rectangle a mouse-up would commit, in fractions, kept up to
+    /// date by the drag rather than worked out again in `draw`.
     ///
     /// Two reasons it lives here and not in the drawing. Snapping fires haptics
     /// and records guides, and neither belongs on a redraw — a window resize
@@ -103,15 +114,15 @@ final class WidgetSetupCanvas: NSView {
     /// committed, snap included: a preview that showed the unsnapped position
     /// would jump the moment the button came up, which is the one thing a
     /// preview exists to prevent.
-    private var pending: WidgetPlacement?
+    private var pending: CGRect?
 
-    /// Below this, a drag was a click. The smallest preset is 155pt across, so
-    /// there is no risk of confusing a deliberate small widget with a stray
-    /// twitch on the way to selecting one.
+    /// Below this, in points, a drag was a click. The smallest preset is 155pt
+    /// across, so there is no risk of confusing a deliberate small widget with a
+    /// stray twitch on the way to selecting one.
     private let minDrag: CGFloat = 22
 
-    /// Smallest the dock may be pulled to, as a fraction of the screen.
-    private let minDockSize: CGFloat = 0.02
+    /// Smallest anything may be pulled to, as a fraction of the screen.
+    private let minSize: CGFloat = 0.02
 
     // ---- snapping
 
@@ -175,8 +186,8 @@ final class WidgetSetupCanvas: NSView {
     /// The rounding of the real thing. This canvas is 1:1 with the screen, so
     /// the radius in points IS the radius in view units — the miniature scales
     /// the same number down, which is what keeps the two shapes agreeing.
-    private func radius(_ e: PlacementModel.Element) -> CGFloat {
-        e.radiusPoints * (bounds.width / max(1, model.screenPoints.width))
+    private func radius(_ points: CGFloat) -> CGFloat {
+        points * (bounds.width / max(1, model.screenPoints.width))
     }
 
     // MARK: - Drawing
@@ -195,32 +206,38 @@ final class WidgetSetupCanvas: NSView {
         let wash = NSBezierPath(rect: bounds)
         wash.windingRule = .evenOdd
         for e in model.elements where e.editable {
-            wash.append(continuousRoundedRect(toView(e.rect), radius: radius(e)))
+            wash.append(continuousRoundedRect(toView(e.rect), radius: radius(e.radiusPoints)))
+        }
+        for s in model.suggestions {
+            wash.append(continuousRoundedRect(toView(s.rect), radius: suggestionRadius(s)))
         }
         if let p = pending {
-            wash.append(continuousRoundedRect(toView(model.rect(of: p)),
-                                              radius: p.size.cornerRadius))
+            wash.append(continuousRoundedRect(toView(p),
+                                              radius: radius(model.cornerRadiusPoints(for: p))))
         }
         NSColor.black.withAlphaComponent(isPassive ? 0.22 : 0.44).setFill()
         wash.fill()
 
         drawGuides()
+        drawSuggestions()
 
         for e in model.elements where e.editable { draw(e) }
 
-        if case .creating(let anchor, let current) = drag { drawCreation(anchor, current) }
+        if case .creating(let anchor, let current, _) = drag { drawCreation(anchor, current) }
 
-        if model.widgets.isEmpty, case .none = drag { drawEmptyHint() }
+        if model.widgets.isEmpty, model.suggestions.isEmpty, case .none = drag { drawEmptyHint() }
+
+        drawMeasurement()
     }
 
     private func draw(_ e: PlacementModel.Element) {
         let r = toView(e.rect)
-        let rad = radius(e)
+        let rad = radius(e.radiusPoints)
         let selected = e.ref != nil && model.selection == e.ref
         let path = continuousRoundedRect(r, radius: rad)
-        // The dock is a different KIND of thing from a widget — free where they
-        // are preset, system-owned where they are yours — so it is drawn in a
-        // different colour rather than being made to look like a big widget.
+        // The dock is a different KIND of thing from a widget — system-owned
+        // where they are yours, free where they have presets — so it is drawn in
+        // a different colour rather than being made to look like a big widget.
         let accent = e.ref == .dock ? NSColor.systemTeal : NSColor.controlAccentColor
         accent.withAlphaComponent(selected ? 0.22 : 0.12).setFill()
         path.fill()
@@ -232,7 +249,7 @@ final class WidgetSetupCanvas: NSView {
         // right now glows here too, even when the hand is over there.
         if let ref = e.ref, model.dragging == ref { drawDragHalo(r, radius: rad, colour: accent) }
 
-        if selected { drawHandles(r, resizable: e.ref == .dock, colour: accent) }
+        if selected { drawHandles(r, indices: e.handles, colour: accent) }
 
         drawLabel(for: e, in: r)
     }
@@ -240,46 +257,37 @@ final class WidgetSetupCanvas: NSView {
     private func drawLabel(for e: PlacementModel.Element, in r: NSRect) {
         switch e.ref {
         case .dock:
-            let px = e.rect.width * model.screenPoints.width * screen.backingScaleFactor
+            let p = model.pointSize(of: e.rect)
             drawPill(e.label,
-                     sub: String(format: "%.0f%% of the screen  ·  %.0f px", e.rect.width * 100, px),
-                     in: r)
+                     sub: String(format: "%.0f × %.0f pt  ·  %.1f%% of the screen",
+                                 p.width, p.height, e.rect.width * 100), in: r)
         case .widget(let i):
             guard i < model.widgets.count else { return }
-            let size = model.widgets[i].size
-            let px = size.pixels(on: screen)
-            drawPill("\(size.name)  ·  \(size.cells.across) × \(size.cells.down)",
-                     sub: String(format: "%.0f × %.0f px", px.width, px.height), in: r)
+            let p = model.pointSize(of: e.rect)
+            drawPill(model.sizeDescription(of: e.rect),
+                     sub: String(format: "%.0f × %.0f pt  ·  %.0f × %.0f px",
+                                 p.width, p.height,
+                                 p.width * screen.backingScaleFactor,
+                                 p.height * screen.backingScaleFactor), in: r)
         case nil:
             return
         }
     }
 
-    /// Grips. Eight for the dock, whose extent is the thing that needs fixing;
-    /// four inert corner pips for a widget, which says "this one is selected" in
-    /// the vocabulary a rectangle editor uses without promising a resize that
-    /// four fixed presets cannot honour.
-    private func drawHandles(_ r: NSRect, resizable: Bool, colour: NSColor) {
+    /// Grips. Eight round a widget, which can be any size; the four mid-edge
+    /// ones for the dock, so that every dock drag changes exactly one edge and a
+    /// length can be set without a stray vertical wobble changing its thickness.
+    private func drawHandles(_ r: NSRect, indices: [Int], colour: NSColor) {
         colour.setFill()
         NSColor.white.withAlphaComponent(0.9).setStroke()
-        for pt in resizable ? handlePoints(r) : cornerPoints(r) {
+        for i in indices {
+            let pt = ResizeHandle.point(i, in: r)
             let d = NSRect(x: pt.x - 5, y: pt.y - 5, width: 10, height: 10)
             let dot = NSBezierPath(ovalIn: d)
             dot.fill()
             dot.lineWidth = 1.5
             dot.stroke()
         }
-    }
-
-    private func handlePoints(_ r: NSRect) -> [NSPoint] {
-        [NSPoint(x: r.minX, y: r.minY), NSPoint(x: r.midX, y: r.minY), NSPoint(x: r.maxX, y: r.minY),
-         NSPoint(x: r.minX, y: r.midY), NSPoint(x: r.maxX, y: r.midY),
-         NSPoint(x: r.minX, y: r.maxY), NSPoint(x: r.midX, y: r.maxY), NSPoint(x: r.maxX, y: r.maxY)]
-    }
-
-    private func cornerPoints(_ r: NSRect) -> [NSPoint] {
-        [NSPoint(x: r.minX, y: r.minY), NSPoint(x: r.maxX, y: r.minY),
-         NSPoint(x: r.minX, y: r.maxY), NSPoint(x: r.maxX, y: r.maxY)]
     }
 
     private func drawDragHalo(_ r: NSRect, radius: CGFloat, colour: NSColor) {
@@ -293,14 +301,14 @@ final class WidgetSetupCanvas: NSView {
         }
     }
 
-    private func drawPill(_ title: String, sub: String, in r: NSRect) {
+    private func drawPill(_ title: String, sub: String, in r: NSRect, clip: Bool = true) {
         let titleAttrs: [NSAttributedString.Key: Any] = [
             .font: NSFont.systemFont(ofSize: 12, weight: .semibold),
             .foregroundColor: NSColor.white,
         ]
         let subAttrs: [NSAttributedString.Key: Any] = [
             .font: NSFont.monospacedDigitSystemFont(ofSize: 10, weight: .regular),
-            .foregroundColor: NSColor.white.withAlphaComponent(0.75),
+            .foregroundColor: NSColor.white.withAlphaComponent(0.78),
         ]
         let t = NSAttributedString(string: title, attributes: titleAttrs)
         let s = NSAttributedString(string: sub, attributes: subAttrs)
@@ -312,7 +320,7 @@ final class WidgetSetupCanvas: NSView {
         // widget is 155pt square and the pill has to live inside that.
         let pill = NSRect(x: r.midX - w / 2, y: r.midY - h / 2, width: w, height: h)
         NSGraphicsContext.saveGraphicsState()
-        NSBezierPath(rect: r).addClip()
+        if clip { NSBezierPath(rect: r).addClip() }
         NSColor.black.withAlphaComponent(0.55).setFill()
         NSBezierPath(roundedRect: pill, xRadius: 7, yRadius: 7).fill()
         t.draw(at: NSPoint(x: pill.midX - ts.width / 2, y: pill.minY + 4))
@@ -320,7 +328,98 @@ final class WidgetSetupCanvas: NSView {
         NSGraphicsContext.restoreGraphicsState()
     }
 
-    /// The live rubber band: what the hand is doing, faintly, with the preset it
+    /// The numbers, while a rectangle is being moved or pulled.
+    ///
+    /// The dock is the reason this exists. Its thickness is known exactly and
+    /// its length is not, so "make it precisely this long" is a real task, and a
+    /// rectangle you can only judge by eye against a dock that is drawn
+    /// underneath it is not a way to do it. Both edges in points, the size in
+    /// points, and the same figures as percentages — the fractions are what is
+    /// actually stored, and what survives a change of resolution.
+    private func drawMeasurement() {
+        guard let ref = model.dragging, let f = model.rect(of: ref) else { return }
+        let r = toView(f)
+        let p = model.pointSize(of: f)
+        let head: String
+        switch ref {
+        case .dock:
+            head = String(format: "%.0f × %.0f pt", p.width, p.height)
+        case .widget:
+            head = model.sizeDescription(of: f)
+        }
+        let body = String(format: "left %.0f · top %.0f · right %.0f · bottom %.0f pt   "
+                                + "(%.1f%%, %.1f%%, %.1f%% × %.1f%%)",
+                          f.minX * model.screenPoints.width,
+                          f.minY * model.screenPoints.height,
+                          f.maxX * model.screenPoints.width,
+                          f.maxY * model.screenPoints.height,
+                          f.minX * 100, f.minY * 100, f.width * 100, f.height * 100)
+
+        // Above the rectangle, or below it when there is no room above — the
+        // numbers must never sit on top of the edge being aimed.
+        let band: NSRect
+        if r.minY > 58 {
+            band = NSRect(x: r.minX, y: r.minY - 56, width: max(r.width, 320), height: 46)
+        } else {
+            band = NSRect(x: r.minX, y: min(bounds.height - 56, r.maxY + 10),
+                          width: max(r.width, 320), height: 46)
+        }
+        drawPill(head, sub: body, in: band, clip: false)
+    }
+
+    // MARK: - Suggestions
+
+    private func suggestionRadius(_ s: PlacementModel.Suggestion) -> CGFloat {
+        switch s.kind {
+        case .dock:
+            let v = toView(s.rect)
+            return min(18, min(v.width, v.height) / 2)
+        case .widget:
+            return radius(model.cornerRadiusPoints(for: s.rect))
+        }
+    }
+
+    /// Dashed, dimmer, and labelled with what to do about it.
+    ///
+    /// Provisional has to be legible at a glance, because the whole bargain is
+    /// that the user can ignore the lot. Nothing about a suggestion looks like
+    /// something they placed: different colour, dashed outline, thinner stroke,
+    /// and an instruction inside it rather than a measurement.
+    private func drawSuggestions() {
+        for s in model.suggestions {
+            let r = toView(s.rect)
+            let path = continuousRoundedRect(r, radius: suggestionRadius(s))
+            NSColor.systemPink.withAlphaComponent(0.10).setFill()
+            path.fill()
+            NSColor.systemPink.withAlphaComponent(0.9).setStroke()
+            path.lineWidth = 2
+            path.setLineDash([7, 5], count: 2, phase: 0)
+            path.stroke()
+            drawPill(s.kind == .dock ? "Dock?" : "Widget?",
+                     sub: "click to keep  ·  ⌥-click to dismiss", in: r)
+        }
+    }
+
+    // MARK: - Creating
+
+    /// The rectangle a drag from `anchor` to `current` produces, in fractions.
+    ///
+    /// The corner under the mouse when the button went down stays exactly where
+    /// it is, and the snapped size grows away from it in whichever direction the
+    /// drag went. Anchoring on the centre instead would make the rectangle creep
+    /// out from under the pointer as the preset changed mid-drag.
+    private func creation(anchor: CGPoint, current: CGPoint, freehand: Bool) -> CGRect {
+        let a = toFrac(anchor), c = toFrac(current)
+        let raw = CGRect(x: min(a.x, c.x), y: min(a.y, c.y),
+                         width: abs(c.x - a.x), height: abs(c.y - a.y))
+        guard !freehand else { return raw }
+        let s = model.fractionalSize(DesktopWidgetSize.nearest(to: model.pointSize(of: raw)))
+        return CGRect(x: c.x >= a.x ? a.x : a.x - s.width,
+                      y: c.y >= a.y ? a.y : a.y - s.height,
+                      width: s.width, height: s.height)
+    }
+
+    /// The live rubber band: what the hand is doing, faintly, with the size it
     /// has landed on drawn solidly over the top. Showing both is what teaches
     /// the snapping — the rectangle you are dragging is visibly not the
     /// rectangle you are going to get.
@@ -334,17 +433,17 @@ final class WidgetSetupCanvas: NSView {
         rawPath.stroke()
 
         guard let preview = pending else { return }
-        let r = toView(model.rect(of: preview))
-        let path = continuousRoundedRect(r, radius: preview.size.cornerRadius)
+        let r = toView(preview)
+        let path = continuousRoundedRect(r, radius: radius(model.cornerRadiusPoints(for: preview)))
         NSColor.controlAccentColor.withAlphaComponent(0.22).setFill()
         path.fill()
         NSColor.controlAccentColor.setStroke()
         path.lineWidth = 3
         path.stroke()
-        drawHandles(r, resizable: false, colour: .controlAccentColor)
-        let px = preview.size.pixels(on: screen)
-        drawPill("\(preview.size.name)  ·  \(preview.size.cells.across) × \(preview.size.cells.down)",
-                 sub: String(format: "%.0f × %.0f px", px.width, px.height), in: r)
+        drawHandles(r, indices: ResizeHandle.all, colour: .controlAccentColor)
+        let p = model.pointSize(of: preview)
+        drawPill(model.sizeDescription(of: preview),
+                 sub: String(format: "%.0f × %.0f pt", p.width, p.height), in: r)
     }
 
     private func drawEmptyHint() {
@@ -360,7 +459,7 @@ final class WidgetSetupCanvas: NSView {
 
     private func drawGuides() {
         guard !guides.isEmpty else { return }
-        NSColor.systemPink.withAlphaComponent(0.9).setStroke()
+        NSColor.systemYellow.withAlphaComponent(0.9).setStroke()
         for g in guides {
             let p = NSBezierPath()
             if g.vertical {
@@ -376,32 +475,15 @@ final class WidgetSetupCanvas: NSView {
         }
     }
 
-    // MARK: - Creating
-
-    /// The placement a drag from `anchor` to `current` produces, in fractions.
-    ///
-    /// The corner under the mouse when the button went down stays exactly where
-    /// it is, and the snapped size grows away from it in whichever direction the
-    /// drag went. Anchoring on the centre instead would make the rectangle creep
-    /// out from under the pointer as the preset changed mid-drag.
-    private func creation(anchor: CGPoint, current: CGPoint) -> WidgetPlacement {
-        let drawn = CGSize(width: abs(current.x - anchor.x), height: abs(current.y - anchor.y))
-        let size = DesktopWidgetSize.nearest(to: drawn)
-        let s = model.fractionalSize(size)
-        let originX = current.x >= anchor.x ? anchor.x : anchor.x - s.width * bounds.width
-        let originY = current.y >= anchor.y ? anchor.y : anchor.y - s.height * bounds.height
-        let frac = toFrac(NSPoint(x: originX, y: originY))
-        return WidgetPlacement(size: size,
-                               centre: CGPoint(x: frac.x + s.width / 2, y: frac.y + s.height / 2))
-    }
-
     // MARK: - Snapping
 
     private func apply(_ snap: PlacementModel.Snap) {
         guides = snap.guides
         // `.alignment` on the transition IN and never per frame, the same rule
         // and for the same reason as the miniature: a drag parked on a guide
-        // should click once, not sixty times a second.
+        // should click once, not sixty times a second. A preset dimension
+        // catching counts as a line for this purpose — it is the same "you have
+        // landed on something" that the user is feeling for.
         if !snap.names.subtracting(engaged).isEmpty { Haptics.alignment() }
         engaged = snap.names
     }
@@ -412,24 +494,42 @@ final class WidgetSetupCanvas: NSView {
         window?.makeFirstResponder(self)
         let p = convert(event.locationInWindow, from: nil)
         let f = toFrac(p)
+        let option = event.modifierFlags.contains(.option)
         guides.removeAll(); engaged.removeAll(); pending = nil
 
+        // A suggestion is taken or dropped with one click, before anything else
+        // is considered — it is drawn over the desktop and under nothing.
+        if let s = model.suggestion(at: f) {
+            if option {
+                model.dismissSuggestion(s.id)
+            } else {
+                model.acceptSuggestion(s.id)
+                Haptics.level()
+            }
+            onChange?()
+            drag = .none
+            return
+        }
+
         // A handle of the current selection wins over whatever is under it.
-        if model.selection == .dock, let d = model.dock {
-            let vr = toView(d)
-            for (i, hp) in handlePoints(vr).enumerated()
-            where NSRect(x: hp.x - 12, y: hp.y - 12, width: 24, height: 24).contains(p) {
-                drag = .resizing(ref: .dock, handle: i, start: f, rect: d)
-                model.dragging = .dock
+        if let ref = model.selection, let r = model.rect(of: ref),
+           let e = model.elements.first(where: { $0.ref == ref }) {
+            let vr = toView(r)
+            for i in e.handles {
+                let hp = ResizeHandle.point(i, in: vr)
+                guard NSRect(x: hp.x - 12, y: hp.y - 12, width: 24, height: 24).contains(p)
+                else { continue }
+                drag = .resizing(ref: ref, handle: i, start: f, rect: r)
+                model.dragging = ref
                 return
             }
         }
 
         if let ref = model.hit(f), let r = model.rect(of: ref) {
-            // A second click on a placed widget steps it round the four sizes.
-            // It is the repair for the one case classification gets wrong — a
-            // rectangle drawn between two presets — and it beats deleting and
-            // redrawing to change your mind.
+            // A second click on a placed widget steps it round the four presets.
+            // Still worth having next to free resizing: "make this one exactly a
+            // medium" is one keystroke rather than two axes of dragging until
+            // both magnets catch at once.
             if event.clickCount == 2, case .widget(let i) = ref {
                 model.selection = ref
                 model.cycleSize(i)
@@ -444,7 +544,7 @@ final class WidgetSetupCanvas: NSView {
             return
         }
         model.selection = nil
-        drag = .creating(anchor: p, current: p)
+        drag = .creating(anchor: p, current: p, freehand: option)
     }
 
     override func mouseDragged(with event: NSEvent) {
@@ -454,8 +554,8 @@ final class WidgetSetupCanvas: NSView {
         case .none:
             return
 
-        case .creating(let anchor, _):
-            drag = .creating(anchor: anchor, current: p)
+        case .creating(let anchor, _, let freehand):
+            drag = .creating(anchor: anchor, current: p, freehand: freehand)
             // Below the threshold this is still a click on its way to being a
             // click, so there is nothing to preview and nothing to buzz about.
             let small = abs(p.x - anchor.x) < minDrag && abs(p.y - anchor.y) < minDrag
@@ -463,12 +563,10 @@ final class WidgetSetupCanvas: NSView {
             if small {
                 pending = nil
             } else {
-                let made = model.clamped(creation(anchor: anchor, current: p))
-                let snap = model.snapping(model.rect(of: made), moving: nil,
-                                          tolerance: snapTolerance)
+                let made = model.clamped(creation(anchor: anchor, current: p, freehand: freehand))
+                let snap = model.snapping(made, moving: nil, tolerance: snapTolerance)
                 apply(snap)
-                pending = WidgetPlacement(size: made.size,
-                                          centre: CGPoint(x: snap.rect.midX, y: snap.rect.midY))
+                pending = snap.rect
             }
 
         case .moving(let ref, let grab):
@@ -486,54 +584,17 @@ final class WidgetSetupCanvas: NSView {
             model.write(snap.rect, to: ref)
 
         case .resizing(let ref, let handle, let start, let rect):
-            resize(ref: ref, handle: handle, from: start, to: f, rect: rect)
+            // Every rule — which edges the handle owns, the positional guides,
+            // the preset-dimension magnets, the minimum size — lives in the
+            // model, so this and the pane's miniature resize identically.
+            let snap = model.resizing(rect, handle: handle,
+                                      dx: f.x - start.x, dy: f.y - start.y,
+                                      ref: ref, tolerance: snapTolerance, minimum: minSize,
+                                      presetMagnets: ref != .dock)
+            apply(snap)
+            model.write(snap.rect, to: ref)
         }
         needsDisplay = true
-    }
-
-    /// Pull one edge of the dock, leaving the opposite edge where it is.
-    private func resize(ref: PlacementModel.Ref, handle: Int,
-                        from start: CGPoint, to now: CGPoint, rect: CGRect) {
-        let dx = now.x - start.x, dy = now.y - start.y
-        var minX = rect.minX, maxX = rect.maxX, minY = rect.minY, maxY = rect.maxY
-        // Which edges this handle owns. 0,3,5 are the left column; 0,1,2 the top
-        // row; and so on round the eight.
-        let movesLeft = handle == 0 || handle == 3 || handle == 5
-        let movesRight = handle == 2 || handle == 4 || handle == 7
-        let movesTop = handle <= 2
-        let movesBottom = handle >= 5
-        if movesLeft { minX += dx }
-        if movesRight { maxX += dx }
-        if movesTop { minY += dy }
-        if movesBottom { maxY += dy }
-
-        var snap = PlacementModel.Snap(rect: .zero)
-        let tol = snapTolerance
-        if movesLeft {
-            minX = model.snappingEdge(minX, vertical: true, moving: ref,
-                                      tolerance: tol.width, into: &snap)
-        }
-        if movesRight {
-            maxX = model.snappingEdge(maxX, vertical: true, moving: ref,
-                                      tolerance: tol.width, into: &snap)
-        }
-        if movesTop {
-            minY = model.snappingEdge(minY, vertical: false, moving: ref,
-                                      tolerance: tol.height, into: &snap)
-        }
-        if movesBottom {
-            maxY = model.snappingEdge(maxY, vertical: false, moving: ref,
-                                      tolerance: tol.height, into: &snap)
-        }
-        apply(snap)
-
-        if maxX - minX < minDockSize {
-            if movesLeft { minX = maxX - minDockSize } else { maxX = minX + minDockSize }
-        }
-        if maxY - minY < minDockSize {
-            if movesTop { minY = maxY - minDockSize } else { maxY = minY + minDockSize }
-        }
-        model.write(CGRect(x: minX, y: minY, width: maxX - minX, height: maxY - minY), to: ref)
     }
 
     override func mouseUp(with event: NSEvent) {
@@ -542,10 +603,10 @@ final class WidgetSetupCanvas: NSView {
         case .none:
             break
         case .creating:
-            // No pending placement means the drag never got past the threshold:
+            // No pending rectangle means the drag never got past the threshold:
             // a click, and the user was dismissing the selection.
             guard let made = pending else { break }
-            model.addWidget(made)
+            model.addWidget(WidgetPlacement(rect: made))
             Haptics.level()
             onChange?()
             changed = true
@@ -632,7 +693,10 @@ final class WidgetSetupOverlay: NSObject, NSWindowDelegate {
     private let model: PlacementModel
     private let completion: (Bool) -> Void
     private let countLabel = NSTextField(labelWithString: "")
+    private let noteLabel = NSTextField(wrappingLabelWithString: "")
     private let hud = NSVisualEffectView()
+    private var suggestionRow: NSStackView!
+    private var permissionButton: NSButton!
     private var finished = false
 
     /// Everything the model held when this opened, so Cancel can put it back.
@@ -642,9 +706,12 @@ final class WidgetSetupOverlay: NSObject, NSWindowDelegate {
     /// live — that is the point of there being one model. Cancel therefore
     /// cannot mean "discard my copy"; it means "restore the snapshot", which is
     /// the same promise from the user's side.
-    private let snapshot: (widgets: [WidgetPlacement], dock: CGRect?)
+    private let snapshot: (widgets: [WidgetPlacement], dock: CGRect?, dockPlaced: Bool)
 
     /// Put the overlay up. `completion` is called with true if the user saved.
+    ///
+    /// `config` is only needed for the reference render detection compares
+    /// against — see DesktopSuggestions.swift.
     ///
     /// One screen: `Config.widgets` are fractions with no display attached, so
     /// they are applied to every screen the app draws on (the same property that
@@ -653,15 +720,17 @@ final class WidgetSetupOverlay: NSObject, NSWindowDelegate {
     /// stored; a per-display version needs a per-display config first.
     static func present(screen: NSScreen? = nil,
                         model: PlacementModel,
+                        config: Config,
                         completion: @escaping (Bool) -> Void) {
         guard current == nil, let target = screen ?? NSScreen.main else {
             completion(false)
             return
         }
-        current = WidgetSetupOverlay(screen: target, model: model, completion: completion)
+        current = WidgetSetupOverlay(screen: target, model: model, config: config,
+                                     completion: completion)
     }
 
-    private init(screen: NSScreen, model: PlacementModel,
+    private init(screen: NSScreen, model: PlacementModel, config: Config,
                  completion: @escaping (Bool) -> Void) {
         self.completion = completion
         self.model = model
@@ -669,7 +738,7 @@ final class WidgetSetupOverlay: NSObject, NSWindowDelegate {
         // be measured against it too. A model built while a different display
         // was main would otherwise draw 329pt widgets at some other width.
         model.screenPoints = screen.frame.size
-        snapshot = (model.widgets, model.dock)
+        snapshot = (model.widgets, model.dock, model.dockIsUserPlaced)
         canvas = WidgetSetupCanvas(screen: screen, model: model)
 
         window = OverlayWindow(contentRect: screen.frame, styleMask: .borderless,
@@ -700,7 +769,20 @@ final class WidgetSetupOverlay: NSObject, NSWindowDelegate {
         window.delegate = self
         window.initialFirstResponder = canvas
 
+        // The suggestion layer is not carried between openings. Detection is
+        // cheap and the desktop moves, so a rectangle offered five minutes ago
+        // is a worse guess than one offered now.
+        model.dismissAllSuggestions()
+        model.suggestionNote = "Looking at your screen…"
         refreshCount()
+
+        model.observe(self) { [weak self] change in
+            guard let self else { return }
+            switch change {
+            case .suggestions, .geometry: self.refreshCount()
+            case .selection, .dragging, .commit: break
+            }
+        }
 
         // Activation, not key-window changes, decides click-through: moving key
         // to another window OF OURS — the settings window floating above this
@@ -714,6 +796,16 @@ final class WidgetSetupOverlay: NSObject, NSWindowDelegate {
         NSApp.activate(ignoringOtherApps: true)
         window.makeKeyAndOrderFront(nil)
         window.makeFirstResponder(canvas)
+
+        // AFTER the window is up, so the overlay never waits on a capture. Our
+        // own windows — this one and the settings window — are excluded from the
+        // shot by the content filter, so there is nothing to hide first.
+        DesktopSuggestions.run(screen: screen, config: config) { [weak self] result in
+            guard let self, !self.finished else { return }
+            self.model.suggestionNote = result.note
+            self.model.setSuggestions(widgets: result.widgets, dock: result.dock)
+            self.refreshCount()
+        }
     }
 
     deinit { NotificationCenter.default.removeObserver(self) }
@@ -733,21 +825,43 @@ final class WidgetSetupOverlay: NSObject, NSWindowDelegate {
         title.font = .systemFont(ofSize: 13, weight: .semibold)
 
         let hint = NSTextField(wrappingLabelWithString:
-            "Drag a rectangle over each widget — it snaps to the nearest real widget size. Drag a "
-          + "placed one to move it, double-click or press Space to change its size, ⌫ to remove "
-          + "it. The teal rectangle is your dock: macOS only tells us how THICK it is, so pull "
-          + "its handles out to the length it really is. Everything you do here also moves on the "
-          + "little screen in Settings. Click any other app and this sheet lets your clicks "
-          + "through; come back with the Elemental menu bar icon.")
+            "Drag a rectangle over each widget — it snaps to the nearest real widget size, and ⌥ "
+          + "while dragging keeps exactly what you drew. Take a handle to resize one to any size "
+          + "at all; the four macOS sizes pull hard as you pass them. Space steps through the "
+          + "presets, ⌫ removes one. The teal rectangle is your dock: macOS only reports how "
+          + "THICK it is, so pull its end handles out to the length it really is — the numbers "
+          + "above it are live. Everything here also moves on the little screen in Settings.")
         hint.font = .systemFont(ofSize: 11)
         hint.textColor = .secondaryLabelColor
-        hint.preferredMaxLayoutWidth = 460
+        hint.preferredMaxLayoutWidth = 520
         // Fixed rather than intrinsic, so the panel is one stable width and the
-        // button row below can be tied to it without the two fighting.
-        hint.widthAnchor.constraint(equalToConstant: 460).isActive = true
+        // button rows below can be tied to it without the two fighting.
+        hint.widthAnchor.constraint(equalToConstant: 520).isActive = true
+
+        noteLabel.font = .systemFont(ofSize: 11)
+        noteLabel.textColor = .secondaryLabelColor
+        noteLabel.preferredMaxLayoutWidth = 520
 
         countLabel.font = .monospacedDigitSystemFont(ofSize: 11, weight: .regular)
         countLabel.textColor = .secondaryLabelColor
+
+        let keepAll = NSButton(title: "Keep All Suggestions", target: self,
+                               action: #selector(keepAllSuggestions))
+        keepAll.bezelStyle = .rounded
+        let dropAll = NSButton(title: "Dismiss Suggestions", target: self,
+                               action: #selector(dismissAllSuggestions))
+        dropAll.bezelStyle = .rounded
+        permissionButton = NSButton(title: "Turn On Screen Recording…", target: self,
+                                    action: #selector(askForScreenRecording))
+        permissionButton.bezelStyle = .rounded
+        permissionButton.isHidden = ScreenRecording.isGranted
+
+        let suggestionSpacer = NSView()
+        suggestionSpacer.translatesAutoresizingMaskIntoConstraints = false
+        suggestionSpacer.setContentHuggingPriority(.defaultLow, for: .horizontal)
+        suggestionRow = NSStackView(views: [permissionButton, suggestionSpacer, keepAll, dropAll])
+        suggestionRow.spacing = 8
+        suggestionRow.alignment = .centerY
 
         let clear = NSButton(title: "Clear Widgets", target: self, action: #selector(clearAll))
         clear.bezelStyle = .rounded
@@ -766,7 +880,7 @@ final class WidgetSetupOverlay: NSObject, NSWindowDelegate {
         buttons.spacing = 8
         buttons.alignment = .centerY
 
-        let column = NSStackView(views: [title, hint, buttons])
+        let column = NSStackView(views: [title, hint, noteLabel, suggestionRow, buttons])
         column.orientation = .vertical
         column.alignment = .leading
         column.spacing = 8
@@ -786,6 +900,7 @@ final class WidgetSetupOverlay: NSObject, NSWindowDelegate {
             column.trailingAnchor.constraint(equalTo: hud.trailingAnchor),
             column.bottomAnchor.constraint(equalTo: hud.bottomAnchor),
             buttons.widthAnchor.constraint(equalTo: hint.widthAnchor),
+            suggestionRow.widthAnchor.constraint(equalTo: hint.widthAnchor),
             hud.centerXAnchor.constraint(equalTo: root.centerXAnchor),
             hud.bottomAnchor.constraint(equalTo: root.bottomAnchor,
                                         constant: -(dockInset + 24)),
@@ -794,8 +909,16 @@ final class WidgetSetupOverlay: NSObject, NSWindowDelegate {
 
     private func refreshCount() {
         let n = canvas.count
-        countLabel.stringValue = n == 0 ? "Nothing placed yet"
-                                        : "\(n) widget\(n == 1 ? "" : "s") placed"
+        let s = model.suggestions.count
+        var parts: [String] = [n == 0 ? "nothing placed" : "\(n) widget\(n == 1 ? "" : "s") placed"]
+        if s > 0 { parts.append("\(s) suggested") }
+        countLabel.stringValue = parts.joined(separator: "  ·  ")
+        noteLabel.stringValue = model.suggestionNote ?? ""
+        noteLabel.isHidden = noteLabel.stringValue.isEmpty
+        // The suggestion row only earns its space when there is something to
+        // accept, or a permission to turn on that would produce some.
+        suggestionRow.isHidden = s == 0 && ScreenRecording.isGranted
+        permissionButton.isHidden = ScreenRecording.isGranted
     }
 
     // MARK: - Click-through
@@ -827,6 +950,7 @@ final class WidgetSetupOverlay: NSObject, NSWindowDelegate {
     @objc private func cancel() {
         model.setWidgets(snapshot.widgets)
         model.dock = snapshot.dock
+        model.dockIsUserPlaced = snapshot.dockPlaced
         model.selection = nil
         model.commit()
         finish(saved: false)
@@ -834,14 +958,40 @@ final class WidgetSetupOverlay: NSObject, NSWindowDelegate {
 
     @objc private func clearAll() { canvas.removeAll() }
 
+    @objc private func keepAllSuggestions() {
+        model.acceptAllSuggestions()
+        Haptics.level()
+        refreshCount()
+    }
+
+    @objc private func dismissAllSuggestions() {
+        model.dismissAllSuggestions()
+        refreshCount()
+    }
+
+    @objc private func askForScreenRecording() {
+        ScreenRecording.request()
+        model.suggestionNote =
+            "Turn Elemental on under Screen Recording, then quit and reopen it — macOS only "
+          + "hands the permission to a fresh launch. Nothing here needs it: every rectangle can "
+          + "be placed by hand."
+        refreshCount()
+    }
+
     func windowWillClose(_ notification: Notification) { finish(saved: false) }
 
     private func finish(saved: Bool) {
         guard !finished else { return }
         finished = true
         NotificationCenter.default.removeObserver(self)
+        model.stopObserving(self)
         window.delegate = nil
         model.dragging = nil
+        // The suggestion layer belongs to the session that produced it. Leaving
+        // it behind would put dashed rectangles on the pane's miniature that
+        // nothing there can accept or dismiss.
+        model.dismissAllSuggestions()
+        model.suggestionNote = nil
         window.orderOut(nil)
         // `current` is the only strong reference to this object, so clearing it
         // can deallocate self — potentially before the completion has run, since

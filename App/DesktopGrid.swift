@@ -288,11 +288,10 @@ final class DesktopGridView: NSView {
                 NSColor.controlAccentColor.setStroke()
                 ring.lineWidth = 2
                 ring.stroke()
-                // Handles for the dock only. A widget's size is a preset, not
-                // something to be pulled about — Space and double-click change
-                // it — and offering a resize grip that snaps back to one of four
-                // sizes would be a lie about what the control does.
-                if e.editable { drawHandles(r, resizable: ref == .dock) }
+                // Whatever grips this element offers. Eight for a widget, which
+                // can be any size; the four mid-edge ones for the dock, so that
+                // every dock drag changes exactly one edge.
+                drawHandles(r, indices: e.handles)
             }
 
             let labelSize: CGFloat = big ? 11 : 8
@@ -308,6 +307,8 @@ final class DesktopGridView: NSView {
                 }
             }
         }
+
+        drawSuggestions()
 
         // Snap guides, while a drag is holding one.
         if !guides.isEmpty {
@@ -357,11 +358,10 @@ final class DesktopGridView: NSView {
     private var handleRadius: CGFloat { big ? 5.5 : 3 }
     private var handleSlop: CGFloat { big ? 11 : 6 }
 
-    /// Corner pips always; the eight resize grips only for something that can
-    /// actually be resized.
-    private func drawHandles(_ r: NSRect, resizable: Bool) {
+    private func drawHandles(_ r: NSRect, indices: [Int]) {
         let hr = handleRadius
-        for p in resizable ? handlePoints(r) : cornerPoints(r) {
+        for i in indices {
+            let p = ResizeHandle.point(i, in: r)
             let box = NSRect(x: p.x - hr, y: p.y - hr, width: hr * 2, height: hr * 2)
             NSColor.controlBackgroundColor.setFill()
             NSBezierPath(ovalIn: box).fill()
@@ -372,16 +372,27 @@ final class DesktopGridView: NSView {
         }
     }
 
-    /// The eight resize handles, in the order `pointerDragged` indexes them.
-    private func handlePoints(_ r: NSRect) -> [NSPoint] {
-        [NSPoint(x: r.minX, y: r.minY), NSPoint(x: r.midX, y: r.minY), NSPoint(x: r.maxX, y: r.minY),
-         NSPoint(x: r.minX, y: r.midY), NSPoint(x: r.maxX, y: r.midY),
-         NSPoint(x: r.minX, y: r.maxY), NSPoint(x: r.midX, y: r.maxY), NSPoint(x: r.maxX, y: r.maxY)]
-    }
-
-    private func cornerPoints(_ r: NSRect) -> [NSPoint] {
-        [NSPoint(x: r.minX, y: r.minY), NSPoint(x: r.maxX, y: r.minY),
-         NSPoint(x: r.minX, y: r.maxY), NSPoint(x: r.maxX, y: r.maxY)]
+    /// What the detector thinks it saw, drawn dashed and dimmer so it cannot be
+    /// mistaken for something that has been placed. It is not editable from the
+    /// miniature — a suggestion is taken or dropped on the full-screen editor,
+    /// where it is over the thing it is a guess about — but it is drawn here so
+    /// the two views still show the same state.
+    private func drawSuggestions() {
+        guard !model.suggestions.isEmpty else { return }
+        for s in model.suggestions {
+            let r = toView(s.rect)
+            let rad = s.kind == .dock
+                ? min(18, min(r.width, r.height) / 2)
+                : model.cornerRadiusPoints(for: s.rect)
+                    * (screenRect.width / max(1, model.screenPoints.width))
+            let p = continuousRoundedRect(r, radius: rad)
+            NSColor.systemPink.withAlphaComponent(0.10).setFill()
+            p.fill()
+            NSColor.systemPink.withAlphaComponent(0.85).setStroke()
+            p.lineWidth = 1.5
+            p.setLineDash([4, 3], count: 2, phase: 0)
+            p.stroke()
+        }
     }
 
     // MARK: - Snapping
@@ -418,26 +429,33 @@ final class DesktopGridView: NSView {
     private var rectAtGrab: CGRect = .zero
     private var dragging = false
 
-    /// Smallest the dock may be dragged to, as a fraction. Below this it cannot
+    /// Smallest anything may be pulled to, as a fraction. Below this it cannot
     /// be grabbed again.
     private let minSize: CGFloat = 0.02
+
+    /// Which grips an element offers. Taken from the model's element list, so
+    /// the hit test cannot get out of step with what was drawn.
+    private func handles(for ref: PlacementModel.Ref) -> [Int] {
+        model.elements.first { $0.ref == ref }?.handles ?? []
+    }
 
     func pointerDown(_ p: NSPoint, clickCount: Int = 1) {
         window?.makeFirstResponder(self)
         guides.removeAll(); engaged.removeAll()
 
         // A resize handle of the current selection wins over anything underneath
-        // it. Only the dock has any.
-        if model.selection == .dock, let r = model.dock {
+        // it, including the rectangle it belongs to.
+        if let ref = model.selection, let r = model.rect(of: ref) {
             let vr = toView(r)
             let slop = handleSlop
-            for (i, hp) in handlePoints(vr).enumerated()
-            where NSRect(x: hp.x - slop, y: hp.y - slop,
-                         width: slop * 2, height: slop * 2).contains(p) {
+            for i in handles(for: ref) {
+                let hp = ResizeHandle.point(i, in: vr)
+                guard NSRect(x: hp.x - slop, y: hp.y - slop,
+                             width: slop * 2, height: slop * 2).contains(p) else { continue }
                 grabbed = i
                 dragOrigin = toFrac(p)
                 rectAtGrab = r
-                begin(.dock)
+                begin(ref)
                 return
             }
         }
@@ -487,44 +505,16 @@ final class DesktopGridView: NSView {
             let snap = model.snapping(moved, moving: ref, tolerance: snapTolerance)
             apply(snap)
             model.write(snap.rect, to: ref)
-        } else if ref == .dock {
-            var r = rectAtGrab
-            var minX = r.minX, maxX = r.maxX, minY = r.minY, maxY = r.maxY
-            // Which edges this handle owns. 0,3,5 are the left column; 0,1,2
-            // the top row; and so on round the eight.
-            let movesLeft = grabbed == 0 || grabbed == 3 || grabbed == 5
-            let movesRight = grabbed == 2 || grabbed == 4 || grabbed == 7
-            let movesTop = grabbed <= 2
-            let movesBottom = grabbed >= 5
-            if movesLeft { minX += dx }
-            if movesRight { maxX += dx }
-            if movesTop { minY += dy }
-            if movesBottom { maxY += dy }
-
-            var snap = PlacementModel.Snap(rect: .zero)
-            let tol = snapTolerance
-            if movesLeft {
-                minX = model.snappingEdge(minX, vertical: true, moving: ref,
-                                          tolerance: tol.width, into: &snap)
-            }
-            if movesRight {
-                maxX = model.snappingEdge(maxX, vertical: true, moving: ref,
-                                          tolerance: tol.width, into: &snap)
-            }
-            if movesTop {
-                minY = model.snappingEdge(minY, vertical: false, moving: ref,
-                                          tolerance: tol.height, into: &snap)
-            }
-            if movesBottom {
-                maxY = model.snappingEdge(maxY, vertical: false, moving: ref,
-                                          tolerance: tol.height, into: &snap)
-            }
+        } else {
+            // A resize. Every rule — which edges the handle owns, the
+            // positional guides, the preset-dimension magnets, the minimum
+            // size — lives in the model, so the miniature and the full-screen
+            // editor resize identically. See `PlacementModel.resizing`.
+            let snap = model.resizing(rectAtGrab, handle: grabbed, dx: dx, dy: dy,
+                                      ref: ref, tolerance: snapTolerance, minimum: minSize,
+                                      presetMagnets: ref != .dock)
             apply(snap)
-
-            if maxX - minX < minSize { if movesLeft { minX = maxX - minSize } else { maxX = minX + minSize } }
-            if maxY - minY < minSize { if movesTop { minY = maxY - minSize } else { maxY = minY + minSize } }
-            r = CGRect(x: minX, y: minY, width: maxX - minX, height: maxY - minY)
-            model.write(r, to: ref)
+            model.write(snap.rect, to: ref)
         }
         needsDisplay = true
     }
@@ -620,9 +610,11 @@ final class DesktopGridView: NSView {
 
     func addWidget() {
         // Dropped in the middle at the commonest size, selected, ready to be
-        // dragged where it belongs.
-        model.addWidget(model.clamped(WidgetPlacement(size: .medium,
-                                                      centre: CGPoint(x: 0.5, y: 0.5))))
+        // dragged where it belongs and pulled to whatever size it really is.
+        let s = model.fractionalSize(.medium)
+        model.addWidget(model.clamped(WidgetPlacement(
+            rect: CGRect(x: 0.5 - s.width / 2, y: 0.5 - s.height / 2,
+                         width: s.width, height: s.height))))
         Haptics.level()
         needsDisplay = true
         model.commit()

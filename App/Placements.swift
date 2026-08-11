@@ -2,10 +2,9 @@
 //
 //  There were two placement editors. A 320pt miniature pinned to the top of the
 //  Elements pane, with a 700pt copy of itself on a sheet behind an "Edit at Full
-//  Size…" button, working on free rectangles; and a full-screen translucent
-//  overlay over the real desktop, working on a size PRESET plus an origin. Two
-//  models, two sets of snapping rules, two commit paths, two answers to "how big
-//  is a widget" — and the user was right to call that a bug rather than a
+//  Size…" button; and a full-screen translucent overlay over the real desktop.
+//  Two models, two sets of snapping rules, two commit paths, two answers to "how
+//  big is a widget" — and the user was right to call that a bug rather than a
 //  choice. A rectangle dragged in one of them could not be expressed in the
 //  other.
 //
@@ -20,24 +19,37 @@
 //  `WidgetRect`, `Furniture` and the simulation already share, so saving is a
 //  divide and nothing else.
 //
-//  A widget is never a free rectangle. macOS has exactly four desktop widget
-//  sizes, they are fixed numbers of POINTS on every Mac, and the system lays
-//  them out on a grid — so the user supplies the position, which they know and
-//  we cannot, and the preset supplies the size, which they do not know and we
-//  can. `WidgetPlacement` holds a preset and a centre; a non-preset widget
-//  cannot be expressed. The dock is the other way round: its thickness comes
-//  from `NSScreen.visibleFrame` exactly and its EXTENT is a guess made from
-//  com.apple.dock that is known to come up short, so it stays a free rectangle
-//  the user can pull to the right length.
+//  A widget is a free rectangle with four very strong magnets on it. macOS has
+//  exactly four desktop widget sizes and they are fixed numbers of POINTS on
+//  every Mac, so a drag that passes near one of them lands on it exactly — but
+//  it is a magnet and not a cage, because the four sizes are what the SYSTEM
+//  offers and this is a description of what is actually on the user's screen.
+//  A stacked pair, a widget from an app that draws its own frame, or simply a
+//  measurement the user trusts more than ours all have to be expressible. The
+//  preset is therefore RECOVERED from the rectangle rather than stored with it
+//  (`preset(of:)`), which is also what keeps `Config` unchanged.
+//
+//  The dock is free too, and for a different reason: its thickness comes from
+//  `NSScreen.visibleFrame` exactly and its EXTENT is a guess made from
+//  com.apple.dock that measures about a quarter short. `derivedDock` keeps that
+//  guess as a snap target so the user can nudge away from the automatic answer
+//  rather than from nothing.
+//
+//  ---- Suggestions
+//
+//  `FurnitureDetector` finds roughly half the widgets, invents a couple and cuts
+//  the dock short. That is not good enough to write into a config and is far too
+//  useful to throw away, so it lands in `suggestions`: a provisional layer,
+//  drawn dashed, that the user accepts or dismisses one at a time. A suggestion
+//  NEVER overwrites something the user placed — `setSuggestions` drops any that
+//  lands on existing work before it is ever shown.
 //
 //  ---- Why nothing new is stored
 //
 //  `Config.widgets` is still a list of plain fractional rectangles and
 //  `Config.init(from:)` is untouched — which matters, because it is hand-rolled
 //  and a field added to the struct and forgotten there decodes as its default
-//  forever. The preset is not persisted because it does not need to be: a
-//  fraction that came out of a preset classifies straight back to that preset on
-//  the way in, so the round trip is lossless without a schema change.
+//  forever.
 
 import AppKit
 
@@ -123,6 +135,18 @@ enum DesktopWidgetSize: CaseIterable {
     /// elsewhere.
     static let screenMargin: CGFloat = 30
 
+    /// Every width and every height a preset can have, in points, deduplicated.
+    /// These are the magnets a RESIZE drag catches on: one axis at a time, so
+    /// pulling a small widget out sideways passes through 329 on its way to 677
+    /// whatever its height is doing.
+    static let presetWidths: [CGFloat] = [155, 329, 677]
+    static let presetHeights: [CGFloat] = [155, 345]
+
+    /// How near a resize has to come, in points, before a preset dimension takes
+    /// it. Generous: these four sizes are what macOS actually draws, so landing
+    /// on one is nearly always what was meant.
+    static let magnet: CGFloat = 12
+
     /// This preset in BACKING PIXELS on a given screen — the units the engine's
     /// collision geometry ends up in, and the honest thing to show the user
     /// beside the point size on a Retina display.
@@ -153,6 +177,21 @@ enum DesktopWidgetSize: CaseIterable {
             if score < bestScore { bestScore = score; best = candidate }
         }
         return best
+    }
+
+    /// The preset this size IS, or nil if it is a size of the user's own.
+    ///
+    /// A point and a half either way: a fraction stored in the config and
+    /// multiplied back out by a screen dimension does not always land on the
+    /// integer it came from, and a widget that read as "Custom, 329 × 155"
+    /// after a relaunch would be a bug in the readout rather than in the
+    /// placement.
+    static func exact(_ size: CGSize, tolerance: CGFloat = 1.5) -> DesktopWidgetSize? {
+        for candidate in allCases where abs(size.width - candidate.points.width) <= tolerance
+            && abs(size.height - candidate.points.height) <= tolerance {
+            return candidate
+        }
+        return nil
     }
 }
 
@@ -207,16 +246,53 @@ func continuousRoundedRect(_ r: NSRect, radius: CGFloat) -> NSBezierPath {
 
 // MARK: - One widget
 
-/// A placed widget: a preset, and where its CENTRE is as a fraction of the
-/// screen with y down.
+/// A placed widget. Fractions of the screen, y down.
 ///
-/// Centre rather than a corner on purpose. Every operation that changes the
-/// preset — the double-click cycle, adopting a detector's rectangle, pressing
-/// Space — should leave the widget looking like it is still where it was, and
-/// that is only true if the fixed point is the middle.
+/// A struct rather than a bare `CGRect` because a placement is a thing with a
+/// life of its own — it gets snapped, described, classified — and because the
+/// snapshot the overlay's Cancel restores wants a stable type.
 struct WidgetPlacement: Equatable {
-    var size: DesktopWidgetSize
-    var centre: CGPoint
+    var rect: CGRect
+}
+
+// MARK: - Handles
+//
+// One numbering for every editor and every rectangle: eight positions round the
+// box, and each one owns a known set of edges. `handleEdges` is the single
+// source of that mapping, so the miniature, the overlay and the resize solver
+// cannot end up disagreeing about which way a corner grows.
+
+enum ResizeHandle {
+
+    /// The eight, in the order both views draw and index them.
+    static let all: [Int] = Array(0...7)
+
+    /// The four mid-edge ones.
+    ///
+    /// What the dock gets, on purpose. Every dock drag then changes exactly one
+    /// edge, which is what "precise" means for a thing whose thickness is
+    /// already known exactly and whose length is the only unknown — a corner
+    /// grip would let a stray vertical wobble change a measurement the user was
+    /// not trying to change.
+    static let edges: [Int] = [1, 3, 4, 6]
+
+    /// Which edges a handle moves.
+    static func edges(_ i: Int) -> (left: Bool, right: Bool, top: Bool, bottom: Bool) {
+        // 0,3,5 are the left column; 0,1,2 the top row; and so on round the
+        // eight. No handle moves both edges of one axis, which is what makes
+        // "keep the opposite edge pinned" true by construction.
+        (left: i == 0 || i == 3 || i == 5,
+         right: i == 2 || i == 4 || i == 7,
+         top: i <= 2,
+         bottom: i >= 5)
+    }
+
+    /// Where a handle sits on a rectangle, in whatever units the rectangle is.
+    static func point(_ i: Int, in r: CGRect) -> CGPoint {
+        let e = edges(i)
+        return CGPoint(x: e.left ? r.minX : e.right ? r.maxX : r.midX,
+                       y: e.top ? r.minY : e.bottom ? r.maxY : r.midY)
+    }
 }
 
 // MARK: - The model
@@ -244,6 +320,8 @@ final class PlacementModel {
         /// A drag started or ended. This is what drives the live highlight of
         /// the same element in the OTHER view.
         case dragging
+        /// The suggestion layer changed: detection landed, or one was taken.
+        case suggestions
         /// A gesture finished. This is the one place a config is written.
         case commit
     }
@@ -271,6 +349,16 @@ final class PlacementModel {
 
     /// The dock. Nil means "no dock found or configured".
     var dock: CGRect? { didSet { if dock != oldValue { notify(.geometry) } } }
+
+    /// What `Furniture.desktop` works the dock out to be, from the screen's
+    /// insets and com.apple.dock. Not a placement — a SNAP TARGET, so a user
+    /// correcting the automatic answer starts from it rather than from nothing,
+    /// and can put it back by dragging an edge until it catches.
+    var derivedDock: CGRect? { didSet { if derivedDock != oldValue { notify(.geometry) } } }
+
+    /// Whether the dock rectangle is the user's measurement rather than the
+    /// derived guess. A suggestion is never allowed to overwrite it once it is.
+    var dockIsUserPlaced = false
 
     /// Menu bar height as a fraction of the screen, 0 for none.
     var menuBarHeight: CGFloat = 0.025 {
@@ -378,13 +466,19 @@ final class PlacementModel {
         notify(.geometry)
     }
 
-    /// Step a widget round the four sizes about its own centre.
+    /// Step a widget round the four presets about its own centre. Still here
+    /// alongside free resizing, because "make this one exactly a medium" is a
+    /// thing you want to say in one keystroke rather than by dragging until the
+    /// magnet catches on both axes at once.
     func cycleSize(_ i: Int) {
         guard i >= 0, i < widgets.count else { return }
-        var p = widgets[i]
-        p.size = p.size.next
-        widgets[i] = clamped(p)
-        notify(.geometry)
+        let r = widgets[i].rect
+        let current = preset(of: r)
+        let next = current?.next ?? DesktopWidgetSize.nearest(to: pointSize(of: r))
+        let s = fractionalSize(next)
+        setWidget(clamped(WidgetPlacement(rect: CGRect(x: r.midX - s.width / 2,
+                                                       y: r.midY - s.height / 2,
+                                                       width: s.width, height: s.height))), at: i)
     }
 
     private func clampSelection() {
@@ -397,35 +491,24 @@ final class PlacementModel {
 
     /// The placements as `Config.widgets` wants them.
     var widgetRects: [WidgetRect] {
-        widgets.map { p in
-            let r = rect(of: p)
-            return WidgetRect(x: Float(r.minX), y: Float(r.minY),
-                              w: Float(r.width), h: Float(r.height))
+        widgets.map {
+            WidgetRect(x: Float($0.rect.minX), y: Float($0.rect.minY),
+                       w: Float($0.rect.width), h: Float($0.rect.height))
         }
     }
 
-    /// Take fractional rectangles from anywhere — the config, the screenshot
-    /// detector — and make them placements.
-    ///
-    /// Every one is classified to the nearest preset about its own centre. That
-    /// is the point of the preset model and it is visible on screen long before
-    /// anything is saved: open either editor over detector output and watch six
-    /// approximately-widget-shaped boxes become six actual widgets.
+    /// Take fractional rectangles from the config and make them placements.
+    /// Nothing is reshaped on the way in: what the user measured is what comes
+    /// back, and `preset(of:)` works out afterwards whether it happens to be one
+    /// of the four.
     func setWidgetRects(_ rects: [WidgetRect]) {
-        setWidgets(rects.map { placement(fromFraction:
-            CGRect(x: CGFloat($0.x), y: CGFloat($0.y),
-                   width: CGFloat($0.w), height: CGFloat($0.h))) })
+        setWidgets(rects.map {
+            WidgetPlacement(rect: CGRect(x: CGFloat($0.x), y: CGFloat($0.y),
+                                         width: CGFloat($0.w), height: CGFloat($0.h)))
+        })
     }
 
-    /// One fractional rectangle, classified and centred.
-    func placement(fromFraction r: CGRect) -> WidgetPlacement {
-        let inPoints = CGSize(width: r.width * screenPoints.width,
-                              height: r.height * screenPoints.height)
-        return clamped(WidgetPlacement(size: .nearest(to: inPoints),
-                                       centre: CGPoint(x: r.midX, y: r.midY)))
-    }
-
-    // MARK: - Rectangles
+    // MARK: - Rectangles and sizes
 
     /// A preset's size as a fraction of the reference screen.
     func fractionalSize(_ s: DesktopWidgetSize) -> CGSize {
@@ -433,10 +516,28 @@ final class PlacementModel {
                height: s.points.height / max(1, screenPoints.height))
     }
 
-    func rect(of p: WidgetPlacement) -> CGRect {
-        let s = fractionalSize(p.size)
-        return CGRect(x: p.centre.x - s.width / 2, y: p.centre.y - s.height / 2,
-                      width: s.width, height: s.height)
+    /// A fractional rectangle's size in points on the reference screen.
+    func pointSize(of r: CGRect) -> CGSize {
+        CGSize(width: r.width * screenPoints.width, height: r.height * screenPoints.height)
+    }
+
+    /// The preset this rectangle IS, or nil for a size of the user's own.
+    func preset(of r: CGRect) -> DesktopWidgetSize? {
+        DesktopWidgetSize.exact(pointSize(of: r))
+    }
+
+    /// The rounding to draw a widget of this size with, in points.
+    ///
+    /// A preset gets its own radius. Anything else is scaled off the nearest
+    /// preset by how much smaller or larger it is, so a hand-sized widget still
+    /// looks like a widget rather than jumping between two fixed roundings.
+    func cornerRadiusPoints(for r: CGRect) -> CGFloat {
+        let s = pointSize(of: r)
+        let p = DesktopWidgetSize.nearest(to: s)
+        let reference = min(p.points.width, p.points.height)
+        let mine = min(s.width, s.height)
+        let scale = reference > 1 ? min(1.6, max(0.5, mine / reference)) : 1
+        return p.cornerRadius * scale
     }
 
     func rect(of ref: Ref) -> CGRect? {
@@ -444,21 +545,12 @@ final class PlacementModel {
         case .dock: return dock
         case .widget(let i):
             guard i >= 0, i < widgets.count else { return nil }
-            return rect(of: widgets[i])
+            return widgets[i].rect
         }
     }
 
-    /// Keep a widget entirely on the screen. One that is half off the edge
-    /// cannot be grabbed again, and a real widget cannot be there anyway.
-    func clamped(_ p: WidgetPlacement) -> WidgetPlacement {
-        let s = fractionalSize(p.size)
-        var q = p
-        q.centre.x = min(max(s.width / 2, q.centre.x), max(s.width / 2, 1 - s.width / 2))
-        q.centre.y = min(max(s.height / 2, q.centre.y), max(s.height / 2, 1 - s.height / 2))
-        return q
-    }
-
-    /// The same for a free rectangle — the dock.
+    /// Keep a rectangle entirely on the screen. One that is half off the edge
+    /// cannot be grabbed again, and neither a widget nor the dock can be there.
     func clamped(_ r: CGRect) -> CGRect {
         var q = r
         q.origin.x = min(max(0, q.origin.x), max(0, 1 - q.width))
@@ -466,19 +558,18 @@ final class PlacementModel {
         return q
     }
 
+    func clamped(_ p: WidgetPlacement) -> WidgetPlacement {
+        WidgetPlacement(rect: clamped(p.rect))
+    }
+
     /// Write a rectangle back to whatever it belongs to.
-    ///
-    /// A widget keeps its preset and takes the rectangle's CENTRE, so a move
-    /// cannot smuggle in a size that macOS would never draw. Only the dock is
-    /// free, because only the dock's extent is genuinely unknown.
     func write(_ r: CGRect, to ref: Ref) {
         switch ref {
         case .dock:
             dock = r
+            dockIsUserPlaced = true
         case .widget(let i):
-            guard i >= 0, i < widgets.count else { return }
-            setWidget(clamped(WidgetPlacement(size: widgets[i].size,
-                                              centre: CGPoint(x: r.midX, y: r.midY))), at: i)
+            setWidget(WidgetPlacement(rect: r), at: i)
         }
     }
 
@@ -500,6 +591,8 @@ final class PlacementModel {
         /// screen. Views scale it by however big they are drawing that screen.
         var radiusPoints: CGFloat
         var editable: Bool
+        /// Which grips it offers. Empty for the menu bar.
+        var handles: [Int]
     }
 
     var elements: [Element] {
@@ -508,7 +601,7 @@ final class PlacementModel {
             out.append(Element(ref: nil,
                                rect: CGRect(x: 0, y: 0, width: 1, height: menuBarHeight),
                                label: "Menu bar", wet: wetMenuBar,
-                               radiusPoints: 0, editable: false))
+                               radiusPoints: 0, editable: false, handles: []))
         }
         if let d = dock {
             // The dock is a slab with a very round end. Half its thickness caps
@@ -516,12 +609,14 @@ final class PlacementModel {
             // rounded slab, which is what the real one does.
             let thickness = min(d.height * screenPoints.height, d.width * screenPoints.width)
             out.append(Element(ref: .dock, rect: d, label: "Dock", wet: wetDock,
-                               radiusPoints: min(18, thickness / 2), editable: true))
+                               radiusPoints: min(18, thickness / 2), editable: true,
+                               handles: ResizeHandle.edges))
         }
         for (i, w) in widgets.enumerated() {
-            out.append(Element(ref: .widget(i), rect: rect(of: w),
+            out.append(Element(ref: .widget(i), rect: w.rect,
                                label: "Widget \(i + 1)", wet: wetWidgets,
-                               radiusPoints: w.size.cornerRadius, editable: true))
+                               radiusPoints: cornerRadiusPoints(for: w.rect),
+                               editable: true, handles: ResizeHandle.all))
         }
         return out
     }
@@ -534,6 +629,116 @@ final class PlacementModel {
 
     /// Editable elements in a stable order, for Tab.
     var cycleOrder: [Ref] { elements.compactMap { $0.editable ? $0.ref : nil } }
+
+    // MARK: - Suggestions
+    //
+    // What the detector thinks it saw, held apart from what the user has said.
+
+    struct Suggestion: Equatable {
+        enum Kind: Equatable { case widget, dock }
+        var id: Int
+        var kind: Kind
+        /// Fractions, y down.
+        var rect: CGRect
+    }
+
+    private(set) var suggestions: [Suggestion] = []
+    private var nextSuggestionID = 1
+
+    /// One line saying why there is or is not a suggestion layer. Shown
+    /// verbatim; nil while nothing has been attempted.
+    var suggestionNote: String? { didSet { notify(.suggestions) } }
+
+    /// Replace the suggestion layer with a detector's answer.
+    ///
+    /// Anything that lands on work the user has already done is dropped HERE,
+    /// before it is ever drawn — so "hand-placed wins" is a property of the
+    /// model rather than a rule the drawing code has to remember. A suggestion
+    /// the user has to look at and reject is nearly as bad as one that
+    /// overwrote them.
+    func setSuggestions(widgets suggestedWidgets: [CGRect], dock suggestedDock: CGRect?) {
+        var out: [Suggestion] = []
+        for r in suggestedWidgets where !collidesWithPlacement(r) {
+            out.append(Suggestion(id: nextSuggestionID, kind: .widget, rect: clamped(r)))
+            nextSuggestionID += 1
+        }
+        // The dock is only ever suggested when the current one is still the
+        // derived guess. Once the user has pulled it to a length they measured,
+        // a detector that reads 23% short must not be allowed to offer it back.
+        if let d = suggestedDock, !dockIsUserPlaced {
+            out.append(Suggestion(id: nextSuggestionID, kind: .dock, rect: clamped(d)))
+            nextSuggestionID += 1
+        }
+        suggestions = out
+        notify(.suggestions)
+    }
+
+    /// Does this rectangle land on something the user already placed?
+    ///
+    /// Overlap against the SMALLER of the two areas, so a small suggestion
+    /// sitting inside a large placement counts as a collision even though it
+    /// covers little of it. A third is the threshold: two real widgets never
+    /// overlap that much, and two readings of the same widget always do.
+    private func collidesWithPlacement(_ r: CGRect) -> Bool {
+        for w in widgets {
+            let i = w.rect.intersection(r)
+            guard !i.isNull, i.width > 0, i.height > 0 else { continue }
+            let smaller = min(w.rect.width * w.rect.height, r.width * r.height)
+            if smaller > 0, (i.width * i.height) / smaller > 0.33 { return true }
+        }
+        return false
+    }
+
+    func suggestion(at p: CGPoint) -> Suggestion? {
+        for s in suggestions.reversed() where s.rect.contains(p) { return s }
+        return nil
+    }
+
+    /// Take a suggestion at its word. Returns false when it had gone stale.
+    @discardableResult
+    func acceptSuggestion(_ id: Int) -> Bool {
+        guard let i = suggestions.firstIndex(where: { $0.id == id }) else { return false }
+        let s = suggestions.remove(at: i)
+        switch s.kind {
+        case .widget:
+            addWidget(WidgetPlacement(rect: s.rect))
+        case .dock:
+            dock = s.rect
+            dockIsUserPlaced = true
+            selection = .dock
+        }
+        notify(.suggestions)
+        commit()
+        return true
+    }
+
+    func dismissSuggestion(_ id: Int) {
+        guard let i = suggestions.firstIndex(where: { $0.id == id }) else { return }
+        suggestions.remove(at: i)
+        notify(.suggestions)
+    }
+
+    func acceptAllSuggestions() {
+        guard !suggestions.isEmpty else { return }
+        for s in suggestions {
+            switch s.kind {
+            case .widget: widgets.append(WidgetPlacement(rect: s.rect))
+            case .dock:
+                dock = s.rect
+                dockIsUserPlaced = true
+            }
+        }
+        suggestions.removeAll()
+        notify(.geometry)
+        notify(.suggestions)
+        commit()
+    }
+
+    func dismissAllSuggestions() {
+        guard !suggestions.isEmpty else { return }
+        suggestions.removeAll()
+        notify(.suggestions)
+    }
 
     // MARK: - Snapping
     //
@@ -559,12 +764,11 @@ final class PlacementModel {
     /// Everything a moving edge is allowed to land on, along one axis.
     ///
     /// The screen's edges, its centre and the margin macOS parks the outer
-    /// widget column at; every other element's edges and centre; and the two
-    /// gutter offsets, which put a widget exactly beside another at the spacing
-    /// the system itself would have used. The old miniature also snapped to a
-    /// twelfth-of-a-screen grid, which was a reasonable idea for free
-    /// rectangles and is noise now that a widget's size is a preset — it fights
-    /// the gutter, which is the spacing that is actually real.
+    /// widget column at; every other element's edges and centre; the two gutter
+    /// offsets, which put a widget exactly beside another at the spacing the
+    /// system itself would have used; and — for the dock — the edges of the
+    /// rectangle `Furniture.desktop` derived, so the automatic answer is
+    /// somewhere you can get back to.
     func snapTargets(vertical: Bool, excluding: Ref?) -> [CGFloat] {
         let extent = vertical ? screenPoints.width : screenPoints.height
         let margin = DesktopWidgetSize.screenMargin / max(1, extent)
@@ -576,6 +780,9 @@ final class PlacementModel {
             let mid = vertical ? r.midX : r.midY
             let hi = vertical ? r.maxX : r.maxY
             t.append(contentsOf: [lo, mid, hi, hi + gutter, lo - gutter])
+        }
+        if excluding == .dock, let d = derivedDock {
+            t.append(contentsOf: vertical ? [d.minX, d.midX, d.maxX] : [d.minY, d.midY, d.maxY])
         }
         return t
     }
@@ -589,6 +796,89 @@ final class PlacementModel {
                             excluding: moving, tolerance: tolerance.height, into: &out)
         out.rect = r.offsetBy(dx: dx, dy: dy)
         return out
+    }
+
+    /// Resize by one handle: the whole rule, in one place, for both editors.
+    ///
+    /// Two kinds of magnet, in a deliberate order.
+    ///
+    /// First POSITIONAL: the moving edge is pulled onto a guide — the screen's
+    /// edges and centre, another rectangle's edges, the dock's derived extent.
+    /// An edge dragged deliberately onto a line the user can see is the more
+    /// specific intention, so it wins.
+    ///
+    /// Then DIMENSIONAL, and only on an axis where nothing positional caught:
+    /// the width or the height is pulled onto one of the preset dimensions, by
+    /// moving the same edge and no other. That is what makes the four canonical
+    /// sizes strong magnets rather than a cage — pull a small widget sideways
+    /// and it stops at 329 and again at 677 on the way, but it does not have to
+    /// stop there.
+    ///
+    /// The opposite edge is never touched: `ResizeHandle.edges` gives no handle
+    /// both edges of one axis, so "pinned" is structural rather than something
+    /// this function has to be careful about.
+    func resizing(_ start: CGRect, handle: Int, dx: CGFloat, dy: CGFloat,
+                  ref: Ref, tolerance: CGSize, minimum: CGFloat,
+                  presetMagnets: Bool) -> Snap {
+        let e = ResizeHandle.edges(handle)
+        var minX = start.minX + (e.left ? dx : 0)
+        var maxX = start.maxX + (e.right ? dx : 0)
+        var minY = start.minY + (e.top ? dy : 0)
+        var maxY = start.maxY + (e.bottom ? dy : 0)
+
+        var snap = Snap(rect: .zero)
+        var caughtX = false, caughtY = false
+        if e.left {
+            let v = snappingEdge(minX, vertical: true, moving: ref,
+                                 tolerance: tolerance.width, into: &snap)
+            caughtX = v != minX; minX = v
+        }
+        if e.right {
+            let v = snappingEdge(maxX, vertical: true, moving: ref,
+                                 tolerance: tolerance.width, into: &snap)
+            caughtX = v != maxX; maxX = v
+        }
+        if e.top {
+            let v = snappingEdge(minY, vertical: false, moving: ref,
+                                 tolerance: tolerance.height, into: &snap)
+            caughtY = v != minY; minY = v
+        }
+        if e.bottom {
+            let v = snappingEdge(maxY, vertical: false, moving: ref,
+                                 tolerance: tolerance.height, into: &snap)
+            caughtY = v != maxY; maxY = v
+        }
+
+        if presetMagnets {
+            let tol = DesktopWidgetSize.magnet
+            if (e.left || e.right), !caughtX,
+               let w = magnet(points: (maxX - minX) * screenPoints.width,
+                              to: DesktopWidgetSize.presetWidths, tolerance: tol) {
+                let frac = w / max(1, screenPoints.width)
+                if e.left { minX = maxX - frac } else { maxX = minX + frac }
+                snap.names.insert("w:\(Int(w))")
+            }
+            if (e.top || e.bottom), !caughtY,
+               let h = magnet(points: (maxY - minY) * screenPoints.height,
+                              to: DesktopWidgetSize.presetHeights, tolerance: tol) {
+                let frac = h / max(1, screenPoints.height)
+                if e.top { minY = maxY - frac } else { maxY = minY + frac }
+                snap.names.insert("h:\(Int(h))")
+            }
+        }
+
+        if maxX - minX < minimum { if e.left { minX = maxX - minimum } else { maxX = minX + minimum } }
+        if maxY - minY < minimum { if e.top { minY = maxY - minimum } else { maxY = minY + minimum } }
+        snap.rect = CGRect(x: minX, y: minY, width: maxX - minX, height: maxY - minY)
+        return snap
+    }
+
+    private func magnet(points v: CGFloat, to targets: [CGFloat],
+                        tolerance: CGFloat) -> CGFloat? {
+        var best: CGFloat?
+        for t in targets where abs(t - v) <= tolerance
+            && (best == nil || abs(t - v) < abs(best! - v)) { best = t }
+        return best
     }
 
     /// Snap ONE edge, leaving the opposite edge exactly where it is.
@@ -632,24 +922,49 @@ final class PlacementModel {
 
     // MARK: - Describing what is selected
 
+    /// How a widget's size reads: the preset when it is exactly one, and the
+    /// measurement when it is not. The user asked for both, and the difference
+    /// is the whole point of free resizing — "Medium" is a claim about what
+    /// macOS drew, and "340 × 160 pt" is a claim about what was measured.
+    func sizeDescription(of r: CGRect) -> String {
+        let s = pointSize(of: r)
+        if let p = preset(of: r) {
+            return "\(p.name), \(p.cells.across) × \(p.cells.down)"
+        }
+        return String(format: "Custom, %.0f × %.0f pt", s.width, s.height)
+    }
+
+    /// The dock in the units somebody setting it exactly would want: points for
+    /// the measurement, percentages for the thing that survives a resolution
+    /// change.
+    func dockDescription(_ r: CGRect) -> String {
+        let p = pointSize(of: r)
+        return String(format: "x %.0f pt (%.1f%%), y %.0f pt (%.1f%%), %.0f × %.0f pt "
+                            + "(%.1f%% × %.1f%%)",
+                      r.minX * screenPoints.width, r.minX * 100,
+                      r.minY * screenPoints.height, r.minY * 100,
+                      p.width, p.height, r.width * 100, r.height * 100)
+    }
+
     /// The status line both editors show. One sentence, one wording.
     var selectionDescription: String {
         guard let ref = selection, let r = rect(of: ref) else {
+            if !suggestions.isEmpty {
+                return "\(suggestions.count) suggested rectangle"
+                     + "\(suggestions.count == 1 ? "" : "s") — click one to keep it, "
+                     + "⌥-click to dismiss it."
+            }
             return widgets.isEmpty && dock == nil
                 ? "Nothing placed yet — drag a rectangle over each widget."
-                : "Click a rectangle to select it. Drag to move it, Space to change its size, "
-                + "⌫ to remove it."
+                : "Click a rectangle to select it. Drag to move it, take a handle to resize it, "
+                + "Space for the next preset size, ⌫ to remove it."
         }
         switch ref {
         case .dock:
-            return String(format: "Dock — x %.0f%%, y %.0f%%, %.0f%% × %.0f%% of the screen",
-                          r.minX * 100, r.minY * 100, r.width * 100, r.height * 100)
+            return "Dock — " + dockDescription(r)
         case .widget(let i):
-            guard i < widgets.count else { return "" }
-            let s = widgets[i].size
-            return String(format: "Widget %d — %@, %d × %d cells, %.0f × %.0f pt, at x %.0f%%, y %.0f%%",
-                          i + 1, s.name, s.cells.across, s.cells.down,
-                          s.points.width, s.points.height, r.minX * 100, r.minY * 100)
+            return String(format: "Widget %d — %@, at x %.0f%%, y %.0f%%",
+                          i + 1, sizeDescription(of: r), r.minX * 100, r.minY * 100)
         }
     }
 }
