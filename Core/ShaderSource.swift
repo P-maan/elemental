@@ -2355,7 +2355,7 @@ inline float dotRadius(float lum, float time, float phase) {
 inline float3 styleCell(float3 col, float2 cuv, float cellPx, float lum,
                         float phase, float time, int shape, int finish,
                         bool flank, float2 lightDir, float lightI, float rot,
-                        float splay, float depth)
+                        float splay, float depth, float hNorm)
 {
     if (rot != 0.0f) {
         float cs = cos(rot), sn = sin(rot);
@@ -2364,8 +2364,24 @@ inline float3 styleCell(float3 col, float2 cuv, float cellPx, float lum,
     }
     if (shape == 1) {
         // ---- dots: SDF circle, radius from cell luminance (roomstand.py:2587)
+        //
+        // DEPTH IN DOT MODE IS NOT EXTRUSION. The square wall carries depth by
+        // being a wall — parallax, flanks, shadow between blocks — and none of
+        // that survives on a field of separated beads: a dot has no side face to
+        // see, and the gaps between dots are already background, so there is
+        // nothing for a shadow to fall on. Worse, the relief warp foreshortens
+        // the face a dot is drawn on, which does not read as depth at all — it
+        // reads as the dot being SQUASHED, which is the "dots are getting
+        // squeezed" report.
+        //
+        // So dots carry depth the way separated objects actually do it, by
+        // aerial perspective: near ones are larger and stand clear of the
+        // background, far ones shrink and sink back into it. Both cues come off
+        // the same height field the extrusion uses, so the two shapes agree
+        // about what is near even though they show it completely differently.
         float ln = saturate(lum);
-        float dotR = dotRadius(lum, time, phase);
+        float near = saturate(hNorm);
+        float dotR = dotRadius(lum, time, phase) * (0.80f + 0.38f * near);
         float d = length(cuv - 0.5f);
         float aa = 0.5f / cellPx;                 // half-pixel feather, no aliasing
         float m = 1.0f - smoothstep(dotR - aa, dotR + aa, d);
@@ -2412,6 +2428,12 @@ inline float3 styleCell(float3 col, float2 cuv, float cellPx, float lum,
             col += fres * 0.13f * (0.35f + 0.65f * ln);
         }
         col *= m;
+        // Sink back into the background with distance. This is the half of the
+        // cue that makes a field of dots read as having depth at all: contrast
+        // against the gap falls off with range, exactly as it does across a
+        // room, so the far beads recede instead of every dot sitting on one
+        // plane at equal strength.
+        col *= 0.58f + 0.42f * near;
     } else {
         if (flank) return col;                 // side wall: no front-face detail
 
@@ -3236,8 +3258,12 @@ fragment float4 presentPass(VOut in [[stage_in]],
     }
 
     float rot = U.splayAmt * cellJit(rel.cell, 4.7f) * 0.22f;
+    // How near this block stands, 0 flush with the wall to 1 fully proud. The
+    // square shape shows this by extrusion; the dot shape uses it for aerial
+    // perspective instead. See styleCell.
+    float hNorm = (hmax > 1e-4f) ? saturate(rel.h / hmax) : 0.0f;
     col = styleCell(col, suv, dc.size, lum, phase, U.time, U.shape, U.finish,
-                    rel.flank, L, I, rot, U.splayAmt, U.depthAmt);
+                    rel.flank, L, I, rot, U.splayAmt, U.depthAmt, hNorm);
 
     // ---- Relief shading. Front faces, side faces, and the crevices between.
     if (hmax > 0.0005f) {
