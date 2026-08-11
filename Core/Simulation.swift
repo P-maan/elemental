@@ -1070,7 +1070,27 @@ final class SceneSimulation {
             // cell — and every splash in the scene was hidden behind the lip
             // that made it. Spray you cannot see over the edge is spray that
             // does not exist. These reach two to five cells, which is a splash.
-            let upward = -d.v * (0.45 + bounce * 0.75 + rnd() * 0.55)
+            //
+            // Aimed at a HEIGHT, not scaled off the fall speed.
+            //
+            // `-d.v * (0.45 + ...)` is proportional to how fast the drop was
+            // going, and the note above — "these reach two to five cells" — was
+            // worked out for a raindrop at full fall speed. Drizzle arrives at
+            // about 84 px/s, and against gravity of 900 px/s^2 that is a rise of
+            // v^2/2g = SIX PIXELS: a quarter of one cell, entirely inside the lip
+            // that made it. Every offscreen test used --rain 8, so this never
+            // showed; the live sky was WMO 51 at 0.2 intensity, which is drizzle,
+            // and the dock got spray that physically could not clear its own
+            // edge.
+            //
+            // So solve for the rise instead. A cell and a bit at the bottom of
+            // the range, four or so at the top, converted to the launch speed
+            // that actually reaches it: v = sqrt(2 g h). Drizzle still throws
+            // less than a downpour — the range is keyed off the same impact
+            // speed — but the floor is now "visible" rather than "nothing".
+            let riseCells = 1.3 + 2.6 * min(1, d.v / 260)
+            let vUp = (2 * 900 * SP * riseCells).squareRoot()
+            let upward = -vUp * (0.78 + rnd() * 0.38)
             drops.append(GlassDrop(x: d.x + sideways * 0.01,
                                    y: s.top - SP * 0.15,
                                    r: d.r * (0.30 + rnd() * 0.25),
