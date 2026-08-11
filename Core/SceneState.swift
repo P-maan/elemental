@@ -267,16 +267,13 @@ enum Obscuration: Int32, Codable {
 enum SceneKind: Int32, Codable {
     case sun = 0, partly = 1, cloud = 2, rain = 3, snow = 4, thunder = 5
 
-    /// roomstand.py:2387 — the cloud-deck base brightness per condition.
-    var cbase: Float {
-        switch self {
-        case .thunder: return 82
-        case .rain:    return 110
-        case .snow:    return 205
-        case .cloud:   return 170
-        case .sun, .partly: return 218
-        }
-    }
+    // The per-condition deck brightness table that used to live here
+    // (roomstand.py:2387 — thunder 82, rain 110, snow 205, cloud 170, sun and
+    // partly 218) is gone. Its only reader was `continuousCloudBase`, which now
+    // derives the same quantity from measured light transmission; see the note
+    // there. A table indexed by a WMO code cannot answer "how bright is this
+    // deck", because two skies with the same measured transmission are the same
+    // brightness whichever bucket their code fell into.
 
     var isWet: Bool { self == .rain || self == .thunder || self == .snow }
 
@@ -1177,18 +1174,28 @@ struct WeatherState: Equatable {
 
     /// Cloud-deck base brightness, 0-255, continuous.
     ///
-    /// The hand-tuned table in `SceneKind.cbase` turns out to be very close to
-    /// 255·∛T for the transmissions above — 218 sun, 170 cloud, 110 rain, 82
-    /// thunder come out as T of 0.63, 0.30, 0.080 and 0.033, which is exactly
-    /// the illuminance ladder. Brightness perception going as roughly the cube
-    /// root of luminance is why. So this is the same curve the scene was already
-    /// tuned to, made continuous — and then clamped to within a band of the
-    /// discrete value so a bad transmission can never take the sky somewhere the
-    /// tuning has never been.
+    /// The old hand-tuned table in `SceneKind.cbase` turned out to be very close
+    /// to 255·∛T for the transmissions above — 218 sun, 170 cloud, 110 rain, 82
+    /// thunder come out as T of 0.63, 0.30, 0.080 and 0.033, which is exactly the
+    /// illuminance ladder. Brightness perception going as roughly the cube root
+    /// of luminance is why.
+    ///
+    /// It used to be clamped into a ±band around that table's value for the
+    /// current `effectiveKind`, "so a bad transmission can never take the sky
+    /// somewhere the tuning has never been". That clamp is gone. It let a
+    /// CLASSIFICATION overrule a measurement: `effectiveKind` is derived from a
+    /// WMO code, and the deck brightness of a real sky is not a function of which
+    /// of six buckets an integer code fell into. Two skies with identical
+    /// measured transmission would render at different brightness because one was
+    /// filed as `.cloud` and the other as `.rain`, and a correctly measured dark
+    /// afternoon could be lifted back up simply because the code said `.cloud`.
+    ///
+    /// Nothing is needed in its place. `lightTransmission` is a product of
+    /// per-layer transmissions, precipitation rate, measured ceiling, snow albedo
+    /// and fog, and it already returns `max(0.012, min(1, t))` — so this is
+    /// bounded to 58…255 by construction, without consulting a table.
     var continuousCloudBase: Float {
-        let anchor = effectiveKind.cbase
-        let continuousValue = 255 * pow(lightTransmission, 1.0 / 3.0)
-        return max(anchor * 0.62, min(anchor * 1.22, continuousValue))
+        255 * pow(lightTransmission, 1.0 / 3.0)
     }
 }
 
