@@ -1151,7 +1151,7 @@ fragment CellOut cellPass(VOut in [[stage_in]],
     // 7% of the frame, whichever is larger — so every column feathers over the
     // same distance and adjacent transitions overlap into a soft fringe. It is
     // also allowed to continue BELOW eY, which is what removes the cut.
-    float lowAmt = 0.0f, lowD2 = 0.0f, lowK = 0.0f, lowThick = 0.0f;
+    float lowAmt = 0.0f, lowD2 = 0.0f, lowK = 0.0f, lowThick = 0.0f, lowDen = 1.0f;
     float eY = edgeArr[ix];
     float lowFeather = max(H * 0.07f, SPv.y * 3.0f);
     if (eY > 0.0f) {
@@ -1178,7 +1178,33 @@ fragment CellOut cellPass(VOut in [[stage_in]],
         // Density is the LOW layer's own, not total cover. Keyed off `covF` this
         // read a sky of pure cirrus as a solid deck — the layer split exists
         // precisely so those two do not look alike.
-        lowThick = lowK * (0.45f + 0.55f * lowD2) * min(1.0f, 0.35f + U.cloudLow);
+        // Two-dimensional density, so the deck is a VOLUME and not a silhouette.
+        //
+        // Opacity was a function of (eY - cyp) alone — the distance below THIS
+        // COLUMN's edge — so every column was a single tone extruded straight
+        // down, and the deck read as vertical streaks hanging from the top of
+        // the frame. `lowN` below has existed the whole time but only tints the
+        // SHADING, so the only structure visible was brightness painted over a
+        // field that had none. That is the vertical stretch.
+        //
+        // Three octaves, drifting, with the vertical scale about half the
+        // horizontal: cloud is far wider than it is tall, and getting that ratio
+        // wrong is most of what makes procedural cloud read as smoke.
+        float ddx = cxp * 0.0043f, ddy = cyp * 0.0091f;
+        float den = 0.30f * sin(ddx * 1.00f + ddy * 0.83f + sec * 0.013f)
+                  + 0.20f * sin(ddx * 2.10f - ddy * 1.55f + sec * 0.021f + 2.1f)
+                  + 0.13f * sin(ddx * 4.30f + ddy * 3.10f - sec * 0.009f + 4.7f);
+        // Recentred on 1 so it VARIES the deck rather than thinning it. A mottle
+        // whose mean is below one is a cover reduction wearing a texture's
+        // clothes — the same mistake already fixed twice in the shading terms.
+        lowDen = clamp(1.0f + den, 0.38f, 1.32f);
+        // As cover approaches total the holes close. An overcast genuinely IS
+        // flat; only a broken deck should show its lumps, and without this a
+        // 100% sky keeps punching gaps in a lid that has none.
+        lowDen = mix(lowDen, 1.0f, saturate((U.cloudLow - 0.72f) / 0.28f));
+
+        lowThick = lowK * (0.45f + 0.55f * lowD2)
+                 * min(1.0f, 0.35f + U.cloudLow) * lowDen;
         lowAmt   = lowThick * nightCloudDim;
     }
 
@@ -1575,8 +1601,15 @@ fragment CellOut cellPass(VOut in [[stage_in]],
         // brighter toward it, which is the shape the Pi actually wanted — and
         // both mottles are recentred on 1.0 instead of 0.93, since a texture is
         // meant to vary the tone, not to quietly lower it.
+        // DEPTH. Optical thickness is what decides how much light reaches the
+        // underside of a cloud, so the density field has to darken the body as
+        // well as thicken it — otherwise the lumps are the same tone as the
+        // gaps and the deck stays flat however much structure the opacity has.
+        // This is the term that turns a mottle into relief you can read as
+        // volume: the thick parts hang darker, the thin parts glow.
         float shade = min(235.0f, U.cbase * (0.85f + 0.30f * (1.0f - lowD2))
                                 * (1.0f + 0.42f * light)
+                                * (1.20f - 0.30f * lowDen)
                                 * (0.85f + 0.30f * lowN) + rim * 70.0f);
         float3 cc = cloudTint(sAlt, light + rim, shade);
         L += lowAmt * (skyBrAmt > 0.5f ? 55.0f : 12.0f) + rim * 26.0f;
