@@ -229,7 +229,13 @@ final class WallpaperSurface: NSObject, CAMetalDisplayLinkDelegate {
 
     func updateWeather(_ w: WeatherState) {
         renderer.state.weather = w
+        // A new reading can change what the scene needs to be drawn AT.
+        applyFrameRate(lowPower: lowPowerMode)
     }
+
+    /// Remembered so a weather-driven frame-rate update cannot silently cancel
+    /// low-power mode, which is set from a different event entirely.
+    private var lowPowerMode = false
 
     func locationChanged() { renderer.locationChanged() }
 
@@ -240,10 +246,44 @@ final class WallpaperSurface: NSObject, CAMetalDisplayLinkDelegate {
     }
 
     func applyFrameRate(lowPower: Bool = false) {
-        let target = lowPower ? max(15, config.maxFPS / 2) : config.maxFPS
-        let f = Float(target)
-        link?.preferredFrameRateRange = CAFrameRateRange(minimum: max(10, f / 2),
-                                                         maximum: f, preferred: f)
+        lowPowerMode = lowPower
+        let ceiling = Float(lowPower ? max(15, config.maxFPS / 2) : config.maxFPS)
+
+        // Ask for the rate the SCENE needs, not a constant.
+        //
+        // This requested `config.maxFPS` — 30 by default — every frame of every
+        // hour, whatever was on screen, and that is why Elemental sits near the
+        // top of the energy list. Almost nothing here moves at thirty hertz: the
+        // sun and moon travel in arcs measured in hours, the deck drifts, the
+        // sky colour turns over a whole twilight, the relief does not move at
+        // all. A clear calm sky at thirty frames a second is the same picture
+        // drawn thirty times a second.
+        //
+        // The things that genuinely need the rate are hydrometeors falling and
+        // lightning, because both are only legible as MOTION — a rain streak
+        // sampled at six hertz is a dotted line, and a flash is a single frame.
+        // So the user's setting stays the CEILING and the preferred rate is
+        // derived from what is actually moving. On the commonest case there is —
+        // a dry sky — this asks for six instead of thirty.
+        //
+        // Given as a range rather than a fixed rate, so CoreAnimation can still
+        // coalesce us with whatever else is driving the display; on a ProMotion
+        // panel that is most of the saving, because the compositor can hold a
+        // low refresh rate instead of waking to 120 for one wallpaper.
+        let w = renderer.state.weather
+        var need: Float = 6                        // drift, colour, breathing
+        if w.precipRate > 0.02 {
+            // Enough that a streak reads as a line rather than a dotted one,
+            // rising with how hard it is coming down.
+            need = max(need, 16 + min(14, w.precipRate * 3))
+        }
+        if w.isThundering { need = ceiling }       // a flash IS one frame
+        if w.wind > 30 { need = max(need, 14) }    // gale-driven streak lean
+        let preferred = max(4, min(ceiling, need))
+
+        link?.preferredFrameRateRange = CAFrameRateRange(minimum: max(4, preferred * 0.5),
+                                                         maximum: ceiling,
+                                                         preferred: preferred)
         renderer.state.lowFX = lowPower
     }
 
