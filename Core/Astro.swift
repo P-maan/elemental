@@ -17,6 +17,16 @@ struct AstroState {
     var moonPhaseN: Float = 0      // 0..1 through the synodic month
     var moonAge: Float = 0         // days
     var stars: [GPUStar] = []
+
+    /// How deep in the earth's shadow the moon is right now, 0..1.
+    ///
+    /// 0 is no eclipse. Around 0.3 the limb is visibly bitten; at 1 the moon is
+    /// wholly inside the umbra and turns the deep copper red that the atmosphere
+    /// refracts round the earth into the shadow — the thing everybody calls a
+    /// blood moon. There is nothing to fetch for this: it is pure geometry, so
+    /// the scene can show it at the right minute of the right night whether or
+    /// not the machine has ever been online.
+    var lunarEclipse: Float = 0
 }
 
 struct Coordinate: Codable, Equatable {
@@ -25,6 +35,57 @@ struct Coordinate: Codable, Equatable {
 }
 
 enum Astro {
+
+    // MARK: - Rare events, from geometry alone
+
+    /// How deep the moon is in the earth's umbra, 0..1.
+    ///
+    /// A lunar eclipse needs two things at once and both are cheap to test.
+    ///
+    ///   1. FULL MOON. The moon must be opposite the sun, because the shadow it
+    ///      is falling into is the earth's and the earth is between them.
+    ///   2. NEAR A NODE. The moon's orbit is tilted about 5.14 degrees to the
+    ///      ecliptic, which is why there is not an eclipse every month — most
+    ///      full moons pass above or below the shadow entirely. Only when the
+    ///      moon is also crossing the ecliptic plane does it go through.
+    ///
+    /// The umbra at the moon's distance is roughly 1.4 degrees in radius against
+    /// the moon's own 0.26, so the geometry is forgiving: an ecliptic latitude
+    /// under about a degree gives a total eclipse, and under about 1.6 a partial
+    /// one. That tolerance is what makes a low-precision series good enough here
+    /// — we need to know that tonight is the night and how deep it goes, not to
+    /// predict contact times to the second.
+    static func lunarEclipseDepth(date: Date, moonAlt: Double) -> Double {
+        // Below the horizon it is not our eclipse to draw. Somebody on the other
+        // side of the planet is watching it; here the moon is simply not up.
+        guard moonAlt > -2 else { return 0 }
+
+        let d = julianDay(date) - 2451545.0
+        // Mean elongation of the moon from the sun. 180 degrees is full.
+        let D = (297.8501921 + 12.19074911 * d).truncatingRemainder(dividingBy: 360)
+        // Argument of latitude: how far the moon is from its ascending node.
+        // Zero or 180 means it is crossing the ecliptic — where the shadow is.
+        let F = (93.2720950 + 13.22935024 * d).truncatingRemainder(dividingBy: 360)
+
+        // Distance from exact full, in degrees.
+        var fromFull = abs(((D - 180).truncatingRemainder(dividingBy: 360) + 540)
+            .truncatingRemainder(dividingBy: 360) - 180)
+        fromFull = min(fromFull, 360 - fromFull)
+        // The moon moves ~12.19 degrees of elongation a day, and the whole of a
+        // total eclipse fits inside a few hours, so anything beyond a couple of
+        // degrees from full is not one.
+        guard fromFull < 2.4 else { return 0 }
+
+        // Ecliptic latitude, magnitude only.
+        let fRad = F * .pi / 180
+        let beta = abs(5.1454 * sin(fRad))
+        guard beta < 1.7 else { return 0 }
+
+        // Depth from both: full in elongation AND close to the node.
+        let byNode = max(0, min(1, (1.7 - beta) / 1.1))
+        let byPhase = max(0, min(1, (2.4 - fromFull) / 1.6))
+        return byNode * byPhase
+    }
 
     // MARK: - Julian day
 
@@ -159,6 +220,7 @@ enum Astro {
         s.moonIllum = Float(moon.illum)
         s.moonAge = Float(moon.age)
         s.moonPhaseN = Float(moonPhase(date))
+        s.lunarEclipse = Float(lunarEclipseDepth(date: date, moonAlt: moon.alt))
 
         // Project the catalog to screen-normalised positions.
         let n = julianDay(date) - 2451545.0

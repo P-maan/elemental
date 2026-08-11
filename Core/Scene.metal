@@ -70,7 +70,10 @@ struct Uniforms {
                                // 1 = plain SDR; above that is how far past white
                                // this frame may go. Read from NSScreen every
                                // frame, never assumed — see WallpaperSurface.
-    float pad0, pad1;
+    // Depth of a lunar eclipse, 0..1. Occupies what was `pad0`, so the struct
+    // keeps its field order and its 224 bytes — see the mirroring note above.
+    float eclipse;
+    float pad1;
 };
 
 // Rain is rasterised at this multiple of the cell grid in each axis.
@@ -1431,11 +1434,39 @@ fragment CellOut cellPass(VOut in [[stage_in]],
             // is what a moon behind thinning cloud actually does.
             float mw = mix(0.42f, 1.0f, litF) * seeThrough;
             float mL = mix(earth, 255.0f * k, litF);
+            float3 mCol = float3(mix(106.0f, 236.0f * k, litF),
+                                 mix(112.0f, 240.0f * k, litF),
+                                 mix(136.0f, 252.0f * k, litF));
+
+            // ---- Eclipse. The moon in the earth's umbra.
+            //
+            // Not a shadow that hides it — that is the mistake everyone makes
+            // drawing this, and it produces a black bite out of a disc, which is
+            // only what a PARTIAL eclipse looks like in its first hour. Totality
+            // is not dark. The earth's atmosphere refracts sunlight round the
+            // limb and into the shadow, and because that light has crossed the
+            // whole depth of the atmosphere twice it has lost its blue exactly
+            // the way a sunset has — the moon is lit by every sunrise and sunset
+            // on earth at once. What you get is a deep copper red disc, dimmer
+            // than a full moon by a factor of ten thousand but unmistakably
+            // there and unmistakably RED.
+            //
+            // So the disc is driven toward that copper and taken down in
+            // brightness, rather than being masked. `eclipse` is pure geometry
+            // from Astro — no feed — so this happens on the right night at the
+            // right minute whether or not the machine has ever been online.
+            if (U.eclipse > 0.01f) {
+                float e = saturate(U.eclipse);
+                // Deep copper, and the shaded limb goes browner than the middle
+                // because the umbra is not evenly lit either.
+                float3 copper = float3(152.0f, 58.0f, 34.0f) * (0.55f + 0.45f * litF);
+                mCol = mix(mCol, copper, e);
+                mL   = mix(mL, mL * 0.16f + 26.0f, e);
+            }
+
             if (mw > w) {
                 w  = mw;
-                cr = mix(106.0f, 236.0f * k, litF);
-                cg = mix(112.0f, 240.0f * k, litF);
-                cb = mix(136.0f, 252.0f * k, litF);
+                cr = mCol.r; cg = mCol.g; cb = mCol.b;
             }
             L = mix(L, max(L, mL), seeThrough);
         } else if (moonAbove) {

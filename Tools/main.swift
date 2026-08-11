@@ -786,7 +786,7 @@ print("""
   time      \(f.string(from: date))
   location  \(lat), \(lon)  facing \(Int(state.facingAz))°
   sun       alt \(String(format: "%.1f", state.astro.sunAlt))°  az \(String(format: "%.1f", state.astro.sunAz))°
-  moon      alt \(String(format: "%.1f", state.astro.moonAlt))°  az \(String(format: "%.1f", state.astro.moonAz))°  illum \(String(format: "%.0f", state.astro.moonIllum))%  phase \(String(format: "%.2f", state.astro.moonPhaseN))
+  moon      alt \(String(format: "%.1f", state.astro.moonAlt))°  az \(String(format: "%.1f", state.astro.moonAz))°  illum \(String(format: "%.0f", state.astro.moonIllum))%  phase \(String(format: "%.2f", state.astro.moonPhaseN))\(state.astro.lunarEclipse > 0.01 ? String(format: "  ECLIPSE %.2f", state.astro.lunarEclipse) : "")
   stars     \(state.astro.stars.count) above horizon and in view
   style     \(state.shape) / \(state.finish)   grid \(state.gridRows) rows
   weather   \(state.weather.effectiveKind)  cover \(String(format: "%.0f", state.weather.cover))% (lo \(String(format: "%.0f", state.weather.cloudLow)) mid \(String(format: "%.0f", state.weather.cloudMid)) hi \(String(format: "%.0f", state.weather.cloudHigh)))  precip \(String(format: "%.2f", state.weather.precipAmount))mm  \(state.weather.observedFrom.map { "via " + $0 } ?? "model only")

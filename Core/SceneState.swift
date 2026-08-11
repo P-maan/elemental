@@ -70,7 +70,10 @@ struct Uniforms {
     /// anything above is how far past white this frame may go. Read from
     /// `NSScreen` every frame rather than assumed — see `WallpaperSurface`.
     var edrHead: Float = 1
-    var pad0: Float = 0, pad1: Float = 0
+    /// Depth of a lunar eclipse, 0..1. Occupies what was `pad0`, so the struct
+    /// keeps its field order and its 224 bytes — see the mirroring note above.
+    var eclipse: Float = 0
+    var pad1: Float = 0
 }
 
 struct GPUBreather { var ax, ay, R, per, s1, s2, ph, ph2: Float }

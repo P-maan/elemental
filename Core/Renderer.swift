@@ -852,6 +852,9 @@ final class ElementalRenderer {
         // shader's EDR branch stays inert on SDR, and capped so a bogus reading
         // cannot ask for an absurd exposure.
         u.edrHead = max(1, min(16, edrHeadroom))
+        // Rare events, from geometry — no feed, so this works offline and on
+        // the exact minute. See Astro.lunarEclipseDepth.
+        u.eclipse = max(0, min(1, state.astro.lunarEclipse))
 
         uniformBuf.contents().copyMemory(from: &u, byteCount: MemoryLayout<Uniforms>.stride)
     }
