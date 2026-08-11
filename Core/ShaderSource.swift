@@ -1274,7 +1274,25 @@ fragment CellOut cellPass(VOut in [[stage_in]],
                 // this cell hides it. The disc is what reads as "sunny", so it
                 // has to obey both.
                 float discDim = 1.0f - U.covF * 0.30f;
-                L = max(L, (150.0f + diskI * 120.0f) * discDim * seeThrough);
+                // Feathered in by `diskI`, because `max()` behind a threshold
+                // gives the disc a CLIFF at its rim.
+                //
+                // The floor is 150: at the `diskI > 0.03` gate the disc still
+                // asserts about 133 luminance units, so its edge is a step of
+                // 133 across one cell boundary. `heightPass` then does exactly
+                // what it is supposed to do with a step that size — extrudes it
+                // — and the disc comes out as a flat-topped mesa with vertical
+                // walls and a drop shadow, roughly five cells across, which is
+                // `sunDiscR * 1.7` to the cell. That is the hard rectangle the
+                // sun wears on a partly-cloudy sky, and no amount of work in
+                // the height field could have fixed it: the cliff is real, and
+                // it is here.
+                //
+                // A sun does not have an edge like that. The disc blends into
+                // its own glow, so the contribution has to reach zero at the
+                // rim rather than land on a floor.
+                float discL = (150.0f + diskI * 120.0f) * discDim * seeThrough;
+                L = mix(L, max(L, discL), smoothstep(0.0f, 0.25f, diskI));
                 // The disc's COLOUR must be occluded by exactly what its
                 // luminance is occluded by, one line up. Without `seeThrough`
                 // the sun held a weight near 0.6 through a closed deck and
@@ -2073,7 +2091,29 @@ fragment float4 heightPass(VOut in [[stage_in]],
     // 0.03 is under the cell-to-cell step of a smooth sky at 36 rows, so the sky
     // stays out of it; 0.30 is comfortably inside the moon-against-night and
     // disc-against-daylight contrasts, so those saturate.
-    float prom = smoothstep(0.03f, 0.30f, excess);
+    //
+    // A SOFT knee, not a smoothstep, and for exactly the reason `updateCloudEdge`
+    // already uses one: "A hard clamp meant that under heavy cover the profile
+    // spent long stretches pinned at exactly 1, so the deck's edge came out as
+    // flat-topped rectangles with cliffs where it came off the clamp — blocks,
+    // not cloud."
+    //
+    // The same thing was happening here, to every bright feature. `smoothstep`
+    // reaches exactly 1 at excess 0.30 and stays there, so the core of a feature
+    // is a PLATEAU at uniform height and its rim is where the value falls off
+    // the top — one or two cells wide, i.e. a near-vertical wall. The raycast
+    // then renders that wall honestly, with a lit flank and a drop shadow, and
+    // the sun comes out as a hard-edged rectangular mesa about five cells across
+    // sitting on the sky. It is the cloud-deck bug in a second place.
+    //
+    // This approaches 1 asymptotically and never lands on it, so height varies
+    // continuously across a feature and across its edge, and there is no step
+    // for the extrusion to turn into a wall. The 0.03 floor still keeps a smooth
+    // sky out of it — cell-to-cell steps there are below it — and a genuinely
+    // high-contrast object like the moon against a night sky still reaches ~0.87
+    // and stands proud.
+    float e    = max(0.0f, excess - 0.03f);
+    float prom = e / (e + 0.12f);
     // Bright AND prominent is what should come forward. A dark speck against a
     // darker surround is prominent too, and it should not tower.
     //
@@ -2421,9 +2461,30 @@ fragment float4 presentPass(VOut in [[stage_in]],
             // band straight across the moon, because at twenty rows the split
             // reaches out of the disc on one side and stays inside it on the
             // other and the clamp was wide enough to carry the whole difference.
-            const float FR = 0.05f;
-            t.r += clamp(dr, -FR, FR);
-            t.b += clamp(db, -FR, FR);
+            // Taken as ONE signed separation, applied equally and oppositely.
+            //
+            // `t.r += clamp(dr)` and `t.b += clamp(db)` move the two channels
+            // INDEPENDENTLY, so at any strong edge both saturate at the bound
+            // and the cell shifts by up to 13 levels of red and 13 of blue in
+            // whichever directions the two samples happen to disagree. That is
+            // not a dispersion fringe, it is a hue swing of up to 26 units of
+            // red-minus-blue, and on the near-neutral cells that make up a grey
+            // sky it reads as pink and teal confetti — the same sensitivity to
+            // differential channel shift that the posterizer had.
+            //
+            // Dispersion separates wavelengths; it does not change how much
+            // light there is. So derive a single scalar from the disagreement
+            // between the two probes and push red one way and blue the other by
+            // the same amount. Luminance is preserved exactly, and the two
+            // cases that were producing false colour now fall out for free: at
+            // a smooth gradient the probes agree and the fringe vanishes, and
+            // at a PEAK — the solar disc, the moon's centre — both probes are
+            // darker, so there is no separation direction and no fringe, which
+            // is correct, because a peak is not an edge.
+            const float FR = 0.030f;
+            float s = clamp(0.5f * (dr - db), -FR, FR);
+            t.r += s;
+            t.b -= s;
         }
         if (U.frostAmt > 0.005f && U.lowfx < 0.5f) {
             float f = U.frostAmt * 1.7f;       // must clear a whole cell to blur
