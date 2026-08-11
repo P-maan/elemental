@@ -62,16 +62,28 @@ open -g build/Elemental.app
 3. **A failed build leaves the previous binary in place**, so you will test stale
    code and conclude your change worked, or did nothing. Always check the build
    before believing a render.
-4. **`grep -c "error"` matches Swift 6 warning prose** ("this is an error in the
+4. **`--hour` IS NOT A FLAG.** `elemental-render --hour 10` silently renders at
+   the current wall clock and prints a reassuring summary. Every frame labelled
+   with an hour that way was rendered at whatever time it happened to be. Use
+   `--at 2026-08-11T19:45 --tz Asia/Kolkata`. `--sheet --from --to` is fine.
+5. **The Bash cwd persists between calls, and `./build.sh` follows it.** One
+   `cd` into the main checkout earlier in a session means later `./build.sh`
+   calls build the WRONG TREE while the renders come from the right one — you
+   then conclude a correct edit had no effect. Cost an hour on the twilight
+   band. Put the `cd` in every build command.
+6. **A row mean hides anything localised.** `--probe` averages across the frame,
+   so a saturated band on one side is diluted by dark cells on the other, and a
+   real fix reads as "no change". Read the PNG.
+7. **`grep -c "error"` matches Swift 6 warning prose** ("this is an error in the
    Swift 6 language mode") and reports false failures.
-5. **The `Uniforms` struct is mirrored BY HAND** in `Core/Scene.metal` and
+8. **The `Uniforms` struct is mirrored BY HAND** in `Core/Scene.metal` and
    `Core/SceneState.swift`. Same fields, same order, total a multiple of 16
    bytes. A mismatch does not crash — it silently shifts every field after the
    seam. If you change it, render and LOOK.
-6. **The app is signed ad hoc**, so every rebuild mints a new code hash and macOS
+9. **The app is signed ad hoc**, so every rebuild mints a new code hash and macOS
    forgets TCC grants — location especially. There is now a build-token check
    that detects this; do not reintroduce a one-way `hasAskedForLocation` gate.
-7. **`Config.init(from:)` is hand-rolled** with a `lenient()` helper. A new field
+10. **`Config.init(from:)` is hand-rolled** with a `lenient()` helper. A new field
    MUST be added there or it silently fails to load. Every stored property must
    be covered.
 
@@ -166,14 +178,35 @@ granted headroom and is the one surface where it could work.
 water running down a stacked pane of glass; per-element furniture knobs (blocked
 — the engine reads only global options from `Core/Furniture.swift`).
 
-**Known, unfixed:** a saturated red band at the bottom of night tiles (sun ≈
--10°); dead `liveWeather` and `SurfaceStyle.hasAskedForLocation` fields; blowing
-snow computed but not drawn; `precipVisibility`/`obscurationDensity` unread.
+**Known, unfixed:** dead `liveWeather` and `SurfaceStyle.hasAskedForLocation`
+fields.
 
-**Reported but NOT reproducible** — swept 5 conditions × 4 densities × 3 preview
-sizes and found nothing: scattered black cells at 54+ rows, a stray bright cell
-at the bottom of overcast renders, a chromatic fringe on strong edges. If the
-black cells are real they are in the live preview's readback, not the render.
+**The saver does not follow the weather** (reported 2026-08-11, not yet fixed).
+Ruled out by static analysis: ByHost config delivery (correct, resolves to
+Greater Noida), `mirrorsDesktop` surface-style resolution, the legacyScreenSaver
+sandbox network entitlement (`network.client` IS granted), the fetch/reschedule
+chain in `WeatherService`, and the easer's retarget guard. NSLog does not reach
+`log show`, so the remaining diagnosis needs the saver running and observed.
+
+**Fixed since this file was written** (see git log for the reasoning):
+- the saturated red band at the bottom of night tiles — green was collapsing to
+  ~5% of red on the solar horizon; bounded against `max(r, b)` after the sky
+  tint. Note the two false starts: a floor inside `skyRGB` binds on nothing, and
+  a floor against `min(r, b)` binds on nothing. Row means hid both; the frame
+  showed it at once. **Read the frame, not the probe, for anything localised.**
+- `precipVisibility` is now read (it drives the sky's optical depth).
+- `blowingSnow` and `obscurationDensity` were NEVER unread — this list was
+  wrong. They are consumed at `Simulation.swift:1486` and `:1511`.
+
+**Reported and now REPRODUCIBLE** — the earlier sweep looked at weather; these
+are a function of relief and parallax over a luminance edge, so no weather sweep
+could have found them. Both fixed in `7fbf6f5`:
+- the "chromatic fringe on strong edges" was dispersion moving R and B
+  independently, each clamped to ±0.05, so both saturated at any edge.
+- the hard rectangular block around the sun was the solar disc's own 133-unit
+  luminance cliff plus a `smoothstep` in `heightPass` that saturated at 1 and
+  made every bright feature a plateau with a vertical rim.
+Isolate relief artifacts with `--depth 0 --emph 0`, `--disperse 0`, `--finish 1`.
 
 **Unexplained:** toggling the lock/saver "mimic home screen" setting off and on
 fixed it for the user. A real ordering bug was found and fixed in the lock-still
