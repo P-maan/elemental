@@ -767,7 +767,21 @@ final class ElementalRenderer {
         u.smokeF = state.smokeF
         u.uv = w.uv; u.wind = w.wind; u.windDir = w.windDir
         u.rain = w.rain; u.snow = w.snow
-        u.vis = w.visibility; u.humid = w.humidity
+        // Visibility THROUGH the precipitation, not the ambient figure.
+        //
+        // `precipVisibility` works out how far you can see through falling water
+        // per hydrometeor form — dendrites scatter more than compact crystals,
+        // drizzle is optically thick for how little water it carries, hail is
+        // nearly transparent between stones — and it was computed correctly and
+        // then read by nothing but the debug string. Meanwhile the shader derived
+        // the whole aerosol optical depth from the ambient `visibility`, which on
+        // a model-only fetch does not know rain is falling at all. So the air
+        // inside a downpour was as optically clear as the air on a dry afternoon,
+        // and the depth cue that makes heavy rain read as heavy went missing.
+        //
+        // Degrades safely: `precipVisibility` returns `visibility` unchanged
+        // whenever nothing is falling, so a dry sky is bit-identical.
+        u.vis = w.precipVisibility; u.humid = w.humidity
         u.scAQI = w.aqi
         u.code = Int32(w.code)
         u.kind = w.effectiveKind.rawValue
