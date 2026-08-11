@@ -299,7 +299,7 @@ enum SceneKind: Int32, Codable {
 /// the one it already has — see `WeatherEaser`. Every stored property is a
 /// scalar, an optional scalar or an optional `Date`/`String`, so the synthesised
 /// `==` is exactly the right test and costs nothing worth measuring.
-struct WeatherState: Equatable {
+struct WeatherState: Equatable, Codable {
 
     // ---- what it is
     var code: Int = 0

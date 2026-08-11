@@ -185,6 +185,20 @@ final class ElementalSaverView: ScreenSaverView {
         // alive, so it fetches its own conditions.
         weather.onUpdate = { [weak self] w in self?.state.weather = w }
         let p = loadedConfig.scenePlace
+        // Prefer the reading the DESKTOP already has, before asking the network
+        // for one of our own.
+        //
+        // Our own fetch is the thing that was failing to arrive, and until it
+        // does `state.weather` is a default `WeatherState()` — a clear calm day
+        // over whatever the sky is really doing. The desktop app refreshes every
+        // ten minutes whenever it is running and publishes each reading to the
+        // ByHost domain the config already travels through, so in the normal
+        // case there is a good answer sitting there the moment we start. The
+        // fetch below still runs, and takes over the moment it lands; this only
+        // removes the window where we would otherwise assert a sky nobody has.
+        if let shared = SaverWeather.read(lat: p.latitude, lon: p.longitude, place: p.name) {
+            state.weather = shared
+        }
         weather.start(at: Coordinate(latitude: p.latitude, longitude: p.longitude))
         refreshAstro()
         renderer?.markIdle()
@@ -202,7 +216,20 @@ final class ElementalSaverView: ScreenSaverView {
         // Settings can change while the saver is running, and it used to read
         // config only once at startup — so the saver drifted from the desktop
         // permanently. Cheap enough to re-read every few seconds.
-        if Date().timeIntervalSince(lastConfigRead) > 4 { loadConfiguration() }
+        if Date().timeIntervalSince(lastConfigRead) > 4 {
+            loadConfiguration()
+            // Keep tracking the desktop for as long as our own fetch has never
+            // landed. Once it has, ours is the fresher of the two and wins; this
+            // is only the fallback, and it has to keep working rather than being
+            // a one-shot at startup — a saver left running all night would
+            // otherwise hold whatever sky it read in its first second.
+            if weather.lastSuccess == nil {
+                let p = loadedConfig.scenePlace
+                if let shared = SaverWeather.read(lat: p.latitude, lon: p.longitude, place: p.name) {
+                    state.weather = shared
+                }
+            }
+        }
         if Date().timeIntervalSince(lastAstro) > 60 && !r.isPlayingBack { refreshAstro() }
 
         // Assign the WHOLE state, then put back the two things the renderer owns

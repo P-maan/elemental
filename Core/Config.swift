@@ -430,6 +430,9 @@ struct Config: Codable, Equatable {
     /// exactly like a grey screen.
     static let saverDomain = "com.prakritmaan.elemental.saver"
 
+    /// Key the desktop's current reading is published under, in that same domain.
+    static let saverWeatherKey = "weather"
+
     func save() {
         try? FileManager.default.createDirectory(at: Self.directory,
                                                  withIntermediateDirectories: true)
@@ -584,5 +587,80 @@ extension Config.SurfaceStyle {
         facingAz        = c.lenient(.facingAz, d.facingAz)
         scenePlaceName  = try? c.decodeIfPresent(String.self, forKey: .scenePlaceName)
         hasAskedForLocation = c.lenient(.hasAskedForLocation, d.hasAskedForLocation)
+    }
+}
+
+// MARK: - Handing the desktop's weather to the screen saver
+//
+// The saver runs its own `WeatherService` and does its own network fetch. When
+// that fetch does not land — which is the reported failure — it renders a
+// default `WeatherState()`: a clear calm day, whatever the sky is actually
+// doing. The SETTINGS reached it correctly the whole time, which is exactly what
+// made this look like a settings problem when it never was one. Mimicking the
+// home screen has to mean mimicking its WEATHER, not only its place and grid.
+//
+// So the app publishes every reading it takes into the same ByHost domain the
+// config already travels through — the one domain the legacyScreenSaver sandbox
+// is documented to allow — and the saver prefers that over anything it manages
+// to fetch for itself. The saver's own fetch stays as the fallback for when the
+// app is not running at all.
+enum SaverWeather {
+
+    /// What gets written. The coordinate travels WITH the reading because the
+    /// saver is allowed to render a different place from the desktop: when
+    /// `mirrorsDesktop` is off and the user has picked their own city for the
+    /// saver, the desktop's weather is the wrong answer and must be ignored
+    /// rather than quietly painted over the other city's sky.
+    private struct Payload: Codable {
+        var weather: WeatherState
+        var lat: Double
+        var lon: Double
+        var at: Double            // epoch seconds, for staleness
+        var place: String?        // the resolved place NAME, see `read`
+    }
+
+    /// Called by the app whenever a reading lands.
+    static func publish(_ w: WeatherState, lat: Double, lon: Double, place: String?) {
+        let p = Payload(weather: w, lat: lat, lon: lon,
+                        at: Date().timeIntervalSince1970, place: place)
+        guard let data = try? JSONEncoder().encode(p),
+              let json = String(data: data, encoding: .utf8) else { return }
+        CFPreferencesSetValue(Config.saverWeatherKey as CFString, json as CFString,
+                              Config.saverDomain as CFString,
+                              kCFPreferencesCurrentUser, kCFPreferencesCurrentHost)
+        CFPreferencesSynchronize(Config.saverDomain as CFString,
+                                 kCFPreferencesCurrentUser, kCFPreferencesCurrentHost)
+    }
+
+    /// Read by the saver, for the place it is actually drawing.
+    ///
+    /// `maxAge` is deliberately generous. A reading three hours old is a far
+    /// better answer than a default clear sky, and the easer will carry it to
+    /// whatever the saver's own fetch eventually reports rather than snapping.
+    ///
+    /// The place test is a NAME match first, then a wide coordinate fallback,
+    /// and the width is the point. The two sides legitimately disagree: the app
+    /// publishes from its live `scenePlace`, which Location Services keeps
+    /// re-resolving, while the saver reads the copy last written to disk by
+    /// `Config.save()`. Measured on the development machine those were 0.18
+    /// degrees apart for the same city — so a few-kilometre epsilon rejects the
+    /// reading and hands back a default clear sky, which is the exact failure
+    /// this type exists to remove. 0.35 degrees is about 39 km: comfortably
+    /// inside one metropolitan area, and nowhere near a city the user actually
+    /// chose as a different one.
+    static func read(lat: Double, lon: Double, place: String? = nil,
+                     maxAge: TimeInterval = 3 * 3600) -> WeatherState? {
+        CFPreferencesSynchronize(Config.saverDomain as CFString,
+                                 kCFPreferencesCurrentUser, kCFPreferencesCurrentHost)
+        guard let json = CFPreferencesCopyValue(Config.saverWeatherKey as CFString,
+                                                Config.saverDomain as CFString,
+                                                kCFPreferencesCurrentUser,
+                                                kCFPreferencesCurrentHost) as? String,
+              let data = json.data(using: .utf8),
+              let p = try? JSONDecoder().decode(Payload.self, from: data) else { return nil }
+        guard Date().timeIntervalSince1970 - p.at < maxAge else { return nil }
+        if let a = p.place, let b = place, a == b { return p.weather }
+        guard abs(p.lat - lat) < 0.35, abs(p.lon - lon) < 0.35 else { return nil }
+        return p.weather
     }
 }

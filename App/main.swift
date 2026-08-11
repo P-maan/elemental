@@ -93,6 +93,16 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             guard let self else { return }
             self.surfaces.values.forEach { $0.updateWeather(w) }
             self.writeStatus(w)
+            // Hand the same reading to the screen saver.
+            //
+            // The saver fetches for itself, and when that does not land it draws
+            // a default clear sky — with the right place, the right grid and the
+            // right theme, because the CONFIG always reached it. That is what
+            // made "the saver is not following the weather" look like a settings
+            // problem when it never was one. Mimicking the home screen has to
+            // include its weather.
+            let p = self.config.scenePlace
+            SaverWeather.publish(w, lat: p.latitude, lon: p.longitude, place: p.name)
             // Push it to the lock screen too, rather than leaving the still an
             // update behind.
             self.lockStill?.exportNow(config: self.config.lockConfig, astro: self.lockAstro())
