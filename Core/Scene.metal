@@ -1794,6 +1794,48 @@ fragment CellOut cellPass(VOut in [[stage_in]],
     float tf = (0.62f + max(0.0f, 1.0f - li) * 0.30f) * skyReach;
     g += (skyChroma * gl - g) * tf;
 
+    // ---- ordering guard: no sky is any part of magenta.
+    //
+    // Green may sit anywhere BETWEEN red and blue — that is an ordinary warm or
+    // cool sky — and it may dip a little below both in the antisolar purple
+    // light, where ozone's Chappuis absorption genuinely takes green out. What it
+    // may not do is collapse to a fraction of the other two.
+    //
+    // Measured at sun -9.5 degrees, the bottom row of the frame arrived here as
+    // (44, 3, 25): green at seven per cent of red with blue sitting ABOVE it.
+    // That is a saturated magenta band across the sunset horizon, and it is the
+    // same failure the scattering model was written to remove — "a civil-twilight
+    // ramp with green below both red and blue at every point (that is magenta,
+    // and the sky is never any part of magenta)" — arriving by a different route.
+    //
+    // It belongs HERE rather than beside the analogous upper cap on `chroma` in
+    // skyRGB. By the end of skyRGB the sky's own blue is as crushed as its green,
+    // so a bound against min(r, b) there is a bound against nothing; the blue
+    // that makes this read as magenta rather than as plain red is contributed by
+    // `rampLUT`'s cool bias surviving the (1 - tf) share of the blend just above.
+    // This is the first point at which all three channels of the real sky pixel
+    // exist. Verified by reading each channel back individually at exactly this
+    // line.
+    //
+    // Bounded against the LARGER of red and blue, which is the part I got wrong
+    // twice. A bound against min() is a bound against nothing here: on the red
+    // cells themselves blue is ALREADY the small channel — they are near
+    // (200, 10, 15) — so min() picks 15 and the floor does nothing. The blue in
+    // the row mean that made this look like magenta comes from the dark blue
+    // cells on the other side of the frame, not from the band. Against max(),
+    // the floor tracks the channel that is actually carrying the colour.
+    //
+    // 0.34 is set by the reddest thing a sky ever is. The deepest sunset sits
+    // near a 1800 K blackbody, about (255, 109, 0) in sRGB, i.e. a green-to-red
+    // ratio of 0.43; nothing in the atmosphere goes redder than that, so a floor
+    // below it cannot clip a real sunset while it still catches a band at 0.05.
+    // A night zenith (10, 14, 45) and the antisolar purple light (60, 40, 90)
+    // both sit above the floor already and are left alone.
+    //
+    // Before the element blend, deliberately: a rainbow's inner violet is real,
+    // and it IS red-and-blue-above-green. It must not be caught by this.
+    g.g = max(g.g, 0.34f * max(g.r, g.b));
+
     // Blend the weather tint — the colour of whatever element won this cell.
     //
     // Gated on there actually BEING an element. The old test was
