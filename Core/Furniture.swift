@@ -146,24 +146,61 @@ enum Furniture {
         let leftInset   = Float(v.minX - f.minX) * scale
         let rightInset  = Float(f.maxX - v.maxX) * scale
 
-        // Tiles shrink once the dock would overflow its edge, so cap the span.
+        // The dock PANEL, not the whole reserved strip.
+        //
+        // `visibleFrame` reserves the dock's region INCLUDING the margin macOS
+        // leaves around it, so a surface built straight from the inset runs all
+        // the way to the edge of the display. Two things followed from that, and
+        // both are user-visible:
+        //
+        //   * `hasUnderside` is `bottom < H - 1`, so a dock touching the bottom
+        //     edge has no underside and `shedDrips` can never shed one drop off
+        //     it. "No water running down the dock" was not a rendering problem;
+        //     the geometry said there was nowhere for it to run to.
+        //   * the strip is taller than the panel, so splashes aim at a lip that
+        //     is above where the dock's real top edge is.
+        //
+        // macOS floats the panel with a margin all round. The margin scales with
+        // the tile size rather than being fixed, and a sixth of the reserved
+        // depth matches it closely across tile sizes from 32 to 128.
+        let dockGap = max(2.0 as Float, min(bottomInset, max(leftInset, rightInset)) * 0.16)
+
+        // Extent along the dock's edge.
+        //
+        // This counted persistent apps + persistent others + Finder, and came
+        // out about a quarter short of the real panel. Three things it missed:
+        // the separator between the app and file sections, the Trash — which
+        // lives in neither persistent list — and `show-recents`, which appends
+        // up to three more tiles and is on by default.
+        let showsRecents = (d["show-recents"] as? NSNumber)?.boolValue ?? true
+        let recentCount = showsRecents ? 3 : 0
+        // Trash, plus a separator's worth of width for each section break.
+        let extras = Float(1 + recentCount) + 1.2
         func span(along available: Float) -> Float {
-            min(available * 0.96, items * (tile * scale * 1.09) + tile * scale)
+            let tiles = (items + extras) * (tile * scale * 1.09)
+            // The panel's own padding, which does not scale with item count.
+            return min(available * 0.96, tiles + tile * scale * 0.55)
         }
 
         switch options.dock ? orientation : "off" {
         case "left" where leftInset > 1:
             let h = span(along: H)
-            out.append(Surface(x: 0, y: (H - h) / 2, w: leftInset, h: h, kind: .dock))
+            out.append(Surface(x: dockGap, y: (H - h) / 2,
+                               w: max(1, leftInset - dockGap * 2), h: h, kind: .dock))
         case "right" where rightInset > 1:
             let h = span(along: H)
-            out.append(Surface(x: W - rightInset, y: (H - h) / 2, w: rightInset, h: h, kind: .dock))
+            out.append(Surface(x: W - rightInset + dockGap, y: (H - h) / 2,
+                               w: max(1, rightInset - dockGap * 2), h: h, kind: .dock))
         case "off":
             break                                       // dock opted out
         default:
             if bottomInset > 1 {
                 let w = span(along: W)
-                out.append(Surface(x: (W - w) / 2, y: H - bottomInset, w: w, h: bottomInset, kind: .dock))
+                // Inset from the bottom by the panel's own margin, so the dock
+                // HAS an underside and water can run off it into the gap the way
+                // it does off any other ledge.
+                out.append(Surface(x: (W - w) / 2, y: H - bottomInset + dockGap,
+                                   w: w, h: max(1, bottomInset - dockGap * 2), kind: .dock))
             }
         }
         guard options.widgets else { return out }

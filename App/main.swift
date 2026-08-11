@@ -30,6 +30,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private var settings: SettingsWindowController?
     private var astroTimer: Timer?
     private var locationTimer: Timer?
+    private var furnitureTimer: Timer?
     private var lockStill: LockStillExporter?
 
     let location = LocationService()
@@ -77,6 +78,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         // Astro moves slowly; once a minute is plenty and costs nothing.
         astroTimer = Timer.scheduledTimer(withTimeInterval: 60, repeats: true) { [weak self] _ in
             self?.refreshAstro()
+        }
+
+        // The furniture moves without the config changing — the dock is hidden,
+        // an app quits, the tile size is dragged, a display is rescaled. Two
+        // seconds is well below the time it takes to notice, and an unchanged
+        // list costs a comparison and nothing else. See refreshFurnitureIfNeeded.
+        furnitureTimer = Timer.scheduledTimer(withTimeInterval: 2, repeats: true) { [weak self] _ in
+            self?.surfaces.values.forEach { $0.refreshFurnitureIfNeeded() }
         }
 
         // Re-check where we are on a schedule as well as on wake. A laptop that

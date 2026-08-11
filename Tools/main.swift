@@ -445,8 +445,15 @@ if args["dock"] != nil || args["widget"] != nil {
     let W = Float(width), H = Float(height)
     var out: [Surface] = []
     if args["dock"] != nil {
+        // Modelled the way Furniture.desktop models it: the dock PANEL, floated
+        // above the bottom of the display by its own margin, not the whole
+        // reserved strip. Flush with the edge it has no underside, so
+        // `shedDrips` can never shed a drop off it and the harness reports a dry
+        // dock in a downpour — which is exactly the wrong answer to test against.
         let dockH = H * 0.09, dockW = W * 0.72
-        out.append(Surface(x: (W - dockW) / 2, y: H - dockH, w: dockW, h: dockH, kind: .dock))
+        let dockGap = dockH * 0.16
+        out.append(Surface(x: (W - dockW) / 2, y: H - dockH + dockGap,
+                           w: dockW, h: dockH - dockGap * 2, kind: .dock))
     }
     if args["widget"] != nil {
         let wW = W * 0.26, wH = H * 0.20

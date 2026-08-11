@@ -32,6 +32,8 @@ final class WallpaperSurface: NSObject, CAMetalDisplayLinkDelegate {
 
     private var paused = true
     private var lastSize: CGSize = .zero
+    private var lastConfig: Config?
+    private weak var lastScreen: NSScreen?
 
     // MARK: - EDR
     //
@@ -196,6 +198,10 @@ final class WallpaperSurface: NSObject, CAMetalDisplayLinkDelegate {
         // needs rebuilding, and it now accounts for a changed row count as well
         // as a changed display size.
         lastSize = px
+        // Kept so the furniture can be re-derived on a timer without a
+        // config change to hang it off — see refreshFurnitureIfNeeded.
+        lastConfig = config
+        lastScreen = screen
         renderer.resize(width: Int(px.width), height: Int(px.height))
 
         // Water lands on the dock and on the desktop widgets. They draw over us,
@@ -231,6 +237,61 @@ final class WallpaperSurface: NSObject, CAMetalDisplayLinkDelegate {
         renderer.state.weather = w
         // A new reading can change what the scene needs to be drawn AT.
         applyFrameRate(lowPower: lowPowerMode)
+    }
+
+    /// Re-derive the furniture, cheaply, on a timer.
+    ///
+    /// Surfaces were rebuilt only when the CONFIG changed, and most of what
+    /// moves them is nothing to do with the config: the dock is hidden or shown,
+    /// an app is added to it or quits and leaves it, the tile size is dragged,
+    /// the dock moves to another edge, the menu bar auto-hides, a display is
+    /// rescaled. Until something else happened to write a setting, water went on
+    /// splashing off a ledge that was no longer there and passing straight
+    /// through the one that was — which is the "it gets stuck when the furniture
+    /// updates" report.
+    ///
+    /// Deliberately a poll rather than an observer. There is no single
+    /// notification that covers all of the above — `com.apple.dock` defaults
+    /// changes, `NSApplication.didChangeScreenParametersNotification` and the
+    /// window's own occlusion each cover part of it — and the work is a
+    /// UserDefaults read plus arithmetic on a handful of rectangles. Comparing
+    /// before assigning keeps it free downstream: an unchanged list does not
+    /// touch the simulation, so the films and the water already on a surface are
+    /// preserved rather than being reset every two seconds.
+    func refreshFurnitureIfNeeded() {
+        guard !paused,
+              let cfg = lastConfig,
+              let scr = lastScreen ?? window.screen else { return }
+        let px = lastSize
+        guard px.width > 0, px.height > 0 else { return }
+
+        let derived = Furniture.desktop(screen: scr, widgets: cfg.widgets)
+        let fresh = applyingDockOverride(derived,
+                                         override: cfg.dockRect,
+                                         pixelWidth: Float(px.width),
+                                         pixelHeight: Float(px.height),
+                                         enabled: cfg.wetDock)
+        guard changed(renderer.surfaces, fresh) else { return }
+        renderer.surfaces = fresh
+    }
+
+    /// Whether two furniture lists differ enough to be worth reassigning.
+    ///
+    /// Written as a plain loop rather than zip/allSatisfy: the closure form made
+    /// the Swift type checker give up outright ("unable to type-check this
+    /// expression in reasonable time"), which is a compile error and not a
+    /// warning.
+    private func changed(_ a: [Surface], _ b: [Surface]) -> Bool {
+        if a.count != b.count { return true }
+        for i in 0..<a.count {
+            let p = a[i], q = b[i]
+            if p.kind != q.kind { return true }
+            if abs(p.x - q.x) > 0.5 { return true }
+            if abs(p.y - q.y) > 0.5 { return true }
+            if abs(p.w - q.w) > 0.5 { return true }
+            if abs(p.h - q.h) > 0.5 { return true }
+        }
+        return false
     }
 
     /// Remembered so a weather-driven frame-rate update cannot silently cancel
