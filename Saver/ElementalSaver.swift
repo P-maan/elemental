@@ -117,6 +117,11 @@ final class ElementalSaverView: ScreenSaverView {
         }
 
         lastConfigRead = Date()
+        // Captured BEFORE `saverConfig` resolves it away. `Config.resolved`
+        // returns `self` when a surface mirrors the desktop, which is correct
+        // for every appearance setting and loses the one fact we need here: that
+        // this surface is supposed to be showing what the desktop is showing.
+        mirrorsDesktop = cfg.saver.mirrorsDesktop
         cfg = cfg.saverConfig
         let resolved = cfg
         // Only log on a real change, or a 4-second poll floods the log.
@@ -144,6 +149,8 @@ final class ElementalSaverView: ScreenSaverView {
     }
 
     private var loadedConfig = Config()
+    /// Whether this saver is configured to mimic the desktop. See `weatherTick`.
+    private var mirrorsDesktop = true
 
     private func refreshAstro(cfg: Config? = nil) {
         let cfg = cfg ?? loadedConfig
@@ -196,12 +203,49 @@ final class ElementalSaverView: ScreenSaverView {
         // case there is a good answer sitting there the moment we start. The
         // fetch below still runs, and takes over the moment it lands; this only
         // removes the window where we would otherwise assert a sky nobody has.
-        if let shared = SaverWeather.read(lat: p.latitude, lon: p.longitude, place: p.name) {
-            state.weather = shared
-        }
+        // Open ON the current sky, not easing toward it.
+        //
+        // A saver starts from a default `WeatherState()` — a clear calm day —
+        // and the transition layer then walks it toward the real reading over
+        // the timescales in `WeatherEaser`, which are minutes to tens of minutes
+        // because they are tuned for weather EVOLVING. For a surface that has
+        // just appeared, that is wrong in the same way it is wrong when the user
+        // changes city: there is no transition to show, only a first frame to
+        // get right, and easing means the lock screen spends its first minutes
+        // showing a sky that is neither the old one nor the real one.
+        //
+        // `locationChanged()` is exactly this contract — it snaps the next
+        // reading instead of easing to it — and it is what the desktop already
+        // uses when the place changes.
+        renderer?.locationChanged()
+        adoptDesktopWeatherIfMirroring()
         weather.start(at: Coordinate(latitude: p.latitude, longitude: p.longitude))
         refreshAstro()
         renderer?.markIdle()
+    }
+
+    /// Take the desktop's reading whenever this saver is meant to mimic it.
+    ///
+    /// This used to adopt the published reading only while our OWN fetch had
+    /// never succeeded, on the reasoning that ours would be the fresher of the
+    /// two. That reasoning is wrong for a mirroring surface, and it is why the
+    /// saver ended up "in its own world": the moment its fetch landed it started
+    /// showing a DIFFERENT reading from the desktop's — taken at a different
+    /// minute, eased from a different starting point, and reconciled against
+    /// different calibration state, since the per-location bias correction lives
+    /// in Application Support which this sandbox cannot read. Two independent
+    /// samples of the same sky do not agree, and "mimic the home screen" is not
+    /// a statement about freshness. It is a statement about being the SAME.
+    ///
+    /// So when mirroring, the desktop is the authority for as long as it has
+    /// anything to say. Our own fetch stays as the fallback for when the app is
+    /// not running at all, and for a saver configured with its own separate city.
+    private func adoptDesktopWeatherIfMirroring() {
+        guard mirrorsDesktop else { return }
+        let p = loadedConfig.scenePlace
+        guard let shared = SaverWeather.read(lat: p.latitude, lon: p.longitude,
+                                             place: p.name) else { return }
+        state.weather = shared
     }
 
     override func stopAnimation() {
@@ -218,17 +262,7 @@ final class ElementalSaverView: ScreenSaverView {
         // permanently. Cheap enough to re-read every few seconds.
         if Date().timeIntervalSince(lastConfigRead) > 4 {
             loadConfiguration()
-            // Keep tracking the desktop for as long as our own fetch has never
-            // landed. Once it has, ours is the fresher of the two and wins; this
-            // is only the fallback, and it has to keep working rather than being
-            // a one-shot at startup — a saver left running all night would
-            // otherwise hold whatever sky it read in its first second.
-            if weather.lastSuccess == nil {
-                let p = loadedConfig.scenePlace
-                if let shared = SaverWeather.read(lat: p.latitude, lon: p.longitude, place: p.name) {
-                    state.weather = shared
-                }
-            }
+            adoptDesktopWeatherIfMirroring()
         }
         if Date().timeIntervalSince(lastAstro) > 60 && !r.isPlayingBack { refreshAstro() }
 
