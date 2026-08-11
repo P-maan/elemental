@@ -1019,10 +1019,26 @@ fragment CellOut cellPass(VOut in [[stage_in]],
     // direction.
     float L = 13.0f + 9.0f * sin(x * 0.0085f + y * 0.0095f + dotPh * 0.3f);
 
-    // subtle sweep
-    float sw2 = x + y * 0.55f - fmod(sec * 10.0f, W * 1.7f) + W * 0.2f;
-    float swn = sw2 / (W * 0.16f);
-    L += 14.0f * fexp(-swn * swn);
+    // The travelling sweep is a REFLECTION, so it needs something to reflect.
+    //
+    // This ran at a flat 14 luminance units at every hour of every day — a
+    // diagonal band of light crossing the sky at midnight, and crossing it just
+    // the same under a hundred per cent overcast. Neither happens. Out of a
+    // window a moving highlight like this is the sun catching the glass, so it
+    // belongs to the sun: it needs daylight, and it dies under a deck that has
+    // already taken the light out of the scene.
+    //
+    // Gating it is also what lets the wallpaper REST. A band sweeping the frame
+    // at every hour meant something was always in motion, so no amount of work
+    // on the frame rate could ever let a still night be still — the scene had a
+    // permanent animation in it by construction. With this off, a calm dry night
+    // genuinely has nothing moving in it.
+    float sweepAmt = skyBrAmt * (1.0f - 0.85f * saturate(deckF));
+    if (sweepAmt > 0.02f) {
+        float sw2 = x + y * 0.55f - fmod(sec * 10.0f, W * 1.7f) + W * 0.2f;
+        float swn = sw2 / (W * 0.16f);
+        L += 12.0f * sweepAmt * fexp(-swn * swn);
+    }
 
     // ---- Daylight.
     //

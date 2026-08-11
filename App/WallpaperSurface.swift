@@ -281,8 +281,25 @@ final class WallpaperSurface: NSObject, CAMetalDisplayLinkDelegate {
         if w.wind > 30 { need = max(need, 14) }    // gale-driven streak lean
         let preferred = max(4, min(ceiling, need))
 
-        link?.preferredFrameRateRange = CAFrameRateRange(minimum: max(4, preferred * 0.5),
-                                                         maximum: ceiling,
+        // A NARROW range when nothing is moving, a wide one when something is.
+        //
+        // Asking for minimum 3 / maximum 30 / preferred 6 does technically
+        // average out to a cheap wallpaper, and it also lets CoreAnimation hand
+        // back irregular intervals — 3 here, 30 there — which reads as stutter
+        // even though the simulation integrates on real elapsed time and is
+        // numerically fine. Perceived smoothness is about the REGULARITY of the
+        // cadence, not its speed: a steady 6 looks calm, a 3-to-30 jitter looks
+        // broken.
+        //
+        // So when the scene is quiet the floor is raised to the preferred rate
+        // and the ceiling kept just above it, which pins a steady slow cadence.
+        // When there is genuine motion — hydrometeors, lightning, a gale — the
+        // ceiling opens all the way to the user's maxFPS so it can climb, which
+        // is the half of this that has to stay fast.
+        let moving = w.precipRate > 0.02 || w.isThundering || w.wind > 30
+        let hi = moving ? ceiling : min(ceiling, preferred + 4)
+        link?.preferredFrameRateRange = CAFrameRateRange(minimum: preferred,
+                                                         maximum: hi,
                                                          preferred: preferred)
         renderer.state.lowFX = lowPower
     }
