@@ -2451,14 +2451,39 @@ final class SceneSimulation {
                     for k in 0..<max(Int(reachC.rounded(.up)), runLen) {
                         let cy = lipRow - k
                         guard cy >= 0 else { break }
-                        let up = Float(k)
+                        // Distance from the real edge, for the strength falloff.
+                        let up = max(0, lipF - Float(cy + 1))
                         // How much of THIS cell the water actually covers,
                         // measured up from the lip. The remainder is handed to
                         // the shader in `by` so the topmost cell of the band
                         // dissolves inside itself instead of ending on the
                         // boundary — which is what the subdivision is for.
-                        let cover = max(0, min(1, reachC - up))
-                        let byFrac = 1 - cover
+                        // Measured from the furniture's TRUE top edge, not from
+                        // the cell boundary nearest it.
+                        //
+                        // `lipF` is the edge in cell units and only its integer
+                        // part was ever read — the fractional part was computed
+                        // and thrown away, which is the third bug class in
+                        // HANDOFF.md. So the band's BASE snapped to whichever
+                        // cell boundary happened to be closest, up to a whole
+                        // cell from where the widget actually is. Its top edge
+                        // feathered beautifully and the whole thing sat in the
+                        // wrong place: at production density that is 40-odd
+                        // backing pixels of offset against a crisp widget
+                        // corner, which is exactly why the effects did not line
+                        // up with the furniture.
+                        //
+                        // Now the band is the interval [lipF - reach, lipF]
+                        // intersected with this cell, so its base lands on the
+                        // real edge to sub-pixel precision and `by` — the bare
+                        // fraction the shader feathers from — falls out of the
+                        // same arithmetic.
+                        let bandTop = lipF - reachC
+                        let cellTop = Float(cy), cellBot = Float(cy + 1)
+                        let lo = max(cellTop, bandTop)
+                        let hi = min(cellBot, lipF)
+                        let cover = max(0, hi - lo)
+                        let byFrac = max(0, min(1, lo - cellTop))
                         // Strongest AT the edge, thinning upward, and it has to
                         // stay legible for the two or three cells it reaches or
                         // the whole band collapses back to the single ruled row

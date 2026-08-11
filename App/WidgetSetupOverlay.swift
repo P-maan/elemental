@@ -743,11 +743,22 @@ final class WidgetSetupOverlay: NSObject, NSWindowDelegate {
 
         window = OverlayWindow(contentRect: screen.frame, styleMask: .borderless,
                                backing: .buffered, defer: false)
-        // Above ordinary windows so it is unambiguously in front of whatever was
-        // on the desktop, and below `.mainMenu` so the menu bar — the only way
-        // back into an LSUIElement app once clicks are passing through — stays
-        // visible and clickable. See the header.
-        window.level = .floating
+        // ABOVE THE DOCK, and below the menu bar.
+        //
+        // `.floating` is window level 3 and the macOS Dock is level 20, so the
+        // Dock drew straight over this overlay. That is not a cosmetic layering
+        // problem: the dock rect is at the bottom of the screen and its resize
+        // handles sit ON its edges, so every one of them was underneath the real
+        // Dock and could not be clicked at all. The one piece of furniture whose
+        // derived extent is known to be wrong was the one piece you could not
+        // reach in to correct.
+        //
+        // 21 clears the Dock and stays under `.mainMenu` at 24, which preserves
+        // the escape route the level was chosen for in the first place: Elemental
+        // is LSUIElement with no Cmd-Tab entry, so once clicks pass through, the
+        // menu bar item is the only way back in and an overlay covering it would
+        // strand the user.
+        window.level = NSWindow.Level(rawValue: Int(CGWindowLevelForKey(.dockWindow)) + 1)
         window.collectionBehavior = [.canJoinAllSpaces, .fullScreenAuxiliary,
                                      .stationary, .ignoresCycle]
         window.isOpaque = false

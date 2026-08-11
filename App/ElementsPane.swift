@@ -666,7 +666,11 @@ final class ElementsPane: Pane {
         guard !WidgetSetupOverlay.isPresented else { return }
         let settings = view.window
         let restoreLevel = settings?.level ?? .normal
-        settings?.level = .floating
+        // One above the overlay, which now sits one above the Dock. Settings has
+        // to stay reachable while the overlay is up — you adjust a value there
+        // and watch it land on the real screen — and it must not be buried by the
+        // thing it is driving.
+        settings?.level = NSWindow.Level(rawValue: Int(CGWindowLevelForKey(.dockWindow)) + 2)
         WidgetSetupOverlay.present(model: model, config: owner?.config ?? Config()) {
             [weak self] _ in
             settings?.level = restoreLevel
