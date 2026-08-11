@@ -2220,6 +2220,32 @@ fragment float4 heightPass(VOut in [[stage_in]],
     // it should saturate and let the whole feature rise together.
     float emph = prom * (0.10f + 0.90f * smoothstep(0.05f, 0.32f, l));
 
+    // ---- A feature SMALLER than a cell must not raise the cell.
+    //
+    // This pass runs at cell resolution, so everything it decides is decided for
+    // a whole block. That is right for the moon, which spans seven cells and
+    // should come out of the wall as one object. It is wrong for a star, a
+    // splash droplet, a rain fleck — anything the DETAIL pass is going to
+    // subdivide — because the thing that should stand proud is the few square
+    // pixels of the star, and what actually happened is that its entire parent
+    // block rose, carrying a chunk of empty sky up with it. The star sat on a
+    // raised plinth of nothing.
+    //
+    // The two ring scales already separate the cases and it costs nothing to
+    // ask. A point source stands above its IMMEDIATE neighbours as much as it
+    // stands above the wider surround, so `fine` and `broad` agree. An extended
+    // object does not: inside the moon's disc the near ring is all disc too, so
+    // `fine` collapses to nothing while `broad` stays large. The difference is
+    // therefore a direct measure of "smaller than the grid can resolve".
+    //
+    // Those cells keep their tone and give up their lift. The feature is not
+    // lost — `presentPass` gives it relief of its own at sub-cell resolution,
+    // which is where a sub-cell object's relief belongs.
+    float fine  = max(l - m1, 0.0f);
+    float broad = max(l - m2, 0.0f);
+    float pointish = saturate((fine - broad * 0.55f) / 0.16f);
+    emph *= 1.0f - 0.82f * pointish;
+
     // The tonal height the wall had before any of this. The 0.65 exponent lifts
     // the bottom of the range: a night sky is nearly black, and a straight
     // luminance mapping would flatten the wall to nothing the moment the sun

@@ -1652,7 +1652,34 @@ struct SceneState {
     /// and is clamped so it can never leave the band the scene was tuned in;
     /// what it adds is the middle, which is where most weather lives, and the
     /// LEAD — the deck darkening before the first drop rather than at it.
-    var cbase: Float { weather.continuousCloudBase * skyBrAmt }
+    var cbase: Float { weather.continuousCloudBase * max(skyBrAmt, moonlitAmt) }
+
+    /// How brightly the MOON is lighting the cloud, on the same 0..1 scale as
+    /// `skyBrAmt`.
+    ///
+    /// Without this the deck is multiplied by `skyBrAmt` alone, which is ~0 after
+    /// dusk — so an overcast night rendered as an almost black lid whatever the
+    /// moon was doing. That is not what a cloudy night looks like. A full moon
+    /// behind cloud makes the whole deck plainly visible, and it is one of the
+    /// most recognisable night skies there is: the cloud lights up and the stars
+    /// go out, which is the opposite of the clear night beside it.
+    ///
+    /// The scale is perceptual, not photometric. Full moonlight is about 0.25 lux
+    /// against 100,000 in sun — four decades down — and rendering that ratio
+    /// literally gives black, because it ignores that the eye has spent an hour
+    /// adapting to it. What matters is that a moonlit deck reads as clearly
+    /// visible dim grey and a moonless one stays genuinely dark, so this tops out
+    /// near a quarter of daylight for a full moon overhead.
+    ///
+    /// Falls off with altitude for the same reason `nightBoost` does: a moon near
+    /// the horizon is shining through the whole depth of the atmosphere. Phase
+    /// enters linearly through `moonIllum` — a half moon really is roughly half
+    /// as much light on the cloud, and a new moon is none.
+    var moonlitAmt: Float {
+        guard astro.moonAlt > 0 else { return 0 }
+        let alt = max(0, min(1, astro.moonAlt / 50))
+        return (astro.moonIllum / 100) * 0.26 * (0.28 + 0.72 * alt)
+    }
 
     static func skyBr(_ sAlt: Float) -> Float {
         func skl(_ a: Float, _ b: Float, _ t: Float) -> Float { a + (b - a) * max(0, min(1, t)) }
