@@ -239,6 +239,12 @@ final class WallpaperSurface: NSObject, CAMetalDisplayLinkDelegate {
         applyFrameRate(lowPower: lowPowerMode)
     }
 
+    /// Re-derive the frame rate from whatever the scene is showing NOW.
+    ///
+    /// Separate from `applyFrameRate(lowPower:)` only so callers on a timer do
+    /// not have to know the current power state.
+    func refreshFrameRate() { applyFrameRate(lowPower: lowPowerMode) }
+
     /// Re-derive the furniture, cheaply, on a timer.
     ///
     /// Surfaces were rebuilt only when the CONFIG changed, and most of what

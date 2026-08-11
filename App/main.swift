@@ -85,7 +85,20 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         // seconds is well below the time it takes to notice, and an unchanged
         // list costs a comparison and nothing else. See refreshFurnitureIfNeeded.
         furnitureTimer = Timer.scheduledTimer(withTimeInterval: 2, repeats: true) { [weak self] _ in
-            self?.surfaces.values.forEach { $0.refreshFurnitureIfNeeded() }
+            guard let self else { return }
+            self.surfaces.values.forEach {
+                $0.refreshFurnitureIfNeeded()
+                // Re-derive the frame rate here too, and NOT only when a reading
+                // lands. `applyFrameRate` reads the EASED weather — what is
+                // actually on screen — and at the moment a reading arrives the
+                // easer has only just been retargeted, so it still shows the old
+                // state. A dry sky turning to rain therefore computed its rate
+                // from the dry value and stayed at 6 fps for the entire ramp,
+                // which is the whole of the transition the user watches. The
+                // rain drew at 6 fps while the number that would have raised it
+                // climbed unread until the next fetch, ten minutes later.
+                $0.refreshFrameRate()
+            }
         }
 
         // Re-check where we are on a schedule as well as on wake. A laptop that

@@ -82,6 +82,37 @@ if args["saverhealth"] != nil {
     exit(0)
 }
 
+// ---------------------------------------------------------------- --radar
+//
+// What the radar actually sees over a place. Ground truth for whether anything
+// is falling, and for WHERE it is — the one thing no point measurement gives.
+if args["radar"] != nil {
+    let la = num("lat", 28.4453), lo = num("lon", 77.5148)
+    let sem = DispatchSemaphore(value: 0)
+    var got: RadarLook?
+    Task { got = await SkyImagery.radar(lat: la, lon: lo); sem.signal() }
+    _ = sem.wait(timeout: .now() + 60)
+    if let r = got {
+        print(SkyImagery.describe(r))
+        let p = r.profile
+        if !p.isEmpty {
+            // A coarse west-to-east bar so the placement is visible at a glance.
+            let step = max(1, p.count / 48)
+            var bar = ""
+            var i = 0
+            while i < p.count {
+                let v = p[i]
+                bar += v < 0.04 ? "." : (v < 0.2 ? ":" : (v < 0.45 ? "+" : "#"))
+                i += step
+            }
+            print("  W \(bar) E")
+        }
+    } else {
+        print("radar unavailable (no network, service down, or tiles undecodable)")
+    }
+    exit(0)
+}
+
 // ---------------------------------------------------------------- --edr
 //
 // What headroom this machine's displays actually offer.

@@ -107,7 +107,19 @@ final class WeatherService {
         // precipitation rate, none of which appear in a METAR.
         async let obs = ObservationService.fetch(lat: lat, lon: lon)
 
-        guard var w = await wx else { _ = await obs; return nil }
+        // Where the precipitation actually is, and whether any of it is HERE.
+        // Fetched alongside rather than instead: radar carries no rate and no
+        // cloud split, the model carries no position and no ground truth.
+        async let echo = SkyImagery.radar(lat: lat, lon: lon)
+
+        guard var w = await wx else { _ = await obs; _ = await echo; return nil }
+        if let r = await echo {
+            w.radarEcho = r.here
+            w.radarCoverage = r.coverage
+            NSLog("Elemental: %@", SkyImagery.describe(r))
+        } else {
+            _ = await echo
+        }
         if let a = await air {
             w.aqi = a.aqi
             w.smoke = a.smoke

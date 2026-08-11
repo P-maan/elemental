@@ -480,7 +480,40 @@ struct WeatherState: Equatable, Codable {
     /// hundred-metre whiteout for a normal snowy afternoon. Every published
     /// relationship downstream (Gunn & Kinzer, Rasmussen) is written against a
     /// liquid-equivalent rate, so this has to be one.
-    var precipAmount: Float { max(precipitation, effectiveRain + snow) }
+    /// Echo intensity directly overhead, 0..1. -1 means nobody looked.
+    ///
+    /// Radar is the only source here that can say whether anything is falling ON
+    /// YOU. Everything else is a point sample of a MODEL whose grid box is tens
+    /// of kilometres wide, and "1 mm/h somewhere in that box" is not evidence of
+    /// rain at your window — it is the commonest way this scene has been wrong,
+    /// because a wallpaper that rains when the forecast merely thought it might
+    /// is wrong in the most visible way available.
+    var radarEcho: Float = -1
+    /// Fraction of the surrounding ~900 km carrying echo, 0..1. -1 unmeasured.
+    var radarCoverage: Float = -1
+
+    /// How much is falling, after the radar has had its say.
+    ///
+    /// The model still supplies the RATE — radar tiles give echo strength, not
+    /// millimetres, and converting one to the other is lossy and scheme-specific
+    /// — but radar decides whether the rate applies here at all. Measured on the
+    /// development machine: Open-Meteo reported WMO 51 with 1.0 mm while radar
+    /// showed 0.00 overhead and the nearest echo well to the west. The scene was
+    /// raining; the sky was not.
+    ///
+    /// Degrades to exactly the old behaviour when radar is unavailable, which is
+    /// the whole contract: it is evidence that refines the model, never a
+    /// dependency.
+    var precipAmount: Float {
+        let modelled = max(precipitation, effectiveRain + snow)
+        guard radarEcho >= 0 else { return modelled }
+        // A soft gate, not a switch. Radar under-reports light drizzle and the
+        // very edge of a cell — beams overshoot low cloud at range — so a weak
+        // echo should thin the rain rather than delete it, and only a genuinely
+        // empty sky takes it to nothing.
+        let trust = min(1, radarEcho / 0.18)
+        return modelled * (0.06 + 0.94 * trust)
+    }
 
     /// Is anything actually falling? A hair above zero, because the feeds
     /// report 0.01mm noise on dry days.
