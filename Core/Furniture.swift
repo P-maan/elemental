@@ -41,6 +41,67 @@ struct Surface {
 
     /// Does a point fall within this surface's horizontal span?
     func spans(_ px: Float) -> Bool { px >= x && px <= x + w }
+
+    /// What this thing physically IS, which is not the same question as whether
+    /// water is allowed to mark it.
+    ///
+    /// `kind` was consulted only by `marks()` — a yes/no on whether a surface
+    /// gets wet at all — so a dock, a widget, the menu bar and the lock screen's
+    /// clock ran byte-identical water physics. They are not the same object. A
+    /// dock is a small floating slab of glass with a narrow top; a widget is a
+    /// broad glass panel with a flat top you could stand a cup on; the menu bar
+    /// is not a ledge at all but an eave flush with the top of the display, with
+    /// no top face and only an underside to drip from.
+    ///
+    /// Four properties are enough to separate them, and each is a real material
+    /// property rather than a look:
+    ///
+    ///   retention  how deep a film the top face holds before it runs over. A
+    ///              function of how wide that face is and how sharp its edges
+    ///              are — a broad flat top ponds, a narrow rounded one sheds.
+    ///   shed       how fast water leaves once it is running. Smooth glass sheds
+    ///              fast; anything with texture holds on.
+    ///   beadiness  0 spreads into a continuous film, 1 pulls into beads. Clean
+    ///              glass is hydrophilic and films; a coated or oily surface
+    ///              beads. Screens and their furniture are coated.
+    ///   rebound    how much of an impact comes back off. A hard smooth face
+    ///              throws spray; a soft or textured one absorbs it.
+    var material: SurfaceMaterial { SurfaceMaterial(kind) }
+}
+
+/// The physical character of a piece of furniture. See `Surface.material`.
+struct SurfaceMaterial {
+    var retention: Float
+    var shed: Float
+    var beadiness: Float
+    var rebound: Float
+
+    init(_ kind: Surface.Kind) {
+        switch kind {
+        case .dock:
+            // A small floating slab with a narrow, strongly rounded top. It
+            // cannot pond — water reaches an edge almost at once — and being
+            // smooth coated glass it sheds fast and beads hard. Hard face, so
+            // an impact rebounds well: the dock is the splashiest thing here.
+            retention = 0.55; shed = 1.35; beadiness = 0.85; rebound = 1.25
+        case .widget:
+            // A broad panel with a flat top and a squarer edge. This is the one
+            // thing on screen that genuinely PONDS: water has to cross a wide
+            // face before it finds an edge, so the film gets deep and the run
+            // down the front is continuous rather than a series of drips.
+            retention = 1.35; shed = 0.80; beadiness = 0.70; rebound = 0.85
+        case .menuBar:
+            // Not a ledge. It is flush with the top of the display, so it has no
+            // top face to collect anything and only an underside to hang from.
+            // Everything that arrives leaves; the eave drip is the whole effect.
+            retention = 0.20; shed = 1.60; beadiness = 0.60; rebound = 0.55
+        case .clock, .loginBox:
+            // Lock-screen furniture is drawn text and a field, not an object
+            // with a top surface. It should catch a little and hold almost
+            // nothing, or the lock screen grows puddles on its own typography.
+            retention = 0.35; shed = 1.20; beadiness = 0.75; rebound = 0.70
+        }
+    }
 }
 
 enum Furniture {

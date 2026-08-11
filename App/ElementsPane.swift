@@ -269,6 +269,13 @@ final class ElementsPane: Pane {
     override var title_: String { "Elements" }
     override var symbol: String { "rectangle.3.group" }
 
+    /// Where everything on the desktop is. Owned here and handed to every view
+    /// that edits it — the miniature below and the full-screen overlay — so
+    /// there is one set of placements, one set of rules and one commit path
+    /// rather than two editors that agree most of the time. See the header of
+    /// Placements.swift.
+    let model = PlacementModel()
+
     private var grid: DesktopGridView!
     private var well: ScreenshotWell!
     private var statusLabel: NSTextField!
@@ -299,17 +306,26 @@ final class ElementsPane: Pane {
         // The grid is this pane's hero. It is also its primary control, so
         // pinning it means the thing being edited never scrolls away from the
         // switches that light it up.
-        grid = DesktopGridView(width: 320)
-        grid.onLiveChange = { [weak self] in self?.updateSelectionLabel() }
-        grid.onCommit = { [weak self] in self?.gridEdited() }
-        grid.onSelectionChange = { [weak self] in
-            self?.updateSelectionLabel()
-            self?.updateRemoveState()
+        grid = DesktopGridView(width: 320, model: model)
+        // Everything the pane reacts to comes from the MODEL rather than from
+        // the miniature, because the miniature is not the only thing editing it.
+        // A drag on the full-screen overlay arrives here through exactly this
+        // observer, so the status line, the Remove button and the config all
+        // follow it without the two editors having to know about each other.
+        model.observe(self) { [weak self] change in
+            guard let self else { return }
+            switch change {
+            case .geometry, .selection, .dragging:
+                self.updateSelectionLabel()
+                self.updateRemoveState()
+            case .commit:
+                self.placementsEdited()
+            }
         }
         installHeader(grid, caption:
             "Your screen, and the things on it that weather has to land on. Drag a rectangle "
-          + "to move it, take a handle to resize it, ⌫ to remove it. It clicks as it lands on "
-          + "a guide.")
+          + "to move it, Space to change a widget's size, ⌫ to remove it. It clicks as it lands "
+          + "on a guide, and it follows the full-screen editor while you are working in it.")
 
         // ---- setup
         well = ScreenshotWell()
@@ -373,39 +389,40 @@ final class ElementsPane: Pane {
         selectionLabel.textColor = .secondaryLabelColor
         selectionLabel.preferredMaxLayoutWidth = 420
 
-        // The one that matters. The miniature in the header is big enough to
-        // CHECK a placement and far too small to make one — a widget on a
-        // 4112px display is a few points across up there — so the real editing
-        // happens in a sheet that gives it the whole window.
-        let bigButton = NSButton(title: "Edit at Full Size…", target: self,
-                                 action: #selector(editPlacements))
-        bigButton.bezelStyle = .rounded
-        bigButton.keyEquivalent = "\r"
-        bigButton.font = UI.body
-
-        // The third way in, and the most direct one: stop working on a picture
-        // of the screen and work on the screen. See WidgetSetupOverlay.swift.
-        let overlayButton = NSButton(title: "Place Widgets on Screen…", target: self,
+        // The one that matters, and the only one now.
+        //
+        // There used to be a second button here — "Edit at Full Size…" — that
+        // put the same miniature on a sheet at 700pt, because correcting a
+        // rectangle inside a 320pt strip is fiddling rather than editing. That
+        // was the right complaint and the wrong fix: a 700pt drawing of the
+        // screen is still a drawing of the screen. This is the screen, at 1:1,
+        // with the widgets visible underneath the rectangles being drawn round
+        // them, so the sheet has gone and its work moved here. The miniature
+        // above stays live and draggable for the small correction you do not
+        // want to open anything for.
+        let overlayButton = NSButton(title: "Place on Screen…", target: self,
                                      action: #selector(placeOnScreen))
         overlayButton.bezelStyle = .rounded
+        overlayButton.keyEquivalent = "\r"
         overlayButton.font = UI.body
 
-        let buttons = NSStackView(views: [bigButton, addButton, removeButton, clearButton])
+        let buttons = NSStackView(views: [overlayButton, addButton, removeButton, clearButton])
         buttons.spacing = 8
 
         let edit = Card("Placement", symbol: "hand.draw")
-        edit.add(NSStackView(views: [overlayButton]))
-        edit.add(captionLabel(
-            "Puts a dim sheet over your actual desktop. Drag a rectangle round each widget and it "
-          + "snaps to one of the four sizes macOS actually uses — small, medium, large, extra "
-          + "large — so you supply the position, which you know, and it supplies the size, which "
-          + "it knows. Nothing is saved until you press Save."))
-        edit.rule()
         edit.add(buttons)
         edit.add(selectionLabel)
+        edit.add(captionLabel(
+            "Place on Screen puts a dim sheet over your actual desktop. Drag a rectangle round "
+          + "each widget and it snaps to one of the four sizes macOS actually uses — small, "
+          + "medium, large, extra large — so you supply the position, which you know, and it "
+          + "supplies the size, which it knows. Your dock is in there too, because macOS only "
+          + "reports how thick it is and not how long. The little screen above is the same "
+          + "placements seen from here: whichever one you are dragging lights up in both."))
         edit.note("Arrow keys nudge the selection, ⌥-arrow moves it a hair, ⇧-arrow moves it "
-                + "further, Tab steps through them. Rectangles snap to the screen's edges and "
-                + "centre, to a twelfth-of-a-screen grid, and to each other"
+                + "further, Tab steps through them, Space changes a widget's size. Rectangles "
+                + "snap to the screen's edges and centre, to the margin and gutter macOS lays "
+                + "widgets out on, and to each other"
                 + (Haptics.available ? ", and the trackpad clicks each time one catches." : "."))
         addCard(edit)
 
@@ -472,21 +489,29 @@ final class ElementsPane: Pane {
         (furnitureS.slider as? DetentSlider)?.resyncDetent()
         (paneS.slider as? DetentSlider)?.resyncDetent()
 
-        grid.widgets = c.widgets
-        grid.dock = c.dockRect.map {
-            CGRect(x: CGFloat($0.x), y: CGFloat($0.y), width: CGFloat($0.w), height: CGFloat($0.h))
-        } ?? grid.dock ?? Self.estimatedDock()
-        grid.menuBarHeight = Self.estimatedMenuBar()
+        // Geometry, but never while somebody has hold of it. `sync` runs on
+        // every commit from anywhere, and the overlay commits per gesture with
+        // the user's hand still on the mouse — writing the config's idea of the
+        // placements back over the model at that moment would yank the
+        // rectangle out from under them.
+        if model.dragging == nil {
+            model.setWidgetRects(c.widgets)
+            model.dock = c.dockRect.map {
+                CGRect(x: CGFloat($0.x), y: CGFloat($0.y),
+                       width: CGFloat($0.w), height: CGFloat($0.h))
+            } ?? model.dock ?? Self.estimatedDock()
+            model.menuBarHeight = Self.estimatedMenuBar()
+        }
         redraw(c)
         updateSelectionLabel()
         updateRemoveState()
     }
 
     private func redraw(_ c: Config) {
-        grid.wetDock = c.wetDock
-        grid.wetWidgets = c.wetWidgets
-        grid.wetMenuBar = c.wetMenuBar
-        grid.strength = CGFloat(c.furnitureWetness)
+        model.wetDock = c.wetDock
+        model.wetWidgets = c.wetWidgets
+        model.wetMenuBar = c.wetMenuBar
+        model.strength = CGFloat(c.furnitureWetness)
         // A strength slider with nothing switched on has nothing to strengthen.
         UI.setHidden(furnitureRows, !(c.wetDock || c.wetWidgets || c.wetMenuBar))
         UI.setHidden(paneRows, !c.paneWater)
@@ -607,65 +632,67 @@ final class ElementsPane: Pane {
 
     // MARK: - Actions
 
+    deinit { model.stopObserving(self) }
+
     @objc private func addWidget() { grid.addWidget() }
     @objc private func removeSelected() { grid.removeSelected() }
     @objc private func clearAll() { grid.clearAll() }
 
-    /// Open the full-size editor. Exposed for the harness, which cannot click.
-    @objc func editPlacements() {
-        let ed = PlacementEditor()
-        ed.adopt(grid)
-        ed.onChange = { [weak self] g in
-            guard let self else { return }
-            self.grid.widgets = g.widgets
-            self.grid.dock = g.dock
-            self.gridEdited()
-        }
-        presentAsSheet(ed)
-    }
-
-    /// Place widgets on the real desktop rather than on a miniature of it.
+    /// Place things on the real desktop rather than on a miniature of it.
     ///
-    /// The settings window is ordered OUT for the duration, not left underneath:
-    /// the overlay is translucent so that the user's actual desktop shows dimly
-    /// through it, and an 860pt window sitting in the middle of that is exactly
-    /// the thing they are trying to see past. It comes back either way, so
-    /// cancelling costs nothing.
+    /// The settings window STAYS UP, floated above the overlay rather than
+    /// ordered out. It used to be hidden, on the reasoning that an 860pt window
+    /// in the middle of a translucent sheet is the thing you are trying to see
+    /// past — true, but it also severed the one link that makes these a single
+    /// editor. The miniature has to be visible for a drag out there to show up
+    /// in here, and it is small and can be dragged out of the way; a hidden
+    /// window cannot be.
     ///
-    /// Exposed rather than private for the same reason as `editPlacements` —
-    /// the verification harness cannot click a button.
+    /// The level is raised for the duration because the overlay sits at
+    /// `.floating`, and a normal-level window behind it would be unreachable —
+    /// the user would be clicking a sheet of glass over their own settings.
+    ///
+    /// Exposed rather than private so the verification harness, which cannot
+    /// click a button, can still reach it.
     @objc func placeOnScreen() {
         guard !WidgetSetupOverlay.isPresented else { return }
         let settings = view.window
-        settings?.orderOut(nil)
-        WidgetSetupOverlay.present(widgets: grid.widgets) { [weak self] placed in
+        let restoreLevel = settings?.level ?? .normal
+        settings?.level = .floating
+        WidgetSetupOverlay.present(model: model) { [weak self] _ in
+            settings?.level = restoreLevel
             settings?.makeKeyAndOrderFront(nil)
-            // nil is Cancel, which means change nothing — NOT "no widgets".
-            guard let self, let placed else { return }
-            self.grid.widgets = placed
-            self.gridEdited()
+            // Nothing to read back. The overlay edited this pane's model
+            // directly and committed each gesture as it finished; Cancel put
+            // the snapshot back the same way. That is what one commit path
+            // means.
+            self?.updateSelectionLabel()
+            self?.updateRemoveState()
         }
     }
 
-    /// The editor as it would be presented, for the harness. Not used by the
-    /// app, which goes through `editPlacements`.
+    /// The unified editor at a workable size, for the offscreen harness only.
+    ///
+    /// `--elements-selftest` has no screen to put an overlay on, so this is how
+    /// the same view, the same model and the same drag code get rendered to a
+    /// PNG. Nothing in the app calls it.
     func makePlacementEditor() -> PlacementEditor {
-        let ed = PlacementEditor()
-        ed.adopt(grid)
-        return ed
+        PlacementEditor(model: model)
     }
 
-    /// The grid finished a gesture. One commit per gesture, never per frame.
-    private func gridEdited() {
+    /// A gesture finished, in whichever editor. One commit per gesture, never
+    /// per frame — and exactly one function, so the two views cannot write
+    /// different things into the config.
+    private func placementsEdited() {
         guard var c = owner?.config else { return }
-        c.widgets = grid.widgets
+        c.widgets = model.widgetRects
         // Only store a dock override when the dock has actually been MOVED off
         // the estimate. Storing the estimate itself would look harmless and is
         // not: `dockRect` is a fraction with no display attached, so it would
         // be applied to every screen — putting a dock-shaped collision surface
         // along the bottom of a second display that has no dock on it.
         c.dockRect = {
-            guard let d = grid.dock else { return nil }
+            guard let d = model.dock else { return nil }
             if let e = Self.estimatedDock(), abs(e.minX - d.minX) < 0.005,
                abs(e.minY - d.minY) < 0.005, abs(e.width - d.width) < 0.005,
                abs(e.height - d.height) < 0.005 { return nil }
@@ -692,95 +719,54 @@ final class ElementsPane: Pane {
     }
 }
 
-// MARK: - The full-size editor
+// MARK: - The offscreen harness host
 
-/// Placements, on a sheet, at a size you can actually work at.
+/// The unified editor, big, in a plain window — for `--elements-selftest` only.
 ///
-/// The complaint was exact: correcting a widget rectangle inside a 320pt strip
-/// pinned to the top of a settings pane means dragging something a handful of
-/// points across, and that is not editing, it is fiddling. So the pane's
-/// miniature keeps its job — showing at a glance what is placed and what is lit
-/// up — and the actual work moves here, where the same screen is drawn more
-/// than twice as wide and four and a half times the area, with handles scaled
-/// to match (see `DesktopGridView.handleRadius`).
+/// This used to be a user-facing sheet behind an "Edit at Full Size…" button,
+/// and it was the third way to place a widget. It is not one any more: the
+/// button is gone and nothing in the app presents this. What it still earns its
+/// place for is verification. The real editor is a full-screen overlay over the
+/// user's desktop, and the harness has no desktop and cannot click — so this is
+/// how the same `DesktopGridView`, driven by the same `PlacementModel` through
+/// the same `pointerDown`/`pointerDragged`/`pointerUp` entry points, gets
+/// rendered to a PNG somebody can look at.
 ///
-/// Nothing about the interaction changes. This is the same `DesktopGridView`
-/// class with the same snapping, the same dashed guides, the same haptic on the
-/// transition into a snap and the same commit on mouse-up. Only the size and
-/// the reach are different.
+/// It shares the pane's model rather than copying it, so what it draws is what
+/// the pane has.
 final class PlacementEditor: NSViewController {
 
-    /// Points across. Sized to sit inside the settings window's 860pt content
-    /// width with room for the sheet's own margins.
+    /// Points across. Big enough that a widget rectangle is a real target, which
+    /// is what makes "are the corners the right shape" a question about a
+    /// picture rather than about a guess.
     static let gridWidth: CGFloat = 700
 
-    let grid = DesktopGridView(width: PlacementEditor.gridWidth)
-
-    /// Fires on every committed gesture, so the wallpaper follows the edit
-    /// rather than waiting for the sheet to be dismissed.
-    var onChange: ((DesktopGridView) -> Void)?
+    let grid: DesktopGridView
 
     private let selectionLabel = NSTextField(wrappingLabelWithString: "")
-    private var removeButton: NSButton!
 
-    /// Copy the pane's grid in, state and all.
-    func adopt(_ other: DesktopGridView) {
-        grid.widgets = other.widgets
-        grid.dock = other.dock
-        grid.menuBarHeight = other.menuBarHeight
-        grid.wetDock = other.wetDock
-        grid.wetWidgets = other.wetWidgets
-        grid.wetMenuBar = other.wetMenuBar
-        grid.strength = other.strength
-        grid.backdrop = other.backdrop
+    init(model: PlacementModel) {
+        grid = DesktopGridView(width: PlacementEditor.gridWidth, model: model)
+        super.init(nibName: nil, bundle: nil)
     }
+    required init?(coder: NSCoder) { fatalError() }
 
     override func loadView() {
-        grid.onLiveChange = { [weak self] in self?.refreshLabels() }
-        grid.onCommit = { [weak self] in
-            guard let self else { return }
-            self.refreshLabels()
-            self.onChange?(self.grid)
-        }
-        grid.onSelectionChange = { [weak self] in self?.refreshLabels() }
-
-        let add = NSButton(title: "Add Widget", target: self, action: #selector(addWidget))
-        add.bezelStyle = .rounded
-        add.font = UI.body
-        removeButton = NSButton(title: "Remove", target: self, action: #selector(removeSelected))
-        removeButton.bezelStyle = .rounded
-        removeButton.font = UI.body
-        let clear = NSButton(title: "Clear All", target: self, action: #selector(clearAll))
-        clear.bezelStyle = .rounded
-        clear.font = UI.body
-        let done = NSButton(title: "Done", target: self, action: #selector(finish))
-        done.bezelStyle = .rounded
-        done.keyEquivalent = "\r"
-        done.font = UI.body
-
-        let spacer = NSView()
-        spacer.translatesAutoresizingMaskIntoConstraints = false
-        spacer.setContentHuggingPriority(.defaultLow, for: .horizontal)
-
-        let buttons = NSStackView(views: [add, removeButton, clear, spacer, done])
-        buttons.spacing = 8
-        buttons.alignment = .centerY
-        buttons.translatesAutoresizingMaskIntoConstraints = false
-
         selectionLabel.font = UI.caption
         selectionLabel.textColor = .secondaryLabelColor
         selectionLabel.preferredMaxLayoutWidth = Self.gridWidth
+        selectionLabel.stringValue = grid.selectionDescription
+        grid.model.observe(self) { [weak self] _ in
+            guard let self else { return }
+            self.selectionLabel.stringValue = self.grid.selectionDescription
+        }
 
         let column = NSStackView(views: [
             headlineLabel("Placements"),
-            captionLabel("Drag a rectangle to move it, take a corner to resize it. Arrow keys nudge "
-                       + "the selection, ⌥-arrow a hair, ⇧-arrow further; Tab steps through them and "
-                       + "⌫ removes one." + (Haptics.available
-                            ? " The trackpad clicks each time an edge catches a guide." : ""),
-                         width: Self.gridWidth),
+            captionLabel("The same placements the on-screen editor works on, at a size a "
+                       + "screenshot can be read at.", width: Self.gridWidth),
             grid,
             selectionLabel,
-            buttons,
         ])
         column.orientation = .vertical
         column.alignment = .leading
@@ -795,26 +781,9 @@ final class PlacementEditor: NSViewController {
             column.leadingAnchor.constraint(equalTo: host.leadingAnchor),
             column.trailingAnchor.constraint(equalTo: host.trailingAnchor),
             column.bottomAnchor.constraint(equalTo: host.bottomAnchor),
-            buttons.widthAnchor.constraint(equalTo: grid.widthAnchor),
         ])
         view = host
-        refreshLabels()
     }
 
-    override func viewDidAppear() {
-        super.viewDidAppear()
-        // So the arrow keys work without the user having to find something to
-        // click on first.
-        view.window?.makeFirstResponder(grid)
-    }
-
-    private func refreshLabels() {
-        selectionLabel.stringValue = grid.selectionDescription
-        removeButton?.isEnabled = grid.canRemoveSelection
-    }
-
-    @objc private func addWidget() { grid.addWidget() }
-    @objc private func removeSelected() { grid.removeSelected() }
-    @objc private func clearAll() { grid.clearAll() }
-    @objc private func finish() { dismiss(self) }
+    deinit { grid.model.stopObserving(self) }
 }

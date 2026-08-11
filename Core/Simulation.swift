@@ -1061,7 +1061,11 @@ final class SceneSimulation {
             return
         }
         // Bounce fraction: liquid stays, ice comes back.
-        let bounce: Float = form == .hail ? 0.85 : (form == .sleet ? 0.7 : 0.35)
+        // Scaled by the FACE it struck. A hard smooth slab throws spray back;
+        // a soft or textured one takes it. This is what makes the dock the
+        // splashiest thing on screen and the menu bar the quietest.
+        let bounce: Float = min(0.95, (form == .hail ? 0.85 : (form == .sleet ? 0.7 : 0.35))
+                                      * s.material.rebound)
         let n = min(7, 1 + Int(impact * (form == .hail ? 6 : 4)))
         for _ in 0..<n {
             let sideways = (rnd() * 2 - 1) * d.v * (0.45 + bounce * 0.5)
@@ -1691,6 +1695,31 @@ final class SceneSimulation {
         // separately: they are the same air doing the same thing.
         grime = min(1, meanGrime / n)
         steam = min(1, meanSteam / n)
+
+        // ---- what each thing physically IS.
+        //
+        // Everything above is the same physics for every surface, which is
+        // correct — the same rain falls on all of them. What differs is the
+        // OBJECT: how deep a film its top face can hold before water runs over,
+        // and how fast it lets that water go. A widget is a broad flat panel and
+        // genuinely ponds; a dock is a narrow rounded slab and cannot; the menu
+        // bar is not a ledge at all, only an eave.
+        //
+        // Applied as a ceiling and a drain rather than by rewriting the physics
+        // per kind, so there is exactly one model of how water behaves and the
+        // material only says how much of it this object is able to keep.
+        for i in 0..<films.count {
+            let m = surfaces[i].material
+            let cap = min(1, m.retention)
+            films[i].lip = min(films[i].lip, cap)
+            films[i].wet = min(films[i].wet, min(1, m.retention * 0.85))
+            if m.shed > 1 {
+                // Sheds faster than the baseline: drain the excess.
+                let drain = dt * 0.30 * (m.shed - 1)
+                films[i].runoff = max(0, films[i].runoff - drain)
+                films[i].lip    = max(0, films[i].lip - drain * 0.6)
+            }
+        }
     }
 
     /// Drips off the underside of anything with pane below it.
@@ -1705,9 +1734,15 @@ final class SceneSimulation {
             let s = surfaces[i]
             guard s.hasUnderside(screenHeight: H) else { continue }
             let f = films[i]
+            let m = s.material
             let supply = f.runoff * 0.8 + f.lip * 0.4 + f.steam * 0.15
-            guard supply > 0.06, rnd() < supply * dt * 3.5 else { continue }
-            let r0 = SP * (0.30 + rnd() * 0.35)
+            // A surface that sheds fast drips more often; one that beads hard
+            // makes fewer, fatter drops, because it holds each one longer before
+            // surface tension gives out.
+            guard supply > 0.06,
+                  rnd() < supply * dt * 3.5 * m.shed / (0.65 + m.beadiness * 0.55)
+            else { continue }
+            let r0 = SP * (0.30 + rnd() * 0.35) * (0.80 + m.beadiness * 0.45)
             drops.append(GlassDrop(x: s.left + rnd() * s.w,
                                    y: s.bottom + r0,
                                    r: r0,

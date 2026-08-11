@@ -1,14 +1,18 @@
-//  DesktopGrid.swift — the editable miniature of your display.
+//  DesktopGrid.swift — the miniature of your display, and the hand that moves it.
 //
-//  This is the primary interface of the Elements pane, not a fallback for when
-//  detection fails. Detection's job is to save the user from placing eight
-//  rectangles by hand; this is where they are made right, and it has to be good
-//  enough that placing them all by hand is merely tedious rather than hopeless.
+//  This is the Elements pane's live map of `PlacementModel`. It is not a second
+//  editor: it draws exactly the placements the full-screen overlay is editing,
+//  writes back through the same mutators, snaps by the same rules and commits
+//  down the same path. Drag something here and it moves on the overlay while
+//  your finger is still down; drag it there and it moves here. See the header of
+//  Placements.swift for why there is only one model.
 //
-//  It is a little screen you can work directly: drag a widget to move it, take
-//  a handle to resize it, arrow-key it a hair at a time, delete it. The dock is
-//  in there too, because a detected dock that could not be corrected would be
-//  worse than no detected dock at all (see `Config.dockRect`).
+//  It stays directly editable rather than becoming a read-only thumbnail,
+//  because the pane is where you check a placement against the switches that
+//  light it up, and being able to nudge one without opening anything is worth
+//  keeping. What it can no longer do is disagree: a widget here is a size PRESET
+//  like it is everywhere else, so there are no free-hand rectangles left to
+//  reconcile.
 //
 //  ---- Haptics
 //
@@ -25,10 +29,11 @@
 //
 //  ---- Where the work happens
 //
-//  Dragging redraws this view and nothing else. The config is committed on
-//  MOUSE-UP, not per mouse-move: a commit re-syncs every other pane and pushes
-//  new collision geometry into the live wallpaper, which is not something to do
-//  sixty times a second. See the performance note at the top of Settings.swift.
+//  Dragging writes geometry into the model, which redraws whatever is watching.
+//  The CONFIG is committed on MOUSE-UP, not per mouse-move: a commit re-syncs
+//  every other pane and pushes new collision geometry into the live wallpaper,
+//  which is not something to do sixty times a second. See the performance note
+//  at the top of Settings.swift.
 
 import AppKit
 
@@ -87,59 +92,78 @@ final class DetentSlider: NSSlider {
 
 // MARK: - The grid
 
-/// One thing on the desktop, in fractions of the screen with y down — the same
-/// convention `WidgetRect`, `Furniture` and the simulation all use.
-struct DesktopElement: Equatable {
-    enum Kind: Equatable { case dock, widget(Int), menuBar }
-    var kind: Kind
-    var rect: CGRect
-    var label: String
-    /// Whether weather is allowed to mark it, for the lit-up styling.
-    var wet: Bool
-    /// The menu bar's geometry belongs to macOS; only its switch is ours.
-    var editable: Bool
-}
-
 final class DesktopGridView: NSView {
 
-    // ---- model
+    /// The geometry. Not owned — the pane owns it and hands the same instance to
+    /// the overlay, which is the whole point.
+    let model: PlacementModel
 
-    /// Widget rectangles, fractional. The pane owns the config; this owns the
-    /// live copy being dragged.
-    var widgets: [WidgetRect] = [] { didSet { needsDisplay = true } }
-    /// The dock, fractional. Nil means "no dock found or configured".
-    var dock: CGRect? { didSet { needsDisplay = true } }
-    /// Menu bar height as a fraction of the screen, 0 for none.
-    var menuBarHeight: CGFloat = 0.025 { didSet { needsDisplay = true } }
-
-    var wetDock = true { didSet { needsDisplay = true } }
-    var wetWidgets = true { didSet { needsDisplay = true } }
-    var wetMenuBar = false { didSet { needsDisplay = true } }
-    /// 0...1, dims the lit-up styling the way the strength slider dims the effect.
-    var strength: CGFloat = 1 { didSet { needsDisplay = true } }
-
-    /// A faint copy of the user's screenshot behind the rectangles, so what has
-    /// been detected can be checked against what was actually on screen. This is
-    /// the difference between "trust these numbers" and "look, that is your
-    /// dock".
-    var backdrop: NSImage? { didSet { needsDisplay = true } }
-
-    /// Screen shape. Read from the display at build time so the miniature is
-    /// the user's screen and not a generic 16:9.
-    var aspect: CGFloat = 16.0 / 10.0
-
-    // ---- selection and callbacks
+    // ---- selection, in this view's own vocabulary
+    //
+    // `PlacementModel.Ref?` with a `.none` case spelled out, so call sites read
+    // the way they always have.
 
     enum Selection: Equatable { case none, dock, widget(Int) }
-    private(set) var selection: Selection = .none {
-        didSet { if selection != oldValue { needsDisplay = true; onSelectionChange?() } }
+
+    var selection: Selection {
+        get {
+            switch model.selection {
+            case .none: return .none
+            case .dock: return .dock
+            case .widget(let i): return .widget(i)
+            }
+        }
+        set { model.selection = ref(of: newValue) }
     }
 
-    /// Cheap, fires while dragging. Redraw only — never commit from here.
-    var onLiveChange: (() -> Void)?
-    /// Fires on mouse-up and on discrete edits. Commit from here.
-    var onCommit: (() -> Void)?
-    var onSelectionChange: (() -> Void)?
+    // MARK: - Model passthroughs
+    //
+    // Kept as properties rather than making every caller reach into the model,
+    // because the pane and the offscreen harness both talk to this view in terms
+    // of `WidgetRect`s and that is the shape `Config` uses too.
+
+    var widgets: [WidgetRect] {
+        get { model.widgetRects }
+        set { model.setWidgetRects(newValue) }
+    }
+    var dock: CGRect? {
+        get { model.dock }
+        set { model.dock = newValue }
+    }
+    var menuBarHeight: CGFloat {
+        get { model.menuBarHeight }
+        set { model.menuBarHeight = newValue }
+    }
+    var wetDock: Bool {
+        get { model.wetDock }
+        set { model.wetDock = newValue }
+    }
+    var wetWidgets: Bool {
+        get { model.wetWidgets }
+        set { model.wetWidgets = newValue }
+    }
+    var wetMenuBar: Bool {
+        get { model.wetMenuBar }
+        set { model.wetMenuBar = newValue }
+    }
+    var strength: CGFloat {
+        get { model.strength }
+        set { model.strength = newValue }
+    }
+
+    /// A faint copy of the user's screenshot behind the rectangles, so what has
+    /// been placed can be checked against what was actually on screen. This is
+    /// the difference between "trust these numbers" and "look, that is your
+    /// dock".
+    var backdrop: NSImage? {
+        get { model.backdrop }
+        set { model.backdrop = newValue }
+    }
+
+    /// Screen shape, from the model's reference display.
+    var aspect: CGFloat { model.aspect }
+
+    var selectionDescription: String { model.selectionDescription }
 
     // ---- geometry
 
@@ -149,24 +173,45 @@ final class DesktopGridView: NSView {
     private var widthC: NSLayoutConstraint!
     private var heightC: NSLayoutConstraint!
 
-    init(width: CGFloat = 320) {
-        super.init(frame: NSRect(x: 0, y: 0, width: width, height: width / (16.0 / 10.0)))
+    init(width: CGFloat = 320, model: PlacementModel = PlacementModel()) {
+        self.model = model
+        super.init(frame: NSRect(x: 0, y: 0, width: width,
+                                 height: (width / model.aspect).rounded()))
         translatesAutoresizingMaskIntoConstraints = false
-        if let s = NSScreen.main, s.frame.height > 1 {
-            aspect = s.frame.width / s.frame.height
-        }
         widthC = widthAnchor.constraint(equalToConstant: width)
-        heightC = heightAnchor.constraint(equalToConstant: (width / aspect).rounded())
+        heightC = heightAnchor.constraint(equalToConstant: (width / model.aspect).rounded())
         NSLayoutConstraint.activate([widthC, heightC])
         setAccessibilityRole(.group)
         setAccessibilityLabel("Your desktop. Drag the rectangles to match what is on your screen.")
+
+        // Anything that changes the model redraws this. A drag happening in the
+        // OVERLAY arrives here through exactly this path, which is what makes
+        // the two views one feature rather than two.
+        model.observe(self) { [weak self] _ in
+            guard let self else { return }
+            // The overlay measures the presets against whichever display it was
+            // opened on, so the reference screen can change under us. A
+            // miniature still drawn at the old shape would put every rectangle
+            // in a slightly wrong place, which is precisely the kind of drift
+            // this file is meant to be free of.
+            let h = (self.widthC.constant / self.model.aspect).rounded()
+            if abs(self.heightC.constant - h) > 0.5 { self.heightC.constant = h }
+            self.needsDisplay = true
+        }
     }
     required init?(coder: NSCoder) { fatalError() }
+
+    deinit { model.stopObserving(self) }
 
     /// The screen's rectangle inside the view, inset for the bezel.
     var screenRect: NSRect { bounds.insetBy(dx: 5, dy: 5) }
 
-    private func toView(_ r: CGRect) -> NSRect {
+    /// Fraction to view points. Deliberately NOT rounded or `.integral`-ised:
+    /// the drawn rectangle has to be the model's rectangle exactly, or the frame
+    /// under a dragged widget sits a point or two off the widget it belongs to
+    /// and the whole thing looks like it is not tracking. Everything — fill,
+    /// ring, handles, labels, hit testing — goes through this one function.
+    func toView(_ r: CGRect) -> NSRect {
         let s = screenRect
         return NSRect(x: s.minX + r.minX * s.width, y: s.minY + r.minY * s.height,
                       width: r.width * s.width, height: r.height * s.height)
@@ -177,25 +222,11 @@ final class DesktopGridView: NSView {
         return CGPoint(x: (p.x - s.minX) / max(1, s.width), y: (p.y - s.minY) / max(1, s.height))
     }
 
-    /// Elements in back-to-front order.
-    var elements: [DesktopElement] {
-        var out: [DesktopElement] = []
-        if menuBarHeight > 0.001 {
-            out.append(DesktopElement(kind: .menuBar,
-                                      rect: CGRect(x: 0, y: 0, width: 1, height: menuBarHeight),
-                                      label: "Menu bar", wet: wetMenuBar, editable: false))
-        }
-        if let d = dock {
-            out.append(DesktopElement(kind: .dock, rect: d, label: "Dock",
-                                      wet: wetDock, editable: true))
-        }
-        for (i, w) in widgets.enumerated() {
-            out.append(DesktopElement(kind: .widget(i),
-                                      rect: CGRect(x: CGFloat(w.x), y: CGFloat(w.y),
-                                                   width: CGFloat(w.w), height: CGFloat(w.h)),
-                                      label: "Widget \(i + 1)", wet: wetWidgets, editable: true))
-        }
-        return out
+    /// The rounding of the real thing, scaled into this miniature. A widget
+    /// drawn 70pt wide up here gets the radius its 329pt self would have,
+    /// shrunk by the same factor — so the shape is right at every size.
+    private func radius(_ e: PlacementModel.Element) -> CGFloat {
+        e.radiusPoints * (screenRect.width / max(1, model.screenPoints.width))
     }
 
     // MARK: - Drawing
@@ -209,7 +240,7 @@ final class DesktopGridView: NSView {
 
         NSGraphicsContext.saveGraphicsState()
         screen.addClip()
-        if let img = backdrop {
+        if let img = model.backdrop {
             // The real screenshot, dimmed, so the rectangles can be checked
             // against the thing they are meant to describe.
             // `respectFlipped` matters: this view is flipped so that fractions
@@ -228,21 +259,15 @@ final class DesktopGridView: NSView {
         }
         NSGraphicsContext.restoreGraphicsState()
 
-        for e in elements {
-            let r = toView(e.rect).integral
-            let radius: CGFloat = {
-                switch e.kind {
-                case .menuBar: return 2
-                case .dock: return min(7, r.height / 2)
-                case .widget: return 5
-                }
-            }()
-            let p = NSBezierPath(roundedRect: r, xRadius: radius, yRadius: radius)
+        for e in model.elements {
+            let r = toView(e.rect)
+            let rad = radius(e)
+            let p = continuousRoundedRect(r, radius: rad)
 
             NSColor.windowBackgroundColor.withAlphaComponent(0.88).setFill()
             p.fill()
             if e.wet {
-                NSColor.controlAccentColor.withAlphaComponent(0.26 + 0.44 * strength).setFill()
+                NSColor.controlAccentColor.withAlphaComponent(0.26 + 0.44 * model.strength).setFill()
                 p.fill()
                 NSColor.controlAccentColor.setStroke()
                 p.lineWidth = 1.5
@@ -253,13 +278,21 @@ final class DesktopGridView: NSView {
                 p.stroke()
             }
 
-            if isSelected(e.kind) {
-                let ring = NSBezierPath(roundedRect: r.insetBy(dx: -2.5, dy: -2.5),
-                                        xRadius: radius + 2, yRadius: radius + 2)
+            // The live link, drawn first so the selection ring sits over it: the
+            // element somebody has hold of RIGHT NOW glows, whether the hand is
+            // in this view or on the full-screen overlay.
+            if let ref = e.ref, model.dragging == ref { drawDragHalo(r, radius: rad) }
+
+            if let ref = e.ref, model.selection == ref {
+                let ring = continuousRoundedRect(r.insetBy(dx: -2.5, dy: -2.5), radius: rad + 2.5)
                 NSColor.controlAccentColor.setStroke()
                 ring.lineWidth = 2
                 ring.stroke()
-                if e.editable { drawHandles(r) }
+                // Handles for the dock only. A widget's size is a preset, not
+                // something to be pulled about — Space and double-click change
+                // it — and offering a resize grip that snaps back to one of four
+                // sizes would be a lie about what the control does.
+                if e.editable { drawHandles(r, resizable: ref == .dock) }
             }
 
             let labelSize: CGFloat = big ? 11 : 8
@@ -299,20 +332,36 @@ final class DesktopGridView: NSView {
         screen.stroke()
     }
 
+    /// Two soft rings outside the rectangle, at the rectangle's own rounding.
+    /// Outside rather than a fill, so it cannot be confused with the wet styling
+    /// and so it still reads on a widget small enough to be four points high.
+    private func drawDragHalo(_ r: NSRect, radius: CGFloat) {
+        for (inset, alpha, width) in [(CGFloat(6), CGFloat(0.18), CGFloat(4)),
+                                      (CGFloat(3), CGFloat(0.55), CGFloat(2))] {
+            let halo = continuousRoundedRect(r.insetBy(dx: -inset, dy: -inset),
+                                             radius: radius + inset)
+            NSColor.controlAccentColor.withAlphaComponent(alpha).setStroke()
+            halo.lineWidth = width
+            halo.stroke()
+        }
+    }
+
     // ---- handle size
     //
     // A 3pt dot with a 12pt hit box is fine on a 320pt thumbnail and impossible
-    // on the full-size editor, where the same rectangle is more than twice as
-    // wide and the pointer has real room to work in. Both scale with the
-    // miniature so a handle is always worth aiming at.
+    // on a bigger one, where the same rectangle is more than twice as wide and
+    // the pointer has real room to work in. Both scale with the miniature so a
+    // handle is always worth aiming at.
 
     private var big: Bool { bounds.width >= 560 }
     private var handleRadius: CGFloat { big ? 5.5 : 3 }
     private var handleSlop: CGFloat { big ? 11 : 6 }
 
-    private func drawHandles(_ r: NSRect) {
+    /// Corner pips always; the eight resize grips only for something that can
+    /// actually be resized.
+    private func drawHandles(_ r: NSRect, resizable: Bool) {
         let hr = handleRadius
-        for p in handlePoints(r) {
+        for p in resizable ? handlePoints(r) : cornerPoints(r) {
             let box = NSRect(x: p.x - hr, y: p.y - hr, width: hr * 2, height: hr * 2)
             NSColor.controlBackgroundColor.setFill()
             NSBezierPath(ovalIn: box).fill()
@@ -323,103 +372,37 @@ final class DesktopGridView: NSView {
         }
     }
 
-    /// The eight resize handles, in the order `Edge` below indexes them.
+    /// The eight resize handles, in the order `pointerDragged` indexes them.
     private func handlePoints(_ r: NSRect) -> [NSPoint] {
         [NSPoint(x: r.minX, y: r.minY), NSPoint(x: r.midX, y: r.minY), NSPoint(x: r.maxX, y: r.minY),
          NSPoint(x: r.minX, y: r.midY), NSPoint(x: r.maxX, y: r.midY),
          NSPoint(x: r.minX, y: r.maxY), NSPoint(x: r.midX, y: r.maxY), NSPoint(x: r.maxX, y: r.maxY)]
     }
 
-    private func isSelected(_ k: DesktopElement.Kind) -> Bool {
-        switch (selection, k) {
-        case (.dock, .dock): return true
-        case (.widget(let a), .widget(let b)): return a == b
-        default: return false
-        }
+    private func cornerPoints(_ r: NSRect) -> [NSPoint] {
+        [NSPoint(x: r.minX, y: r.minY), NSPoint(x: r.maxX, y: r.minY),
+         NSPoint(x: r.minX, y: r.maxY), NSPoint(x: r.maxX, y: r.maxY)]
     }
 
     // MARK: - Snapping
 
-    struct Guide: Equatable { var vertical: Bool; var value: CGFloat }
-    private var guides: [Guide] = []
+    private var guides: [PlacementModel.Guide] = []
     /// Which snaps are currently engaged, so a haptic fires on the transition in
     /// rather than every frame the drag stays parked on the line.
     private var engaged: Set<String> = []
 
-    /// Snap distance in fractions, derived from a fixed 4.5pt in the view — so
-    /// it feels the same however big the miniature is drawn.
-    private var snapTolerance: CGFloat { 4.5 / max(1, screenRect.width) }
-
-    /// Everything worth landing on: the screen's own edges and centre lines, a
-    /// twelfth-of-the-screen grid, and the edges and centres of every OTHER
-    /// element.
-    private func targets(vertical: Bool, excluding: DesktopElement.Kind?) -> [CGFloat] {
-        var t: [CGFloat] = [0, 0.5, 1]
-        for i in 1..<12 { t.append(CGFloat(i) / 12) }
-        for e in elements where e.kind != excluding {
-            if vertical { t.append(contentsOf: [e.rect.minX, e.rect.midX, e.rect.maxX]) }
-            else { t.append(contentsOf: [e.rect.minY, e.rect.midY, e.rect.maxY]) }
-        }
-        return t
-    }
-
-    /// Pull `values` (the moving edges) onto the nearest target. Returns the
-    /// offset to apply and records the guides to draw.
-    private func snapOffset(_ values: [CGFloat], vertical: Bool,
-                            excluding: DesktopElement.Kind?,
-                            into names: inout Set<String>) -> CGFloat {
-        let tol = snapTolerance
-        var best: (delta: CGFloat, target: CGFloat)?
-        for v in values {
-            for t in targets(vertical: vertical, excluding: excluding) {
-                let d = t - v
-                if abs(d) <= tol, best == nil || abs(d) < abs(best!.delta) {
-                    best = (d, t)
-                }
-            }
-        }
-        guard let b = best else { return 0 }
-        names.insert("\(vertical ? "x" : "y"):\(Int((b.target * 1000).rounded()))")
-        guides.append(Guide(vertical: vertical, value: b.target))
-        return b.delta
-    }
-
-    /// Move the whole rectangle onto the nearest guide, and buzz once for each
-    /// newly engaged line.
-    private func snapped(_ r: CGRect, moving: DesktopElement.Kind) -> CGRect {
-        guides.removeAll()
-        var names: Set<String> = []
-        let dx = snapOffset([r.minX, r.midX, r.maxX], vertical: true,
-                            excluding: moving, into: &names)
-        let dy = snapOffset([r.minY, r.midY, r.maxY], vertical: false,
-                            excluding: moving, into: &names)
-        finish(names)
-        return r.offsetBy(dx: dx, dy: dy)
-    }
-
-    /// Snap ONE edge, leaving the opposite edge exactly where it is.
-    ///
-    /// Resizing cannot go through `snapped`: offsetting the whole rectangle to
-    /// bring the dragged edge onto a guide drags the anchored edge off wherever
-    /// the user put it, so the box slides instead of growing.
-    private func snapEdge(_ v: CGFloat, vertical: Bool, moving: DesktopElement.Kind,
-                          into names: inout Set<String>) -> CGFloat {
-        let tol = snapTolerance
-        var best: CGFloat?
-        for t in targets(vertical: vertical, excluding: moving)
-        where abs(t - v) <= tol && (best == nil || abs(t - v) < abs(best! - v)) {
-            best = t
-        }
-        guard let b = best else { return v }
-        names.insert("\(vertical ? "x" : "y"):\(Int((b * 1000).rounded()))")
-        guides.append(Guide(vertical: vertical, value: b))
-        return b
+    /// Snap distance, derived from a fixed few points in the VIEW — so it feels
+    /// the same however big the miniature is drawn, and so this view and the
+    /// full-screen overlay both mean "close enough to catch under the hand".
+    private var snapTolerance: CGSize {
+        CGSize(width: 4.5 / max(1, screenRect.width), height: 4.5 / max(1, screenRect.height))
     }
 
     /// Buzz once per newly engaged guide, then remember what is engaged.
-    private func finish(_ names: Set<String>) {
-        if !names.subtracting(engaged).isEmpty { Haptics.alignment() }
-        engaged = names
+    private func apply(_ snap: PlacementModel.Snap) {
+        guides = snap.guides
+        if !snap.names.subtracting(engaged).isEmpty { Haptics.alignment() }
+        engaged = snap.names
     }
 
     // MARK: - Pointer handling
@@ -435,16 +418,17 @@ final class DesktopGridView: NSView {
     private var rectAtGrab: CGRect = .zero
     private var dragging = false
 
-    /// Smallest a rectangle may be dragged to, as a fraction. Below this it
-    /// cannot be grabbed again.
+    /// Smallest the dock may be dragged to, as a fraction. Below this it cannot
+    /// be grabbed again.
     private let minSize: CGFloat = 0.02
 
-    func pointerDown(_ p: NSPoint) {
+    func pointerDown(_ p: NSPoint, clickCount: Int = 1) {
         window?.makeFirstResponder(self)
         guides.removeAll(); engaged.removeAll()
 
-        // A handle of the current selection wins over anything underneath it.
-        if let r = rect(of: selection) {
+        // A resize handle of the current selection wins over anything underneath
+        // it. Only the dock has any.
+        if model.selection == .dock, let r = model.dock {
             let vr = toView(r)
             let slop = handleSlop
             for (i, hp) in handlePoints(vr).enumerated()
@@ -453,38 +437,58 @@ final class DesktopGridView: NSView {
                 grabbed = i
                 dragOrigin = toFrac(p)
                 rectAtGrab = r
-                dragging = true
+                begin(.dock)
                 return
             }
         }
         // Otherwise pick the front-most element under the pointer.
-        for e in elements.reversed() where e.editable && toView(e.rect).contains(p) {
-            selection = select(e.kind)
+        if let ref = model.hit(toFrac(p)), let r = model.rect(of: ref) {
+            model.selection = ref
+            // A second click steps a widget round the four sizes. It is the
+            // repair for the one case classification gets wrong — a rectangle
+            // drawn between two presets — and it beats deleting and redrawing to
+            // change your mind.
+            if clickCount == 2, case .widget(let i) = ref {
+                model.cycleSize(i)
+                Haptics.level()
+                dragging = false
+                model.commit()
+                return
+            }
             grabbed = -1
             dragOrigin = toFrac(p)
-            rectAtGrab = e.rect
-            dragging = true
+            rectAtGrab = r
+            begin(ref)
             return
         }
-        selection = .none
+        model.selection = nil
         dragging = false
         needsDisplay = true
     }
 
+    private func begin(_ ref: PlacementModel.Ref) {
+        dragging = true
+        model.dragging = ref
+    }
+
     func pointerDragged(_ p: NSPoint) {
-        guard dragging, let kind = kind(of: selection) else { return }
+        guard dragging, let ref = model.selection else { return }
         let now = toFrac(p)
         let dx = now.x - dragOrigin.x, dy = now.y - dragOrigin.y
-        var r = rectAtGrab
 
         if grabbed < 0 {
-            r = r.offsetBy(dx: dx, dy: dy)
-            r = snapped(r, moving: kind)
-            // Never off the screen entirely — a rectangle you cannot see is a
-            // rectangle you cannot fix.
-            r.origin.x = min(max(r.origin.x, -r.width * 0.5), 1 - r.width * 0.5)
-            r.origin.y = min(max(r.origin.y, -r.height * 0.5), 1 - r.height * 0.5)
-        } else {
+            // Clamp on to the screen BEFORE snapping, never after. A clamp
+            // applied afterwards silently slides the rectangle off the guide it
+            // just caught, and then the dashed line the user is aiming at is no
+            // longer touching the rectangle they are aiming it with. Every
+            // target is inside the screen and a snap moves at most one
+            // tolerance, so clamping first cannot let anything escape.
+            let moved = clamp(rectAtGrab.offsetBy(dx: dx, dy: dy))
+            let snap = model.snapping(moved, moving: ref, tolerance: snapTolerance)
+            apply(snap)
+            model.write(snap.rect, to: ref)
+        } else if ref == .dock {
+            var r = rectAtGrab
             var minX = r.minX, maxX = r.maxX, minY = r.minY, maxY = r.maxY
             // Which edges this handle owns. 0,3,5 are the left column; 0,1,2
             // the top row; and so on round the eight.
@@ -497,34 +501,50 @@ final class DesktopGridView: NSView {
             if movesTop { minY += dy }
             if movesBottom { maxY += dy }
 
-            guides.removeAll()
-            var names: Set<String> = []
-            if movesLeft { minX = snapEdge(minX, vertical: true, moving: kind, into: &names) }
-            if movesRight { maxX = snapEdge(maxX, vertical: true, moving: kind, into: &names) }
-            if movesTop { minY = snapEdge(minY, vertical: false, moving: kind, into: &names) }
-            if movesBottom { maxY = snapEdge(maxY, vertical: false, moving: kind, into: &names) }
-            finish(names)
+            var snap = PlacementModel.Snap(rect: .zero)
+            let tol = snapTolerance
+            if movesLeft {
+                minX = model.snappingEdge(minX, vertical: true, moving: ref,
+                                          tolerance: tol.width, into: &snap)
+            }
+            if movesRight {
+                maxX = model.snappingEdge(maxX, vertical: true, moving: ref,
+                                          tolerance: tol.width, into: &snap)
+            }
+            if movesTop {
+                minY = model.snappingEdge(minY, vertical: false, moving: ref,
+                                          tolerance: tol.height, into: &snap)
+            }
+            if movesBottom {
+                maxY = model.snappingEdge(maxY, vertical: false, moving: ref,
+                                          tolerance: tol.height, into: &snap)
+            }
+            apply(snap)
 
             if maxX - minX < minSize { if movesLeft { minX = maxX - minSize } else { maxX = minX + minSize } }
             if maxY - minY < minSize { if movesTop { minY = maxY - minSize } else { maxY = minY + minSize } }
             r = CGRect(x: minX, y: minY, width: maxX - minX, height: maxY - minY)
+            model.write(r, to: ref)
         }
-        write(r, to: selection)
-        onLiveChange?()
         needsDisplay = true
     }
 
     func pointerUp() {
         guard dragging else { return }
         dragging = false
+        model.dragging = nil
         guides.removeAll()
         engaged.removeAll()
         needsDisplay = true
-        onCommit?()
+        model.commit()
     }
 
+    /// Entirely on the screen. A rectangle half off the edge is one the user
+    /// cannot grab again, and neither a widget nor the dock can be there.
+    private func clamp(_ r: CGRect) -> CGRect { model.clamped(r) }
+
     override func mouseDown(with event: NSEvent) {
-        pointerDown(convert(event.locationInWindow, from: nil))
+        pointerDown(convert(event.locationInWindow, from: nil), clickCount: event.clickCount)
     }
     override func mouseDragged(with event: NSEvent) {
         pointerDragged(convert(event.locationInWindow, from: nil))
@@ -551,6 +571,7 @@ final class DesktopGridView: NSView {
         case 126: nudge(dx: 0, dy: -step, pull: step)   // up
         case 51, 117: removeSelected()           // delete / forward delete
         case 48: cycleSelection()                // tab
+        case 49: cycleSize()                     // space
         default: handled = false
         }
         if !handled { super.keyDown(with: event) }
@@ -560,48 +581,51 @@ final class DesktopGridView: NSView {
     /// step, so a fine ⌥-nudge is not yanked back onto a line it was trying to
     /// creep away from.
     private func nudge(dx: CGFloat, dy: CGFloat, pull: CGFloat = 0.004) {
-        guard var r = rect(of: selection) else { return }
-        r = r.offsetBy(dx: dx, dy: dy)
+        guard let ref = model.selection, let r0 = model.rect(of: ref) else { return }
+        let moved = clamp(r0.offsetBy(dx: dx, dy: dy))
         // A keyboard nudge that lands exactly on a guide should feel like the
         // drag that lands on the same guide.
-        if let k = kind(of: selection) {
-            var names: Set<String> = []
-            guides.removeAll()
-            let sx = snapOffset([r.minX, r.midX, r.maxX], vertical: true, excluding: k, into: &names)
-            let sy = snapOffset([r.minY, r.midY, r.maxY], vertical: false, excluding: k, into: &names)
-            if abs(sx) < pull { r.origin.x += sx }
-            if abs(sy) < pull { r.origin.y += sy }
-            if !names.subtracting(engaged).isEmpty { Haptics.alignment() }
-            engaged = names
-            guides.removeAll()
-        }
-        write(r, to: selection)
+        let snap = model.snapping(moved, moving: ref, tolerance: snapTolerance)
+        var r = moved
+        if abs(snap.rect.minX - moved.minX) < pull { r.origin.x = snap.rect.minX }
+        if abs(snap.rect.minY - moved.minY) < pull { r.origin.y = snap.rect.minY }
+        if !snap.names.subtracting(engaged).isEmpty { Haptics.alignment() }
+        engaged = snap.names
+        guides.removeAll()
+        model.write(r, to: ref)
         needsDisplay = true
-        onCommit?()
+        model.commit()
     }
 
     func cycleSelection() {
-        let all = elements.filter(\.editable).map(\.kind)
+        let all = model.cycleOrder
         guard !all.isEmpty else { return }
-        guard let k = kind(of: selection), let i = all.firstIndex(of: k) else {
-            selection = select(all[0]); return
+        guard let ref = model.selection, let i = all.firstIndex(of: ref) else {
+            model.selection = all[0]; return
         }
-        selection = select(all[(i + 1) % all.count])
+        model.selection = all[(i + 1) % all.count]
         Haptics.alignment()
+    }
+
+    /// Step the selected widget round the four sizes. The dock has no presets,
+    /// so it is left alone rather than being given a meaningless one.
+    func cycleSize() {
+        guard case .widget(let i) = model.selection else { return }
+        model.cycleSize(i)
+        Haptics.level()
+        model.commit()
     }
 
     // MARK: - Edits
 
     func addWidget() {
-        // Dropped in the middle at a plausible widget size, selected, ready to
-        // be dragged where it belongs.
-        let w: CGFloat = 0.11, h: CGFloat = w * aspect * 1.0
-        widgets.append(WidgetRect(x: Float(0.5 - w / 2), y: Float(0.5 - h / 2),
-                                  w: Float(w), h: Float(h)))
-        selection = .widget(widgets.count - 1)
+        // Dropped in the middle at the commonest size, selected, ready to be
+        // dragged where it belongs.
+        model.addWidget(model.clamped(WidgetPlacement(size: .medium,
+                                                      centre: CGPoint(x: 0.5, y: 0.5))))
         Haptics.level()
         needsDisplay = true
-        onCommit?()
+        model.commit()
     }
 
     /// Which the Remove button and ⌫ apply to.
@@ -611,53 +635,41 @@ final class DesktopGridView: NSView {
     /// would only make it come back from the system estimate on the next sync,
     /// which reads as the button not working.
     var canRemoveSelection: Bool {
-        if case .widget(let i) = selection { return i < widgets.count }
+        if case .widget(let i) = model.selection { return i < model.widgets.count }
         return false
     }
 
     func removeSelected() {
-        switch selection {
-        case .widget(let i) where i < widgets.count:
-            widgets.remove(at: i)
-            selection = widgets.isEmpty ? .none : .widget(min(i, widgets.count - 1))
-        case .dock, .none, .widget:
-            return
-        }
+        guard case .widget(let i) = model.selection else { return }
+        model.removeWidget(at: i)
         Haptics.level()
         needsDisplay = true
-        onCommit?()
+        model.commit()
     }
 
     func clearAll() {
-        widgets.removeAll()
-        selection = .none
+        model.removeAllWidgets()
         needsDisplay = true
-        onCommit?()
+        model.commit()
     }
 
-    /// Replace everything with what a screenshot yielded.
+    /// Replace everything with what a screenshot yielded. Every rectangle is
+    /// classified to a preset on the way in — see `PlacementModel.setWidgetRects`.
     func adopt(_ d: DetectedDesktop) {
-        widgets = d.widgets.map {
-            WidgetRect(x: Float($0.minX), y: Float($0.minY), w: Float($0.width), h: Float($0.height))
-        }
-        dock = d.dock
-        if let m = d.menuBar { menuBarHeight = m }
-        selection = .none
+        model.setWidgetRects(d.widgets.map {
+            WidgetRect(x: Float($0.minX), y: Float($0.minY),
+                       w: Float($0.width), h: Float($0.height))
+        })
+        model.dock = d.dock
+        if let m = d.menuBar { model.menuBarHeight = m }
+        model.selection = nil
         needsDisplay = true
-        onCommit?()
+        model.commit()
     }
 
     // MARK: - Selection plumbing
 
-    private func select(_ k: DesktopElement.Kind) -> Selection {
-        switch k {
-        case .dock: return .dock
-        case .widget(let i): return .widget(i)
-        case .menuBar: return .none
-        }
-    }
-
-    private func kind(of s: Selection) -> DesktopElement.Kind? {
+    private func ref(of s: Selection) -> PlacementModel.Ref? {
         switch s {
         case .none: return nil
         case .dock: return .dock
@@ -666,43 +678,8 @@ final class DesktopGridView: NSView {
     }
 
     func rect(of s: Selection) -> CGRect? {
-        switch s {
-        case .none: return nil
-        case .dock: return dock
-        case .widget(let i):
-            guard i < widgets.count else { return nil }
-            let w = widgets[i]
-            return CGRect(x: CGFloat(w.x), y: CGFloat(w.y), width: CGFloat(w.w), height: CGFloat(w.h))
-        }
-    }
-
-    private func write(_ r: CGRect, to s: Selection) {
-        switch s {
-        case .none: return
-        case .dock: dock = r
-        case .widget(let i):
-            guard i < widgets.count else { return }
-            widgets[i] = WidgetRect(x: Float(r.minX), y: Float(r.minY),
-                                    w: Float(r.width), h: Float(r.height))
-        }
-    }
-
-    /// A one-line description of what is selected, for the pane's status row.
-    var selectionDescription: String {
-        guard let r = rect(of: selection) else {
-            return widgets.isEmpty && dock == nil
-                ? "Nothing placed yet — hand in a screenshot, or add a widget."
-                : "Click a rectangle to select it. Drag to move, handles to resize, ⌫ to remove."
-        }
-        let name: String = {
-            switch selection {
-            case .dock: return "Dock"
-            case .widget(let i): return "Widget \(i + 1)"
-            case .none: return ""
-            }
-        }()
-        return String(format: "%@ — x %.0f%%, y %.0f%%, %.0f%% × %.0f%%",
-                      name, r.minX * 100, r.minY * 100, r.width * 100, r.height * 100)
+        guard let r = ref(of: s) else { return nil }
+        return model.rect(of: r)
     }
 }
 
@@ -713,7 +690,7 @@ final class DesktopGridView: NSView {
 /// `Furniture.desktop` derives the dock from com.apple.dock's tile size and item
 /// count, which is a good guess and not more than that — a stack, a wide
 /// separator or a second display all move it. When the user has dragged the dock
-/// in the Elements grid, that measurement is better than the guess, so it
+/// in the placement editor, that measurement is better than the guess, so it
 /// replaces it. Nil changes nothing, which is what every user who never opens the
 /// pane gets.
 func applyingDockOverride(_ surfaces: [Surface], override: WidgetRect?,
