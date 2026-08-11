@@ -45,6 +45,75 @@ SWIFTFLAGS=(-O -wmo)
 
 # ---------------------------------------------------------------- targets
 
+
+# ------------------------------------------------------------------ signing
+#
+# Two modes, chosen by whether a Developer ID identity is configured.
+#
+#   ad hoc (default)   `codesign -s -`. Fine on the machine that built it and
+#                      nowhere else: Gatekeeper refuses an ad-hoc bundle on any
+#                      other Mac with "Elemental is damaged and can't be
+#                      opened", which is a lie but an unhelpful one. It also
+#                      mints a new code hash every build, so macOS forgets TCC
+#                      grants — trap 9 in HANDOFF.md, and why Location keeps
+#                      needing re-approval during development.
+#
+#   Developer ID       for anything that leaves this machine. Requires the
+#                      Hardened Runtime (mandatory for notarization), a
+#                      timestamp, and the entitlements in App/Elemental.entitlements.
+#
+# Configured by environment, never by anything checked in — a certificate name
+# is not secret but it is machine-specific, and nothing here should ever hold a
+# credential:
+#
+#   export ELEMENTAL_SIGN_ID="Developer ID Application: Your Name (TEAMID)"
+#   export ELEMENTAL_NOTARY_PROFILE="elemental"     # optional, enables notarize
+#
+# Find the identity with:  security find-identity -v -p codesigning
+SIGN_ID="${ELEMENTAL_SIGN_ID:-}"
+NOTARY_PROFILE="${ELEMENTAL_NOTARY_PROFILE:-}"
+ENTITLEMENTS="App/Elemental.entitlements"
+
+sign_bundle() {
+  local target="$1"
+  if [[ -z "$SIGN_ID" ]]; then
+    codesign --force -s - "$target"
+    return
+  fi
+  # --options runtime is the Hardened Runtime. --timestamp is required for
+  # notarization and is the one that fails when the machine is offline.
+  # Deep signing is deliberately NOT used: it is documented as unreliable for
+  # anything non-trivial. These bundles have a single Mach-O each, so the
+  # bundle itself is the only thing to sign.
+  codesign --force --options runtime --timestamp \
+           --entitlements "$ENTITLEMENTS" \
+           -s "$SIGN_ID" "$target"
+  codesign --verify --strict --verbose=2 "$target"
+}
+
+# Submit to Apple and staple the ticket into the bundle.
+#
+# Stapling matters more than it looks: without it the first launch needs a
+# network round trip to Apple, so a laptop opening the app offline is refused.
+# With the ticket stapled the bundle carries its own proof.
+#
+# The profile is created ONCE, by hand, by the person with the Apple ID:
+#   xcrun notarytool store-credentials "elemental" \
+#       --apple-id you@example.com --team-id TEAMID --password <app-specific>
+# The app-specific password comes from appleid.apple.com, never the real one.
+notarize_bundle() {
+  local target="$1"
+  [[ -n "$SIGN_ID" && -n "$NOTARY_PROFILE" ]] || return 0
+  local zip="${target}.notarize.zip"
+  echo "  notarizing $(basename "$target")"
+  ditto -c -k --keepParent "$target" "$zip"
+  xcrun notarytool submit "$zip" --keychain-profile "$NOTARY_PROFILE" --wait
+  rm -f "$zip"
+  # A .saver is a plug-in bundle and staples like any other bundle.
+  xcrun stapler staple "$target"
+  xcrun stapler validate "$target"
+}
+
 build_render() {
   echo "==> elemental-render (offscreen still exporter)"
   swiftc "${SWIFTFLAGS[@]}" -o "$BUILD/elemental-render" \
@@ -67,7 +136,8 @@ build_app() {
     "${CORE[@]}" App/*.swift \
     -framework AppKit -framework Metal -framework QuartzCore \
     -framework CoreLocation -framework ImageIO -framework UniformTypeIdentifiers
-  codesign --force -s - "$APP"
+  sign_bundle "$APP"
+  notarize_bundle "$APP"
 }
 
 build_saver() {
@@ -83,7 +153,8 @@ build_saver() {
     "${CORE[@]}" Saver/*.swift \
     -module-name Elemental \
     -framework ScreenSaver -framework AppKit -framework Metal -framework QuartzCore
-  codesign --force -s - "$SAV"
+  sign_bundle "$SAV"
+  notarize_bundle "$SAV"
 }
 
 embed_shader

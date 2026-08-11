@@ -1,0 +1,40 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  Hardened Runtime entitlements for a Developer ID build.
+
+  The Hardened Runtime is mandatory for notarization, and it denies a set of
+  things by default. Only what Elemental actually needs is asked for here — an
+  entitlement you do not need is an entitlement that widens the attack surface
+  and that Apple may query at review.
+
+  What is deliberately NOT here:
+
+    * app sandbox. Elemental is distributed outside the App Store, and the
+      sandbox would block it writing the screen saver's ByHost preferences and
+      reading ~/Library/Application Support — the two channels the desktop uses
+      to reach the saver. The screen saver itself runs inside Apple's own
+      legacyScreenSaver.appex sandbox regardless of what we ask for.
+
+    * com.apple.security.device.camera / microphone / addressbook and friends.
+      Nothing here touches them.
+
+    * JIT, unsigned executable memory, DYLD variables. Metal compiles the shader
+      at runtime from an embedded string, which uses the system Metal compiler
+      service and needs none of these. If a future change makes the shader fail
+      to build ONLY in a signed build, this is the first place to look — but do
+      not add them speculatively.
+-->
+<plist version="1.0">
+<dict>
+    <!-- Where the sky is drawn for. Without this the app falls back to the
+         configured or estimated place, which is a degraded but working scene —
+         see Config.fallbackPlace. -->
+    <key>com.apple.security.personal-information.location</key>
+    <true/>
+
+    <!-- Open-Meteo, METAR and the RainViewer radar composite. All outbound;
+         nothing listens. -->
+    <key>com.apple.security.network.client</key>
+    <true/>
+</dict>
+</plist>

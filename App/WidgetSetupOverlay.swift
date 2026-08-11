@@ -935,7 +935,7 @@ final class WidgetSetupOverlay: NSObject, NSWindowDelegate {
     // MARK: - Click-through
 
     @objc private func appActivated() {
-        window.ignoresMouseEvents = false
+        window.ignoresMouseEvents = false      // see appDeactivated: never re-set
         canvas.isPassive = false
         hud.alphaValue = 1
         guard !finished else { return }
@@ -947,7 +947,23 @@ final class WidgetSetupOverlay: NSObject, NSWindowDelegate {
     }
 
     @objc private func appDeactivated() {
-        window.ignoresMouseEvents = true
+        // NOT click-through, even when we lose activation.
+        //
+        // This used to set `ignoresMouseEvents = true` the moment another app
+        // came forward, on the reasoning that the user might want to reach the
+        // desktop underneath. In practice the overlay covers the whole screen
+        // while you are placing things ON that screen, so every click that fell
+        // through landed on whatever happened to be behind it — Finder, a
+        // browser, the desktop itself — and the first sign of it was something
+        // else coming to the front, or an icon moving. You cannot place a
+        // rectangle accurately on a surface that is also forwarding your clicks
+        // to somebody else.
+        //
+        // So while setup is open the screen belongs to setup: the only things
+        // that take a click are this overlay and the settings window floating
+        // above it, which is where an element's own settings live. Everything
+        // else is inert until Save or Cancel. The menu bar is still above us at
+        // level 24 and still works, so there is always a way out.
         canvas.isPassive = true
         // Faded rather than hidden: the overlay is still holding unsaved work,
         // and a panel that vanished would read as the setup having been closed.
