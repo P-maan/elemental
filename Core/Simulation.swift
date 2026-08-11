@@ -1773,20 +1773,49 @@ final class SceneSimulation {
         // The pane itself can be switched off. Clear what is on it once rather
         // than leaving the last wet frame frozen there forever.
         let paneOn = Furniture.options.paneWater && Furniture.options.pane > 0.001
+
+        // Splashes are FURNITURE, not pane water — and this return was killing
+        // them.
+        //
+        // `impactSpray` sits below here, and it is the one function built to
+        // throw spray off a lip from the rain that is actually falling on it,
+        // deliberately independent of whether a pane droplet happened to wander
+        // past. Returning early skipped it, and cleared `drops` besides, so with
+        // "water on the pane" switched off the dock and the widgets got no
+        // splash at all — ever. Measured: 900 frames of 8 mm/h onto three
+        // surfaces gave 573 splashes with the pane on and exactly 0 with it off.
+        // The comment three lines above this one already says the two are
+        // separate settings because they are separate effects; the code made one
+        // depend on the other.
+        //
+        // So the pane state is still cleared — nothing should accumulate on
+        // glass the user has turned off — but the function now CONTINUES when
+        // there is furniture to rain on, and the pane-only accumulations below
+        // are each gated on `paneOn` instead of on having returned.
+        let furnitureOn = Furniture.options.furniture > 0.001
+                       && !surfaces.isEmpty
+                       && (Furniture.options.dock || Furniture.options.widgets
+                           || Furniture.options.menuBar)
         if !paneOn {
-            if !drops.isEmpty || !spots.isEmpty || !vortices.isEmpty || glassWet > 0 || poolDepth > 0 {
-                drops.removeAll(keepingCapacity: true)
+            if !spots.isEmpty || !vortices.isEmpty || glassWet > 0 || poolDepth > 0 {
                 spots.removeAll(keepingCapacity: true)
                 vortices.removeAll(keepingCapacity: true)
                 for i in 0..<trailCells.count { trailCells[i] = 0 }
                 glassWet = 0; poolDepth = 0
             }
-            rasteriseGlass()
-            return
+            if !furnitureOn {
+                if !drops.isEmpty { drops.removeAll(keepingCapacity: true) }
+                rasteriseGlass()
+                return
+            }
         }
 
-        // wetness accumulates while raining and evaporates afterwards
-        if wet {
+        // wetness accumulates while raining and evaporates afterwards.
+        // Pane-only: with the pane off this stays at zero, so the splash spray
+        // running below leaves the glass itself untouched.
+        if !paneOn {
+            glassWet = 0
+        } else if wet {
             glassWet = min(1, glassWet + dt * (0.09 + inten * 0.22))
         } else {
             // Same evaporation model as the trails, so the pane dries as one
@@ -1835,7 +1864,7 @@ final class SceneSimulation {
         // Drizzle wets everything and beads almost nothing, so it gets many
         // tiny drops that never detach; rain gets few large ones that do.
         let seedRate = (form == .drizzle ? 1.5 : 0.55) * inten
-        if wet && drops.count < Self.maxDrops && rnd() < seedRate * dt * 60 {
+        if paneOn && wet && drops.count < Self.maxDrops && rnd() < seedRate * dt * 60 {
             let r0 = SP * (0.16 + rnd() * 0.14) * sizeF
             drops.append(GlassDrop(x: rnd() * W, y: rnd() * H * 0.85,
                                    r: r0, v: 0,
@@ -1852,7 +1881,7 @@ final class SceneSimulation {
 
         // Condensation seeding. Fog and mist put water on the pane with no
         // impact whatsoever — it grows out of the air, evenly, everywhere.
-        if form == .fog && drops.count < Self.maxDrops && rnd() < dt * 18 {
+        if paneOn && form == .fog && drops.count < Self.maxDrops && rnd() < dt * 18 {
             let r0 = SP * (0.10 + rnd() * 0.10)
             drops.append(GlassDrop(x: rnd() * W, y: rnd() * H,
                                    r: r0, v: 0,

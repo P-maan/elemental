@@ -84,7 +84,22 @@ enum Furniture {
     /// changed — so the common case, which is that nothing changed, costs one
     /// syscall a minute of wall-clock time and no allocation. Called from the
     /// simulation's step, which is the one place that runs in every host.
+    /// Pin the options and stop `poll()` reading the user's config over them.
+    ///
+    /// For the offscreen harness only. Without it every test of the water path
+    /// silently inherits whatever the developer happens to have switched on in
+    /// their own settings, which is how "the splash is not visible" stayed
+    /// undiagnosed: the config on this machine has `paneWater` off, and that
+    /// turns out to disable splashes too.
+    static func pin(_ o: Options) {
+        options = o
+        pinned = true
+    }
+
+    private static var pinned = false
+
     static func poll(now: TimeInterval) {
+        guard !pinned else { return }
         guard now - optionsLoadedAt > 5 || optionsLoadedAt < 0 else { return }
         optionsLoadedAt = now
         let stamp = (try? Config.fileURL.resourceValues(forKeys: [.contentModificationDateKey]))?

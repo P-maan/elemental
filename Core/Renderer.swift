@@ -47,6 +47,14 @@ final class ElementalRenderer {
 
     private let sim = SceneSimulation()
 
+    /// Simulation counters, for the offscreen harness.
+    ///
+    /// `SceneSimulation.debugCounts` existed and was reachable from nowhere, so
+    /// "is the water actually running?" could only be answered by staring at a
+    /// PNG and guessing. Splash counts, film coverage and surface state are all
+    /// in there; exposing it is what turns a visual hunch into a measurement.
+    public var waterDebug: String { sim.debugCounts }
+
     /// Things on screen for water to land on. The wallpaper sets the dock and
     /// menu bar; the saver sets the lock screen's clock.
     var surfaces: [Surface] {

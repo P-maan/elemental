@@ -456,6 +456,19 @@ if args["dock"] != nil || args["widget"] != nil {
     renderer.surfaces = out
 }
 
+// Furniture / pane switches, pinned so the harness does not inherit whatever the
+// developer has in their own config.json. `--pane 0` and `--furniture 0` are the
+// two that matter: the splash path turned out to be gated on the FIRST of them.
+if args["pane"] != nil || args["furniture"] != nil || args["wetdock"] != nil {
+    var o = Furniture.Options()
+    o.paneWater = num("pane", 1) > 0.5
+    o.pane      = Float(num("pane", 1))
+    o.dock      = num("wetdock", 1) > 0.5
+    o.widgets   = num("wetwidgets", 1) > 0.5
+    o.furniture = Float(num("furniture", 1))
+    Furniture.pin(o)
+}
+
 // ---------------------------------------------------------------- --sheet
 //
 // A whole day on one page.
@@ -585,6 +598,24 @@ pixels.withUnsafeMutableBytes { p in
                  from: MTLRegionMake2D(0, 0, width, height), mipmapLevel: 0)
 }
 
+// ---------------------------------------------------------------- --water
+//
+// What the water simulation actually did, as numbers.
+//
+// The splash path is stateful and needs hundreds of warm-up frames, so a still
+// frame cannot distinguish "no splashes happened" from "splashes happened and
+// are invisible". Those have completely different causes and the counters
+// separate them in one line.
+//
+// AFTER the render, necessarily. Printed before it, every counter reads zero —
+// including the precipitation rate — which looks exactly like a dead simulation
+// and is only an empty one.
+//
+//   elemental-render --kind rain --rain 8 --dock --widget --warmup 900 --water
+if args["water"] != nil {
+    print(renderer.waterDebug)
+}
+
 // ---------------------------------------------------------------- --probe
 //
 // Sky colour, as numbers, down the middle of the frame.
@@ -626,6 +657,38 @@ if args["probe"] != nil {
     for x in cell..<width { vBand += abs(colMean[x] - colMean[x - cell]); m += 1 }
     print(String(format: "  banding   vertical %.2f  (mean |Δ| between columns one cell apart)",
                  vBand / Double(max(1, m))))
+}
+
+// ---------------------------------------------------------------- foreground
+//
+// Draw the furniture ON TOP, the way the user actually sees it.
+//
+// The wallpaper renders BEHIND the dock and the widgets — that is the whole
+// mechanism, and it is why a splash is aimed at a surface's TOP EDGE and has to
+// travel upward into open sky to be seen at all. The harness was compositing
+// none of that, so every splash render was a picture of a scene with the
+// occluders missing: water drawn inside the dock's rectangle looked perfectly
+// visible here and is, in reality, behind the dock.
+//
+// So paint the surfaces in as opaque blocks. Anything still visible above their
+// top edges is what the user gets; anything that disappears under one was never
+// going to be seen. `--furnfg 0` turns it off.
+if (args["dock"] != nil || args["widget"] != nil), num("furnfg", 1) > 0.5 {
+    for s in renderer.surfaces {
+        let x0 = max(0, Int(s.left)), x1 = min(width, Int(s.right))
+        let y0 = max(0, Int(s.top)),  y1 = min(height, Int(s.bottom))
+        guard x1 > x0, y1 > y0 else { continue }
+        for y in y0..<y1 {
+            for x in x0..<x1 {
+                let o = y * rowBytes + x * 4
+                // A flat translucent slab, dark enough to read as furniture and
+                // light enough that a splash overlapping its lip is still legible.
+                pixels[o + 0] = UInt8(Int(pixels[o + 0]) * 22 / 100 + 30)
+                pixels[o + 1] = UInt8(Int(pixels[o + 1]) * 22 / 100 + 32)
+                pixels[o + 2] = UInt8(Int(pixels[o + 2]) * 22 / 100 + 36)
+            }
+        }
+    }
 }
 
 guard let provider = CGDataProvider(data: Data(pixels) as CFData),
