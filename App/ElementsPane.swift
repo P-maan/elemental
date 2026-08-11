@@ -383,10 +383,24 @@ final class ElementsPane: Pane {
         bigButton.keyEquivalent = "\r"
         bigButton.font = UI.body
 
+        // The third way in, and the most direct one: stop working on a picture
+        // of the screen and work on the screen. See WidgetSetupOverlay.swift.
+        let overlayButton = NSButton(title: "Place Widgets on Screen…", target: self,
+                                     action: #selector(placeOnScreen))
+        overlayButton.bezelStyle = .rounded
+        overlayButton.font = UI.body
+
         let buttons = NSStackView(views: [bigButton, addButton, removeButton, clearButton])
         buttons.spacing = 8
 
         let edit = Card("Placement", symbol: "hand.draw")
+        edit.add(NSStackView(views: [overlayButton]))
+        edit.add(captionLabel(
+            "Puts a dim sheet over your actual desktop. Drag a rectangle round each widget and it "
+          + "snaps to one of the four sizes macOS actually uses — small, medium, large, extra "
+          + "large — so you supply the position, which you know, and it supplies the size, which "
+          + "it knows. Nothing is saved until you press Save."))
+        edit.rule()
         edit.add(buttons)
         edit.add(selectionLabel)
         edit.note("Arrow keys nudge the selection, ⌥-arrow moves it a hair, ⇧-arrow moves it "
@@ -608,6 +622,29 @@ final class ElementsPane: Pane {
             self.gridEdited()
         }
         presentAsSheet(ed)
+    }
+
+    /// Place widgets on the real desktop rather than on a miniature of it.
+    ///
+    /// The settings window is ordered OUT for the duration, not left underneath:
+    /// the overlay is translucent so that the user's actual desktop shows dimly
+    /// through it, and an 860pt window sitting in the middle of that is exactly
+    /// the thing they are trying to see past. It comes back either way, so
+    /// cancelling costs nothing.
+    ///
+    /// Exposed rather than private for the same reason as `editPlacements` —
+    /// the verification harness cannot click a button.
+    @objc func placeOnScreen() {
+        guard !WidgetSetupOverlay.isPresented else { return }
+        let settings = view.window
+        settings?.orderOut(nil)
+        WidgetSetupOverlay.present(widgets: grid.widgets) { [weak self] placed in
+            settings?.makeKeyAndOrderFront(nil)
+            // nil is Cancel, which means change nothing — NOT "no widgets".
+            guard let self, let placed else { return }
+            self.grid.widgets = placed
+            self.gridEdited()
+        }
     }
 
     /// The editor as it would be presented, for the harness. Not used by the
