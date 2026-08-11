@@ -213,6 +213,45 @@ fixed it for the user. A real ordering bug was found and fixed in the lock-still
 exporter, but it was broken from launch either way, so it does not explain the
 workaround. Something else is there.
 
+## Session of 2026-08-11 — what changed
+
+Twenty-four commits. The through-line: the scene was full of terms that looked
+measured and were not, and the harness was agreeing with several of them.
+
+**Observation replaced invention.** `Core/SkyImagery.swift` reads the global
+RainViewer radar composite (free, no key). Radar now decides whether it is
+raining ON YOU — a model's grid box is tens of km wide and "1 mm/h in that box"
+is not evidence at your window — and places the rain via `precipField`.
+Verified: model said WMO 51 / 1.0 mm while radar showed 0.00 overhead.
+`elemental-render --radar` and `--useradar` exercise it offscreen.
+
+**Classification removed.** `continuousCloudBase` clamped a measured
+transmission into a band around a hand-tuned `SceneKind` table. Gone; table
+deleted. `effectiveKind` still drives morphology/precipForm/snowHabit — that is
+the remaining classification and the next thing to derive.
+
+**Colour path made to obey depth.** Sky hue is gated by per-cell `seeThrough`;
+the element blend is driven by coverage, not saturation (a neutral overcast was
+being erased for being the right colour); the posterizer quantises luminance
+rather than R/G/B independently, which was shattering flat grey into confetti.
+
+**Relief stopped extruding cliffs that were not there** — the sun disc's 133-unit
+luminance step, a `smoothstep` that saturated into plateaus, dispersion moving R
+and B independently. Sub-cell features no longer raise their whole block.
+
+**Furniture.** Splashes were gated on pane water (0 vs 573 splashes measured);
+drizzle spray could not clear its own lip (6 px rise); the dock had no underside
+so it could never drip; each surface now has its own material.
+
+**The saver** publishes/consumes the desktop's weather through the ByHost domain
+and snaps rather than easing in. `SaverHealth` diagnoses it;
+`elemental-render --saverhealth`.
+
+**Left:** meteor showers (radiant + rate from a table — simulation shaped by real
+data, not observation); satellite IR for cloud PLACEMENT (RainViewer returned
+zero IR frames — needs another source); widget resize / dock precision /
+autodetect sit unmerged and unverified in `agent-ac2b3677a56b6e262`.
+
 ## Working style that has held up
 
 - One agent at a time. Four in parallel once produced a tree that would not
