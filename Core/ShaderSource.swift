@@ -531,7 +531,19 @@ inline float3 sunTint(float sAlt, float aqiF) {
 
 // Cloud face tint: warm at golden hour, cool blue-grey at night
 inline float3 cloudTint(float sAlt, float light, float shade) {
-    if (sAlt > 14.0f) return float3(max(0.0f, shade - 12.0f), max(0.0f, shade - 4.0f), min(255.0f, shade + 16.0f));
+    // Daylight cloud is very nearly neutral, and only just on the cool side.
+    //
+    // The measurements are already cited at the deck blend in `skyRGB`: a
+    // daytime overcast is 6415 +/- 133 K against sRGB's 6504 K white point, so
+    // the intended thick-deck target there is (148,150,157) — a red-to-blue
+    // spread of NINE. This function was returning a spread of 28, three times
+    // that, and it is blended on top of `rampLUT`, which carries a cool bias of
+    // its own (+17 at mid grey). The two stack, and a 100% overcast at noon
+    // measured (149,153,169): the brightness the tuning wants, wearing more than
+    // twice the chroma the physics allows. That is the lavender an overcast was
+    // painted in, and no amount of getting the depth right would have removed it
+    // — it is the tint itself that is wrong, not the weight it arrives at.
+    if (sAlt > 14.0f) return float3(max(0.0f, shade - 6.0f), max(0.0f, shade - 2.0f), min(255.0f, shade + 8.0f));
     if (sAlt > -1.0f) {
         float gf = (1.0f - min(1.0f, sAlt / 14.0f)) * light;
         return float3(min(255.0f, shade + gf * 88.0f),
@@ -1263,7 +1275,14 @@ fragment CellOut cellPass(VOut in [[stage_in]],
                 // has to obey both.
                 float discDim = 1.0f - U.covF * 0.30f;
                 L = max(L, (150.0f + diskI * 120.0f) * discDim * seeThrough);
-                float ww3 = diskI * 0.82f * sunV * discDim;
+                // The disc's COLOUR must be occluded by exactly what its
+                // luminance is occluded by, one line up. Without `seeThrough`
+                // the sun held a weight near 0.6 through a closed deck and
+                // stamped full sun tint into the cell. The cloud layers do
+                // composite over it afterwards, but a body asserting itself
+                // through opaque cloud is precisely the bug already fixed for
+                // the moon, and the sun was left carrying it.
+                float ww3 = diskI * 0.82f * sunV * discDim * seeThrough;
                 if (ww3 > w) { w = ww3; cr = sc.r; cg = min(255.0f, sc.g + 16.0f); cb = min(255.0f, sc.b + 30.0f); }
             }
         }
@@ -1740,7 +1759,26 @@ fragment CellOut cellPass(VOut in [[stage_in]],
     // Base weight raised from 0.34: at 0.34 a bright daylight cell kept two
     // thirds of the ramp's neutral grey and only a third of the sky's hue,
     // which is why a clear noon read as pale grey-blue rather than blue.
-    float tf = 0.62f + max(0.0f, 1.0f - li) * 0.30f;
+    //
+    // And gated by what this cell can actually SEE of the sky.
+    //
+    // `tf` was a function of the cell's own brightness and nothing else, so the
+    // sky's hue was painted onto every cell in the frame — including cells
+    // sitting behind a hundred per cent opaque cloud. Together with the element
+    // blend below (which admitted a neutral cloud at 0.4 *because* it is
+    // neutral) a fully covered cell came out about three-quarters clear-sky
+    // blue: the deck was drawn, and then the sky was painted back over the top
+    // of it. That is why a heavy overcast read as a lavender haze rather than a
+    // lid, and why only the warm-tinted cloud EDGES survived — they were the
+    // only cells whose element colour was saturated enough to hold the pixel.
+    //
+    // `seeThrough` is the per-cell transmission already computed for the bodies,
+    // the same quantity that dims the moon behind a deck. Sky colour is light
+    // arriving from behind the cloud, so it obeys the same law. The floor is not
+    // zero: a deck is a diffuser, not a shutter, and some skylight is scattered
+    // through even a closed one.
+    float skyReach = 0.14f + 0.86f * seeThrough;
+    float tf = (0.62f + max(0.0f, 1.0f - li) * 0.30f) * skyReach;
     g += (skyChroma * gl - g) * tf;
 
     // Blend the weather tint — the colour of whatever element won this cell.
@@ -1754,14 +1792,52 @@ fragment CellOut cellPass(VOut in [[stage_in]],
     // that. Nothing drawn means nothing to blend.
     if (w > 0.02f) {
         float sat = max(max(R0, G0), B0) - min(min(R0, G0), B0);
-        float sw = min(0.97f, sat / 70.0f) * max(0.25f, li) * saturate(w * 1.6f);
+        // Weighted by COVERAGE, with saturation only as a mild lift.
+        //
+        // This was `sat / 70` outright, which makes an element's claim on the
+        // cell a function of how colourful it is rather than how much of the
+        // cell it covers. Depth does not work that way, and the elements it
+        // penalised hardest are the ones that are neutral for a real physical
+        // reason: a daytime overcast is 6400 K, i.e. neutral by definition, so
+        // `cloudTint` returns a channel spread of about 28 and a deck at full
+        // coverage was admitted at 0.4. The most opaque thing in the sky had the
+        // weakest claim on the pixel, purely for being the right colour.
+        //
+        // `w` is genuine over-compositing coverage — the cloud layers accumulate
+        // it as `w + (1 - w) * a` — so it is the correct authority here.
+        // Saturation stays on as a small bonus, because a vivid element (a
+        // rainbow band, a sunlit rim) does read harder than a flat one at equal
+        // coverage; it just no longer decides the matter.
+        float sw = saturate(w) * (0.74f + 0.26f * min(1.0f, sat / 70.0f))
+                 * max(0.25f, li);
         g += (float3(R0, G0, B0) - g) * sw;
     }
     if (U.flashAmp > 0.0f) {
         float fa = U.flashAmp * 0.8f;
         g += (255.0f - g) * fa;
     }
-    g = round(g / U.posterQ) * U.posterQ;
+    // Posterize in VALUE, not per channel.
+    //
+    // `round(g / posterQ) * posterQ` applied to R, G and B independently lets
+    // the three channels cross their quantisation steps in different places, so
+    // a colour that is nearly neutral — which is exactly what an overcast IS —
+    // has its channel differences rewritten by up to a full step in an arbitrary
+    // direction. At posterQ 16, a true (150,154,161) quantises to (144,160,160):
+    // a flat grey deck comes apart into confetti of teal, khaki and lavender
+    // cells, not one of which is in the sky. The engine already knew this
+    // mechanism — it is written up at the solar ripple above, where the same
+    // independent crossing drew coloured concentric arcs — but only that one
+    // symptom was ever treated, by removing the signal that revealed it. The
+    // cause is here, and it fires on every near-neutral cell in the frame.
+    //
+    // Quantising the luminance and carrying the chroma along keeps the tonal
+    // banding, which IS the mosaic look, and stops it from inventing hue. A
+    // saturated element keeps its colour exactly; a neutral one stays neutral.
+    {
+        float qv = dot(g, LW);
+        float qq = max(0.0f, round(qv / U.posterQ) * U.posterQ);
+        g *= qq / max(qv, 1e-3f);
+    }
 
     // ---- EDR. Give the clipped emissive excess back, up to the headroom the
     // display is ACTUALLY offering right now (U.edrHead, read from NSScreen
