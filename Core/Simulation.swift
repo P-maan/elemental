@@ -1354,6 +1354,27 @@ final class SceneSimulation {
             grime = 0; steam = 0
             return
         }
+        // Furniture carries WATER and SNOW, and nothing else.
+        //
+        // The film model also grows frost, a clear glaze, grime and steam, and
+        // each of those is defensible physics for a real ledge outdoors. The
+        // dock is not a ledge outdoors: it is a piece of the user's interface,
+        // and a rime of frost or a film of grime on it reads as the wallpaper
+        // having gone wrong rather than as weather. Rain splashing off it and
+        // snow settling on it read as weather immediately, because those are the
+        // two things you actually watch happen to a windowsill.
+        //
+        // Cleared every step rather than never accumulated, so the decision
+        // lives in one place and none of the physics below has to be unpicked or
+        // kept in sync. `anyWater` reads `glaze` and `steam`, so zeroing them
+        // here also stops them standing in for wetness they did not earn.
+        for i in 0..<films.count {
+            films[i].glaze = 0
+            films[i].frost = 0
+            films[i].grime = 0
+            films[i].steam = 0
+        }
+
         let sw = surfaceWeather
         let evap = w.evaporationRate
         let t = sw.surfaceTemp                           // the LIP's temperature
@@ -2672,6 +2693,32 @@ final class SceneSimulation {
             // shape. So beads show up at the right time and place instead of
             // peppering the whole pane.
             let mature = d.falling || d.r > d.rCrit * 0.72
+            // Spray thrown off a lip is not ambient pane wetness and must not be
+            // stamped like it.
+            //
+            // Everything else here deliberately changes the MATERIAL of a cell
+            // rather than being drawn on top of it — that is what stopped the
+            // pane reading as bright confetti, and it is right for condensation,
+            // for tracks and for beads, all of which are slow and everywhere. A
+            // splash is the opposite of all three: brief, local, and the entire
+            // point is that you SEE it. Stamped at a fragment's own radius,
+            // which is 0.08 to 0.30 of a cell, each one marked a fraction of one
+            // cell fractionally wetter and was invisible. Measured: 617 splashes
+            // in a 900-frame downpour, not one of them visible above a lip.
+            //
+            // So spray gets a floor on its footprint — nearly a whole cell, so it
+            // marks the mosaic it is made of — and close to full strength, which
+            // it can afford precisely because it lasts under a second and only
+            // ever exists directly above a surface's top edge. Ambient water is
+            // untouched, so the confetti that the material approach was written
+            // to remove cannot come back.
+            if d.splashLife > 0 {
+                stamp(x: d.x, y: d.y, r: max(d.r * 1.15, SP * 0.85),
+                      kind: 1,
+                      strength: min(1, 0.55 + 0.45 * intensity),
+                      bead: true)
+                continue
+            }
             stamp(x: d.x, y: d.y, r: d.r * 1.15,
                   kind: mature ? 1 : 2,
                   strength: (mature ? 0.85 : 0.45) * intensity,
