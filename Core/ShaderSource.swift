@@ -2750,10 +2750,45 @@ fragment float4 presentPass(VOut in [[stage_in]],
         // 0.5, so the block genuinely shows its neighbour — it just cannot skip
         // one. The two terms are scaled together, so the fringe keeps its
         // proportion to the displacement instead of surviving alone.
-        float2 off   = rel.lean * (U.refractAmt * rel.h * 3.0f);
+        // ---- The tile is a LENS, and it bends by its OWN CURVATURE.
+        //
+        // This offset came only from `rel.lean` — the view angle — so every tile
+        // in a neighbourhood bent the same content the same way, and the wall
+        // read as a sheet of glass with a uniform shift behind it. Real pressed
+        // glass does not do that: each pillow is a little lens, so it gathers
+        // light toward its crown and spreads it at its rim, and neighbouring
+        // tiles therefore show DIFFERENT parts of what is behind them. That is
+        // the flow — a continuous field underneath, sampled through a grid of
+        // separate lenses, each distorting its own slice of it.
+        //
+        // So the dome's own normal is added to the displacement. Same
+        // superellipse as the shading uses, so the lens and the highlight agree
+        // about which way the surface is facing; anything else and the tile
+        // looks lit from one direction and refracting from another.
+        // Cell-local uv, recomputed here: `cuv` belongs to styleCell, which runs
+        // later. This has to be the COARSE cell's own, for the same reason the
+        // deposit feather does.
+        float2 lcuv   = px / SPv - floor(px / SPv);
+        float2 lensUV = (lcuv - 0.5f) * 2.0f;
+        float  lensR  = powr(powr(abs(lensUV.x), 4.0f) + powr(abs(lensUV.y), 4.0f), 0.25f);
+        float  lensZ  = sqrt(saturate(1.0f - lensR * lensR));
+        // Bend outward from the crown, hardest at the rim where the surface is
+        // steepest — which is what makes the centre of each tile magnify and the
+        // edges smear.
+        float2 bend   = lensUV * (1.0f - lensZ);
+
+        float2 off   = rel.lean * (U.refractAmt * rel.h * 3.0f)
+                     + bend * (U.refractAmt * 1.15f);
         float  disp  = (U.dispersAmt > 0.005f) ? U.dispersAmt * 1.6f : 0.0f;
+        // Reach widened from 0.55. That bound existed to stop a block taking its
+        // red from the moon's disc and its blue from the night sky beyond it,
+        // and the dispersion rewrite already fixed that properly by making the
+        // fringe a single signed separation. Holding the lens to half a cell
+        // stops it ever showing more than its immediate neighbour, which is what
+        // kept the glass looking like a shifted sheet instead of a field seen
+        // through lenses.
         float  reach = length(off) + disp;
-        float  kr    = (reach > 0.55f) ? 0.55f / reach : 1.0f;
+        float  kr    = (reach > 1.35f) ? 1.35f / reach : 1.0f;
         off *= kr; disp *= kr;
 
         float2 base = float2(cid) + 0.5f + off;

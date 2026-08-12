@@ -157,6 +157,23 @@ enum Updater {
         // would take it as an update and go backwards. A build can only ever be
         // superseded by something published after it was made.
         let newest = SemVer(rel.tag_name)
+
+        // NEVER offer what is already installed, whatever the clocks say.
+        //
+        // The time comparison below is the right instrument for "is this newer",
+        // and it has one failure mode that the timestamps cannot see: a release
+        // is published moments AFTER the binary inside it was built, so every
+        // install is fractionally older than its own release. A slack window
+        // absorbs that — until it does not. Measured on the v0.2 release: the
+        // package was published 62 seconds after its binary was stamped, against
+        // a 60-second slack, so 0.2 offered 0.2 to itself and would have done
+        // every six hours forever.
+        //
+        // Widening the window only moves the cliff. The tag is the fact that
+        // settles it: if the newest release is the version already running, there
+        // is nothing to install, and no arithmetic on two clocks can make that
+        // untrue.
+        if let n = newest, n.description == currentVersion.description { return nil }
         if let built = buildDate,
            let stamp = rel.published_at,
            let published = ISO8601DateFormatter().date(from: stamp) {
@@ -164,7 +181,12 @@ enum Updater {
             // binary inside it was built, so the artifact you are running is
             // always fractionally older than its own release. Without this every
             // install would immediately offer to reinstall itself.
-            guard published > built.addingTimeInterval(60) else { return nil }
+            // Ten minutes, not one. Building, packaging and uploading a release
+            // is not instantaneous, and the exact gap depends on how big the
+            // package is and how fast the upload was — it is not a quantity to
+            // cut fine. The version guard above is what actually prevents a
+            // self-offer; this only keeps the comparison honest.
+            guard published > built.addingTimeInterval(600) else { return nil }
         } else {
             // No build stamp — an install from before this existed. Fall back to
             // comparing versions so those users are not stranded.
