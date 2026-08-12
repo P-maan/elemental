@@ -151,6 +151,15 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
     private var onboarding: OnboardingController?
 
+    /// Re-run the first-run flow from Settings. See GeneralPane.
+    @objc func startOnboarding() {
+        // The onboarding window covers the screen, so leaving Settings open
+        // behind it would put a window the user cannot see between them and the
+        // scene the flow is trying to show.
+        settings?.hide()
+        presentOnboarding()
+    }
+
     private func presentOnboarding() {
         onboarding = OnboardingController(
             config: config, device: device, location: location,

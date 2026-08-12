@@ -529,6 +529,18 @@ final class GeneralPane: Pane {
         startup.add(loginCheck)
         startup.note("Elemental has no Dock icon. Launching it again from Spotlight or Finder reopens "
                    + "these settings.")
+        // The first-run flow, on demand.
+        //
+        // Worth having for more than curiosity: it is the one place that walks
+        // the permissions in the order they actually matter, and the permissions
+        // are exactly what an ad-hoc signed build keeps losing — a rebuild mints
+        // a new code identity and macOS forgets the Location grant (trap 9). So
+        // "run it again" is the shortest honest answer to "the sky is drawn for
+        // the wrong city", and it is also how you show somebody the app.
+        let redo = NSButton(title: "Run First-Run Setup Again…", target: self,
+                            action: #selector(replayOnboarding))
+        redo.bezelStyle = .rounded
+        startup.add(redo)
         addCard(startup)
 
         // ---- icon
@@ -633,6 +645,16 @@ final class GeneralPane: Pane {
         // but this is one shared wall and the pane it lives on is the general one.
         UI.setHidden([glassCard], c.finish != .glass)
         refreshPreviewsDebounced()
+    }
+
+    @objc private func replayOnboarding() {
+        // Cleared and saved BEFORE asking to present, so a flow that is quit
+        // half way still counts as un-onboarded and can be resumed, rather than
+        // the flag being set by the act of opening it.
+        guard var c = owner?.config else { return }
+        c.hasOnboarded = false
+        owner?.commit(c, from: self)
+        NSApp.sendAction(#selector(AppDelegate.startOnboarding), to: nil, from: nil)
     }
 
     @objc private func loginToggled() {
@@ -1536,6 +1558,14 @@ final class SettingsWindowController: NSObject, NSWindowDelegate {
         split.addSplitViewItem(contentItem)
         pane.refreshPreviews()
     }
+
+    /// Order the settings window out without tearing it down.
+    ///
+    /// Used when the onboarding flow takes the screen: it covers the display, so
+    /// a settings window left open behind it is a window the user cannot see and
+    /// cannot reach, and closing it outright would throw away the pane they were
+    /// on for no reason.
+    func hide() { window?.orderOut(nil) }
 
     func show(config: Config) {
         self.config = config
