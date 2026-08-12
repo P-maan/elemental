@@ -142,6 +142,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         // First run. Presented AFTER the wallpaper exists, so quitting the flow
         // early still leaves a working scene behind rather than a blank desktop.
         if !config.hasOnboarded { presentOnboarding() }
+        startUpdateChecks()
 
         // Seed the scene-place change detector. Left at nil, the first config
         // change of the session always looked like a move to somewhere new and
@@ -150,6 +151,94 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     }
 
     private var onboarding: OnboardingController?
+
+    // MARK: - Updates
+
+    private var updateTimer: Timer?
+    /// The version already offered, so a declined update is not re-offered every
+    /// six hours until the user gives in. A NEW version resets it, because that
+    /// one has not been declined.
+    private var declinedVersion: String?
+
+    private func startUpdateChecks() {
+        guard config.automaticUpdates else { return }
+        // Not at the instant of launch: the first seconds belong to getting a
+        // scene on screen, and an update dialog over an app the user has not
+        // seen render yet is the worst possible first impression.
+        DispatchQueue.main.asyncAfter(deadline: .now() + 30) { [weak self] in
+            self?.runUpdateCheck(userAsked: false)
+        }
+        updateTimer = Timer.scheduledTimer(withTimeInterval: Updater.checkInterval,
+                                           repeats: true) { [weak self] _ in
+            self?.runUpdateCheck(userAsked: false)
+        }
+    }
+
+    @objc private func checkForUpdates() { runUpdateCheck(userAsked: true) }
+
+    private func runUpdateCheck(userAsked: Bool) {
+        guard userAsked || config.automaticUpdates else { return }
+        Task { @MainActor in
+            guard let update = await Updater.check() else {
+                // Only say so when they asked. An automatic check that finds
+                // nothing should be completely silent.
+                if userAsked {
+                    let a = NSAlert()
+                    a.messageText = "Elemental is up to date"
+                    a.informativeText = "You have version \(Updater.currentVersion)."
+                    a.runModal()
+                }
+                return
+            }
+            guard userAsked || declinedVersion != update.version.description else { return }
+            self.offer(update)
+        }
+    }
+
+    @MainActor
+    private func offer(_ update: AvailableUpdate) {
+        let a = NSAlert()
+        a.messageText = "Elemental \(update.version) is available"
+        let mb = Double(update.bytes) / 1_048_576
+        a.informativeText = "You have \(Updater.currentVersion). "
+            + String(format: "The update is %.1f MB.", mb)
+            + "\n\nElemental will download it and open the installer. macOS will ask for your "
+            + "password, because the app lives in /Applications."
+        a.addButton(withTitle: "Update")
+        a.addButton(withTitle: "Later")
+        a.addButton(withTitle: "Release Notes")
+        switch a.runModal() {
+        case .alertFirstButtonReturn:
+            install(update)
+        case .alertThirdButtonReturn:
+            NSWorkspace.shared.open(Updater.releasesPage)
+        default:
+            declinedVersion = update.version.description
+        }
+    }
+
+    @MainActor
+    private func install(_ update: AvailableUpdate) {
+        Task { @MainActor in
+            guard let pkg = await Updater.download(update) else {
+                let a = NSAlert()
+                a.messageText = "Could not download the update"
+                a.informativeText = "Check your connection, or download it by hand from the "
+                                  + "releases page."
+                a.addButton(withTitle: "OK")
+                a.addButton(withTitle: "Open Releases Page")
+                if a.runModal() == .alertSecondButtonReturn {
+                    NSWorkspace.shared.open(Updater.releasesPage)
+                }
+                return
+            }
+            // Hand it to the system installer rather than running `installer`
+            // ourselves. That puts the authentication in Apple's UI where the
+            // user expects it, shows them what is being installed and where, and
+            // means this app never holds an admin credential even briefly.
+            NSWorkspace.shared.open(pkg)
+        }
+    }
 
     /// Re-run the first-run flow from Settings. See GeneralPane.
     @objc func startOnboarding() {
@@ -680,6 +769,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         menu.addItem(withTitle: "Settings…", action: #selector(showSettings), keyEquivalent: ",")
             .target = self
         menu.addItem(withTitle: "Reload Scene", action: #selector(reload), keyEquivalent: "r")
+        menu.addItem(withTitle: "Check for Updates…", action: #selector(checkForUpdates),
+                     keyEquivalent: "")
             .target = self
         menu.addItem(.separator())
         menu.addItem(withTitle: "Quit Elemental", action: #selector(quit), keyEquivalent: "q")
