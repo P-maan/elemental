@@ -381,8 +381,13 @@ guard let renderer = ElementalRenderer(colorFormat: .rgba8Unorm) else {
 }
 
 var state = SceneState()
-let lat = num("lat", 42.3732)      // Amherst, MA
-let lon = num("lon", -72.5199)
+// Defaults come from the CONFIGURED place, not from a coordinate baked into the
+// harness. A developer in Melbourne running `--probe` with no flags should get
+// Melbourne's sky, not somebody else's — and a hardcoded default silently makes
+// every unflagged test a test of one location.
+let cfgPlace = Config.load().scenePlace
+let lat = num("lat", cfgPlace.latitude)
+let lon = num("lon", cfgPlace.longitude)
 state.facingAz = Float(num("facing", 180))
 state.headingMode = str("heading", "custom") == "dynamic" ? .dynamic : .custom
 state.gridRows = int("rows", 36)

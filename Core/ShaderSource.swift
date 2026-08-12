@@ -1975,7 +1975,31 @@ fragment CellOut cellPass(VOut in [[stage_in]],
     // saturated element keeps its colour exactly; a neutral one stays neutral.
     {
         float qv = dot(g, LW);
-        float qq = max(0.0f, round(qv / U.posterQ) * U.posterQ);
+
+        // A SOFT staircase, not a hard round().
+        //
+        // `round()` gives every cell a discontinuity: the sky brightens by a
+        // fraction of a per cent over a second, a cell's luminance crosses a
+        // quantisation boundary, and it JUMPS a full step — 16 of 255, about six
+        // per cent — in one frame. Across a frame of two thousand cells they
+        // cross at different moments, so the wall is permanently speckling, one
+        // cell at a time, everywhere. That is the jitter. It is not the
+        // simulation and it is not the frame rate; it is quantisation applied to
+        // a continuously varying field, and no amount of smoothing upstream can
+        // remove a discontinuity introduced downstream of it.
+        //
+        // So the treads stay flat and the risers get a ramp. Most of each step
+        // still snaps exactly — which is what keeps the posterised look at rest,
+        // and a cell sitting in the middle of a tread is bit-identical to before
+        // — but a cell CROSSING a boundary slides across it over the middle 30%
+        // of the step instead of teleporting. At rest: unchanged. In motion: no
+        // pop.
+        float t = qv / U.posterQ;
+        float fl = floor(t);
+        float frac = t - fl;
+        float riser = smoothstep(0.22f, 0.78f, frac);
+        float qq = max(0.0f, (fl + riser) * U.posterQ);
+
         g *= qq / max(qv, 1e-3f);
     }
 
