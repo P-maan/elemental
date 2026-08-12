@@ -74,10 +74,29 @@ SIGN_ID="${ELEMENTAL_SIGN_ID:-}"
 NOTARY_PROFILE="${ELEMENTAL_NOTARY_PROFILE:-}"
 ENTITLEMENTS="App/Elemental.entitlements"
 
+# A stable local identity, if one has been made. See make-signing-cert.sh.
+#
+# This is NOT about Gatekeeper — a self-signed certificate gets past nothing,
+# and a downloaded build still needs the one-time override. It is about trap 9:
+# an ad-hoc signature's designated requirement is the CODE HASH, which swiftc
+# changes on every compile, so macOS treats every rebuild as a different app and
+# revokes its TCC grants. Location is the one that hurts. Signed with a stable
+# certificate the requirement becomes "this bundle id, signed by this cert", and
+# the grant survives.
+SELF_ID="Elemental Self-Signed"
+has_self_id() { security find-certificate -c "$SELF_ID" >/dev/null 2>&1; }
+
 sign_bundle() {
   local target="$1"
   if [[ -z "$SIGN_ID" ]]; then
-    codesign --force -s - "$target"
+    if has_self_id; then
+      # No hardened runtime here on purpose: it is a notarization requirement
+      # and buys nothing without it, while restricting the process for no
+      # benefit. Developer ID builds below do enable it.
+      codesign --force -s "$SELF_ID" "$target"
+    else
+      codesign --force -s - "$target"
+    fi
     return
   fi
   # --options runtime is the Hardened Runtime. --timestamp is required for

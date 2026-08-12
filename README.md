@@ -149,6 +149,37 @@ does not give you the other.
 gh release create v0.1 build/Elemental-0.1.pkg --title "Elemental 0.1" --notes "..."
 ```
 
+### A stable code identity, without an Apple account
+
+`./make-signing-cert.sh` — run once per machine.
+
+This does **not** get past Gatekeeper. Nothing does, without a paid Developer ID
+and notarization: that is Apple's signature, and any "workaround" claiming
+otherwise is really asking the *user* to override Gatekeeper rather than the
+developer to satisfy it. Downloaded builds still need the one-time
+right-click → Open.
+
+What it fixes is different, and it has been costing time every single build:
+
+```
+ad hoc       designated => cdhash H"9642..."
+self-signed  designated => identifier "com.prakritmaan.elemental"
+                           and certificate root = H"0ccc..."
+```
+
+An ad-hoc signature's designated requirement **is the code hash**, and `swiftc`
+mints a new one on every compile. macOS keys TCC grants on that requirement, so
+every rebuild looks like a different application and Location has to be granted
+again — which is why a development build keeps falling back to the stored place
+with nothing in the log to explain it. A self-signed certificate makes the
+requirement "this bundle id, signed by this certificate". Both halves are
+stable, so the grant survives. Verified: the requirement is byte-identical
+across separate builds.
+
+`security find-identity -v -p codesigning` will still report **0 valid
+identities**. That is about *trust*, not about signing — the certificate is
+self-signed so nothing vouches for it, and `codesign` uses it regardless.
+
 ### Signing
 
 The default build is ad-hoc signed, which works on the machine that built it and
