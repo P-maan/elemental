@@ -65,6 +65,48 @@ cp -R build/Elemental.saver ~/Library/Screen\ Savers/
 open -g build/Elemental.app
 ```
 
+### Installing on another Mac, without an Apple Developer account
+
+The default build is ad-hoc signed. An ad-hoc bundle runs perfectly well on any
+Mac — what it cannot survive is the **quarantine** attribute, which macOS
+attaches to anything arriving through a browser download or AirDrop. Ad hoc plus
+quarantine produces:
+
+> "Elemental is damaged and can't be opened. You should move it to the Trash."
+
+which is untrue. Nothing is damaged; Gatekeeper cannot find a Developer ID or a
+notarization ticket for a quarantined bundle and reports that in the least
+helpful way available.
+
+Two ways around it:
+
+**Copy it without quarantine.** A USB stick, `scp`, `rsync` or a network share
+does not set the attribute at all, and the app just works. Best for a machine
+you can physically reach.
+
+```bash
+scp -r build/Elemental.app other-mac:/Applications/
+```
+
+**Or strip the quarantine after downloading**, which is what `install.sh` does —
+it copies the app and the saver into place, clears the attribute recursively
+(per file, not just the bundle root, or the executable inside stays quarantined)
+and verifies it actually went:
+
+```bash
+./install.sh
+```
+
+Neither is a security bypass in any meaningful sense: you are telling your own
+Mac that you trust software you deliberately fetched — the same judgement
+Gatekeeper asks you to make in System Settings, made at the command line.
+
+A **free** Apple ID does not solve this. It can issue an "Apple Development"
+certificate, but not the "Developer ID Application" certificate that
+distribution requires, and development certificates cannot be notarized. The
+paid Developer Program is the only route to an app that opens by double-click
+for someone who has never heard of `xattr`.
+
 ### Signing
 
 The default build is ad-hoc signed, which works on the machine that built it and
