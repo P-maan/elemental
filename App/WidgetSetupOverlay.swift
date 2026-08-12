@@ -640,6 +640,11 @@ final class WidgetSetupCanvas: NSView {
         case 51, 117: removeSelected()                 // delete / forward delete
         case 48: cycleSelection()                      // tab
         case 49: cycleSize()                           // space
+        // Wetness on [ and ], next to each other under one hand and free of
+        // every system shortcut. A tenth at a time, which is fine enough to
+        // tune by eye and coarse enough to reach either end quickly.
+        case 33: model.nudgeSelectedWetness(by: -0.1)  // [
+        case 30: model.nudgeSelectedWetness(by:  0.1)  // ]
         default: handled = false
         }
         if !handled { super.keyDown(with: event) }

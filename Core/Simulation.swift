@@ -303,8 +303,9 @@ final class SceneSimulation {
         let peak = trailCells.max() ?? 0
         let fMin = precipField.min() ?? 0
         let fMean = precipField.isEmpty ? 0 : precipField.reduce(0, +) / Float(precipField.count)
-        return String(format: "T=%.0f RH=%.0f Td=%.1f wind=%.0f uv=%.1f evap=%.3f vpd=%.2f | surfaces=%d splashes=%d streaks=%d lit=%d drops=%d | film mean=%.3f peak=%.2f wet>0.15=%d/%d "
+        return String(format: "meteors=%d rate=%.1f/h | T=%.0f RH=%.0f Td=%.1f wind=%.0f uv=%.1f evap=%.3f vpd=%.2f | surfaces=%d splashes=%d streaks=%d lit=%d drops=%d | film mean=%.3f peak=%.2f wet>0.15=%d/%d "
                             + "| pool=%.2f spots=%d grid=%dx%d | field min=%.2f mean=%.2f dryCols=%d",
+                      shootCount, meteorRatePerHour,
                       lastWeather.temperature, lastWeather.humidity, lastWeather.dewPoint,
                       lastWeather.wind, lastWeather.uv,
                       lastWeather.evaporationRate, lastWeather.vapourPressureDeficit,
@@ -546,7 +547,9 @@ final class SceneSimulation {
         boltActive = false
         flashT = -9
         nextBolt = sec + 9 + rnd() * 14
-        shootT = sec + 60 + rnd() * 180
+        // From the RATE, not a fixed minute-to-four-minutes. On the peak night
+        // of a shower the first meteor should not be four minutes away.
+        shootT = sec + nextMeteorGap()
         shootActive = false
     }
 
@@ -1058,16 +1061,101 @@ final class SceneSimulation {
 
     // MARK: Shooting star
 
+    /// Rate and radiant of whatever shower is running, set by the host from
+    /// `Astro.activeShower`. Zero rate means only sporadics.
+    /// Meteors spawned since start. Verification only — a still frame cannot
+    /// distinguish "none happened" from "one happened and has faded".
+    private(set) var shootCount = 0
+    var meteorRatePerHour: Float = 0
+    var meteorRadiantX: Float = -1      // screen px, -1 when there is no radiant
+    var meteorRadiantY: Float = -1
+
+    /// Meteors, at the rate the sky actually has them.
+    ///
+    /// This used to fire every two to six minutes on any clear night, which is
+    /// roughly 10-30 an hour, every night of the year. Real meteor rates are not
+    /// like that at all. A quiet night gives a handful of SPORADICS — about five
+    /// an hour to a dark-sky observer, fewer in a city — and then a few nights a
+    /// year a shower runs and the rate goes up by an order of magnitude.
+    /// Flattening that away removes the only thing about meteors worth showing:
+    /// that tonight is different from last night.
+    ///
+    /// So the rate is now sporadic background PLUS whatever `Astro.activeShower`
+    /// says, which is measured — the IMO's dates, radiants and ZHRs, cut down by
+    /// how far from the peak it is and how high the radiant sits. On 12 August
+    /// from northern India that is about 60 an hour after midnight and nothing
+    /// before the radiant rises; in September it is sporadics only.
+    ///
+    /// The individual meteors are still generated. Nothing observes a meteor
+    /// before it burns, so this is simulation shaped by real data rather than
+    /// observation, and that is a weaker claim than the radar makes. What is
+    /// real is WHEN and HOW MANY and WHERE FROM.
+    /// Seconds until the next meteor, from the rate the sky actually has.
+    ///
+    /// Sporadics are real and roughly constant — about five an hour to a
+    /// dark-sky observer, and this is a wallpaper on a desk in a city, so the
+    /// low end. A shower adds to that rather than replacing it.
+    private func nextMeteorGap() -> Float {
+        let sporadic: Float = 3
+        let perHour = sporadic + max(0, meteorRatePerHour)
+        let mean = 3600 / max(0.5, perHour)
+        // Jittered so they do not arrive on a metronome.
+        return mean * (0.55 + rnd() * 0.9)
+    }
+
     private func updateShootingStar(sec: Float, sunAlt: Float, kind: SceneKind) {
-        guard sunAlt < -4, kind == .sun || kind == .partly else { return }
-        if sec > shootT && !shootActive {
-            shootActive = true
+        // Daylight and heavy cloud end it. A thin deck does not: you can see a
+        // bright meteor through broken cloud, which is why this is not gated on
+        // `kind == .sun` alone the way it used to be.
+        guard sunAlt < -6 else { shootActive = false; return }
+        guard kind != .rain && kind != .snow && kind != .thunder else {
+            shootActive = false
+            return
+        }
+
+        if shootActive && sec - shootT0 > 0.8 { shootActive = false }
+
+        // `shootT` starts at a "never scheduled" sentinel, and the old code
+        // seeded it from a fixed 60-240s constant elsewhere. Seed it from the
+        // RATE instead, here, the first time we are asked — otherwise the first
+        // meteor of a session ignores the shower entirely and the busiest night
+        // of the year opens as quietly as any other.
+        // Reschedule when the rate RISES.
+        //
+        // The wait is set when the previous meteor burns out, from the rate at
+        // that moment — and the rate changes underneath it constantly. A shower's
+        // radiant climbs all night, so the rate at 22:00 is a fraction of the
+        // rate at 03:00; and at startup the schedule is made before the host has
+        // pushed any shower in at all, from sporadics alone. Measured: the first
+        // wait came out at 1096 seconds against a rate that wanted one a second.
+        // Without this the busiest night of the year is as quiet as any other
+        // until the twenty-minute sporadic gap happens to elapse.
+        //
+        // Only ever pulls the wait IN. Pushing it out would let a passing cloud
+        // cancel a meteor that was already due.
+        let gap = nextMeteorGap()
+        if shootT - sec > gap * 2.5 { shootT = sec + gap }
+        guard !shootActive, sec > shootT else { return }
+
+        shootT = sec + nextMeteorGap()
+
+        shootActive = true
+        shootCount += 1
+        shootT0 = sec
+        // From the radiant when there is one — a shower's meteors come from a
+        // point, and putting them anywhere else is the one mistake that makes a
+        // shower not look like a shower. Scattered when there is not, because a
+        // sporadic genuinely can come from anywhere.
+        if meteorRadiantX >= 0, meteorRatePerHour > 1 {
+            let spread = W * 0.22
+            shootX = meteorRadiantX + (rnd() * 2 - 1) * spread
+            shootY = meteorRadiantY + (rnd() * 2 - 1) * spread * 0.6
+            shootX = max(W * 0.02, min(W * 0.9, shootX))
+            shootY = max(H * 0.02, min(H * 0.6, shootY))
+        } else {
             shootX = W * (0.1 + 0.5 * rnd())
             shootY = H * (0.06 + 0.18 * rnd())
-            shootT0 = sec
-            shootT = sec + 120 + rnd() * 240
         }
-        if shootActive && sec - shootT0 > 0.8 { shootActive = false }
     }
 
     /// Break a landing drop into spray. Momentum is shared out sideways and
@@ -1181,7 +1269,9 @@ final class SceneSimulation {
         // width. A dock spanning most of the screen catches far more than one
         // small widget, and that ratio is the whole of why they look different.
         var lipWidth: Float = 0
-        for s in surfaces where marks(s.kind) { lipWidth += s.w }
+        // Weighted by each lip's own wetness, so a widget turned down throws
+        // proportionally less spray rather than the same amount as its neighbour.
+        for s in surfaces where marks(s.kind) { lipWidth += s.w * max(0, min(1, s.wetness)) }
         guard lipWidth > 0 else { sprayAccum = 0; return }
         let widthFrac = min(2.5, lipWidth / max(W, 1))
 
@@ -1749,9 +1839,14 @@ final class SceneSimulation {
         // material only says how much of it this object is able to keep.
         for i in 0..<films.count {
             let m = surfaces[i].material
-            let cap = min(1, m.retention)
+            // Per-element control, on top of the material's own ceiling. A
+            // widget the user has turned down is drier than an identical one
+            // beside it, which the global switch could never express — it could
+            // only say "widgets, all of them, yes or no".
+            let own = max(0, min(1, surfaces[i].wetness))
+            let cap = min(1, m.retention) * own
             films[i].lip = min(films[i].lip, cap)
-            films[i].wet = min(films[i].wet, min(1, m.retention * 0.85))
+            films[i].wet = min(films[i].wet, min(1, m.retention * 0.85) * own)
             if m.shed > 1 {
                 // Sheds faster than the baseline: drain the excess.
                 let drain = dt * 0.30 * (m.shed - 1)

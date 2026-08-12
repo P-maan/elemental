@@ -510,6 +510,27 @@ final class ElementalRenderer {
     /// Set by `locationChanged()`, consumed by the next reading. See above.
     private var snapNextReading = false
 
+    /// Whatever meteor shower is running, pushed by the host.
+    ///
+    /// Set alongside astro, from `Astro.activeShower`, because it is the same
+    /// kind of fact and needs the same inputs — where you are and when it is.
+    /// The renderer projects the radiant rather than the host doing it, so the
+    /// screen mapping stays in one place next to the shader's own.
+    var meteorShower: (perHour: Float, alt: Float, az: Float)?
+
+    /// The Swift twin of `astroXY` in Scene.metal.
+    ///
+    /// Mirrored deliberately and kept next to its only caller. The radiant has
+    /// to land where the shader would put a star at the same coordinates, so
+    /// this must agree exactly — 190 degrees of azimuth across the width, 85 of
+    /// altitude down the height. If Scene.metal's astroXY ever changes, this
+    /// changes with it.
+    static func astroToScreen(alt: Float, az: Float, facing: Float,
+                              w: Float, h: Float) -> (x: Float, y: Float) {
+        let relAz = (az - facing + 180 + 360).truncatingRemainder(dividingBy: 360) - 180
+        return ((0.5 + relAz / 190) * w, (1 - alt / 85) * h)
+    }
+
     var debugCounts: String { sim.debugCounts }
 
     // MARK: - Wake playback
@@ -797,6 +818,23 @@ final class ElementalRenderer {
         // `effectiveKind`, not `kind`. The latter is the raw WMO classification
         // and is exactly the input the rest of the engine stopped trusting.
         u.flashAmp = sim.flashAmp(sec: sec, kind: w.effectiveKind)
+        // Meteor shower, if one is running. Projected to screen HERE rather than
+        // in the simulation, because `astroXY` — the mapping from altitude and
+        // azimuth to pixels — is the shader's, and the radiant has to land in
+        // the same place the stars around it do or the trails will not appear to
+        // come from anywhere in particular.
+        if let m = meteorShower, m.perHour > 0.5 {
+            sim.meteorRatePerHour = m.perHour
+            let p = Self.astroToScreen(alt: m.alt, az: m.az, facing: state.facingAz,
+                                       w: Float(pixelWidth), h: Float(pixelHeight))
+            sim.meteorRadiantX = p.x
+            sim.meteorRadiantY = p.y
+        } else {
+            sim.meteorRatePerHour = 0
+            sim.meteorRadiantX = -1
+            sim.meteorRadiantY = -1
+        }
+
         u.shootActive = sim.shootActive ? 1 : 0
         u.shootX = sim.shootX; u.shootY = sim.shootY; u.shootT0 = sim.shootT0
 

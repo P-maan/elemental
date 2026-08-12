@@ -27,6 +27,20 @@ struct Surface {
     var x: Float, y: Float, w: Float, h: Float
     var kind: Kind
 
+    /// How wet THIS piece is allowed to get, 0..1, over and above the global
+    /// switch for its kind.
+    ///
+    /// HANDOFF.md recorded per-element control as blocked, "the engine reads
+    /// only global options from Core/Furniture.swift". That was true while a
+    /// surface was nothing but a rectangle and a kind: there was no per-instance
+    /// anything to attach a value to. It carries a material now, so it can carry
+    /// this too.
+    ///
+    /// Defaults to 1, so a surface built anywhere that does not set it behaves
+    /// exactly as it did — the lock screen's clock, the offscreen harness, and
+    /// every existing call site included.
+    var wetness: Float = 1
+
     var top: Float { y }
     var bottom: Float { y + h }
     var left: Float { x }
@@ -269,7 +283,8 @@ enum Furniture {
         // come from config — populated by hand today, and the place a
         // screenshot-derived detector would write to later.
         out.append(contentsOf: widgets.map {
-            Surface(x: $0.x * W, y: $0.y * H, w: $0.w * W, h: $0.h * H, kind: .widget)
+            Surface(x: $0.x * W, y: $0.y * H, w: $0.w * W, h: $0.h * H,
+                    kind: .widget, wetness: $0.wetness)
         })
         return out
     }
@@ -295,4 +310,22 @@ enum Furniture {
 /// resolution change. Config holds these until detection can supply them.
 struct WidgetRect: Codable, Equatable {
     var x: Float, y: Float, w: Float, h: Float
+
+    /// Per-widget wetness, 0 dry to 1 fully. Optional in the JSON so every
+    /// config written before this existed still decodes, and absent means 1 —
+    /// which is what those configs meant.
+    var wetness: Float = 1
+
+    init(x: Float, y: Float, w: Float, h: Float, wetness: Float = 1) {
+        self.x = x; self.y = y; self.w = w; self.h = h; self.wetness = wetness
+    }
+
+    init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        x = try c.decode(Float.self, forKey: .x)
+        y = try c.decode(Float.self, forKey: .y)
+        w = try c.decode(Float.self, forKey: .w)
+        h = try c.decode(Float.self, forKey: .h)
+        wetness = (try? c.decodeIfPresent(Float.self, forKey: .wetness)) .flatMap { $0 } ?? 1
+    }
 }

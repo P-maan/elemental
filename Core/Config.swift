@@ -147,7 +147,18 @@ struct Config: Codable, Equatable {
 
     /// Custom keeps the bearing you set. Dynamic follows whatever is up, so the
     /// sun and moon are always on screen.
-    var headingMode: HeadingMode = .custom
+    ///
+    /// DYNAMIC BY DEFAULT, and the reason is not only that it looks better.
+    /// A fixed bearing has to have a value, and the old default was 180 —
+    /// facing south. That is a northern-hemisphere assumption baked into a
+    /// number: south is where the sun is from London or Delhi, and it is the
+    /// one direction the sun never goes from Sydney or Santiago. A southern
+    /// user opening this for the first time got a sky with nothing in it.
+    ///
+    /// Dynamic has no such bias. It follows whatever is actually up, so it is
+    /// correct at 28N and 34S without either being a special case, which is
+    /// what "works from anywhere" has to mean.
+    var headingMode: HeadingMode = .dynamic
 
     var shape: MosaicShape = .square
     var finish: MosaicFinish = .glass
@@ -316,11 +327,10 @@ struct Config: Codable, Equatable {
         var facingAz: Double = 180
         var scenePlaceName: String?
 
-    /// Whether the permission dialog has ever been shown. Prevents re-asking on
-    /// every launch, which is what happens otherwise: an ad-hoc signed build
-    /// gets a new code identity on each rebuild, so TCC forgets the grant and
-    /// the status returns to notDetermined.
-    var hasAskedForLocation: Bool = false
+    // A per-surface `hasAskedForLocation` used to sit here. It was never read by
+    // anything: location is asked for once by the app, not once per surface, and
+    // the real gate is `locationPromptBuild` on Config itself. Removed rather
+    // than left to imply a mechanism that does not exist.
     }
 
     var lock = SurfaceStyle()
@@ -481,8 +491,20 @@ struct Config: Codable, Equatable {
     /// resolves.
     static func fallbackPlace() -> Place {
         let offsetHours = Double(TimeZone.current.secondsFromGMT()) / 3600
+        // Latitude cannot be derived from a timezone — the whole point of a
+        // timezone is that it is a band of longitude. So the hemisphere is taken
+        // from the one hint the system does give: a timezone identifier names a
+        // region, and the southern ones are enumerable. Getting the SIGN right
+        // matters far more than the magnitude, because it decides which way the
+        // sun goes round the sky and whether the seasons are inverted; being 15
+        // degrees out in latitude only shifts the sun's height a little.
+        let tz = TimeZone.current.identifier
+        let southern = ["Australia/", "Pacific/Auckland", "America/Argentina",
+                        "America/Santiago", "America/Sao_Paulo", "America/Lima",
+                        "Africa/Johannesburg", "Africa/Nairobi", "Indian/",
+                        "Antarctica/"].contains { tz.hasPrefix($0) }
         return Place(name: "Approximate (\(TimeZone.current.identifier))",
-                     latitude: 40,
+                     latitude: southern ? -33 : 40,
                      longitude: max(-180, min(180, offsetHours * 15)),
                      timeZone: TimeZone.current.identifier)
     }
@@ -608,7 +630,6 @@ extension Config.SurfaceStyle {
         headingMode     = c.lenient(.headingMode, d.headingMode)
         facingAz        = c.lenient(.facingAz, d.facingAz)
         scenePlaceName  = try? c.decodeIfPresent(String.self, forKey: .scenePlaceName)
-        hasAskedForLocation = c.lenient(.hasAskedForLocation, d.hasAskedForLocation)
     }
 }
 

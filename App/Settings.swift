@@ -436,6 +436,7 @@ final class GeneralPane: Pane {
     override var symbol: String { "gearshape" }
 
     private var loginCheck: NSButton!
+    private var liveWeatherCheck: NSButton!
     private var fpsPop: NSPopUpButton!
     private var speedPop: NSPopUpButton!
     private var replayPop: NSPopUpButton!
@@ -537,6 +538,10 @@ final class GeneralPane: Pane {
         // a new code identity and macOS forgets the Location grant (trap 9). So
         // "run it again" is the shortest honest answer to "the sky is drawn for
         // the wrong city", and it is also how you show somebody the app.
+        liveWeatherCheck = check("Follow the real weather", #selector(liveWeatherToggled))
+        startup.add(liveWeatherCheck)
+        startup.note("Off draws a clear calm day, whatever it is doing outside. The sun and moon "
+                   + "still follow the real sky.")
         let redo = NSButton(title: "Run First-Run Setup Again…", target: self,
                             action: #selector(replayOnboarding))
         redo.bezelStyle = .rounded
@@ -624,6 +629,7 @@ final class GeneralPane: Pane {
 
     override func sync(_ c: Config) {
         loginCheck.state = (SMAppService.mainApp.status == .enabled) ? .on : .off
+        liveWeatherCheck.state = c.liveWeather ? .on : .off
         fpsPop.selectItem(at: Self.fpsChoices.firstIndex(of: c.maxFPS) ?? 2)
         speedPop.selectItem(at: Self.speedChoices.firstIndex { abs($0.1 - c.motionSpeed) < 0.001 } ?? 3)
         replayPop.selectItem(at: c.playbackOnWake
@@ -645,6 +651,12 @@ final class GeneralPane: Pane {
         // but this is one shared wall and the pane it lives on is the general one.
         UI.setHidden([glassCard], c.finish != .glass)
         refreshPreviewsDebounced()
+    }
+
+    @objc private func liveWeatherToggled() {
+        guard var c = owner?.config else { return }
+        c.liveWeather = liveWeatherCheck.state == .on
+        owner?.commit(c, from: self)
     }
 
     @objc private func replayOnboarding() {
