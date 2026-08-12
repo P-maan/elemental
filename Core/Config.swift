@@ -316,11 +316,10 @@ struct Config: Codable, Equatable {
         var facingAz: Double = 180
         var scenePlaceName: String?
 
-    /// Whether the permission dialog has ever been shown. Prevents re-asking on
-    /// every launch, which is what happens otherwise: an ad-hoc signed build
-    /// gets a new code identity on each rebuild, so TCC forgets the grant and
-    /// the status returns to notDetermined.
-    var hasAskedForLocation: Bool = false
+    // A per-surface `hasAskedForLocation` used to sit here. It was never read by
+    // anything: location is asked for once by the app, not once per surface, and
+    // the real gate is `locationPromptBuild` on Config itself. Removed rather
+    // than left to imply a mechanism that does not exist.
     }
 
     var lock = SurfaceStyle()
@@ -608,7 +607,6 @@ extension Config.SurfaceStyle {
         headingMode     = c.lenient(.headingMode, d.headingMode)
         facingAz        = c.lenient(.facingAz, d.facingAz)
         scenePlaceName  = try? c.decodeIfPresent(String.self, forKey: .scenePlaceName)
-        hasAskedForLocation = c.lenient(.hasAskedForLocation, d.hasAskedForLocation)
     }
 }
 

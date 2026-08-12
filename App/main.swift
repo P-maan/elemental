@@ -537,6 +537,23 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     }
 
     private func startWeather() {
+        // `liveWeather` off means a clear calm day, and until now it meant
+        // nothing at all — the setting existed, was saved, was decoded, and had
+        // no reader anywhere. HANDOFF.md listed it as dead for exactly that
+        // reason. A switch in Settings that does nothing is worse than a missing
+        // one, because the user believes they have turned something off.
+        //
+        // Stopping the fetch is not enough on its own: whatever reading last
+        // landed would stay on screen forever. So the scene is also handed a
+        // default WeatherState, which is what "clear and calm" IS.
+        guard config.liveWeather else {
+            weather.stop()
+            let clear = WeatherState()
+            surfaces.values.forEach { $0.updateWeather(clear) }
+            let p = config.scenePlace
+            SaverWeather.publish(clear, lat: p.latitude, lon: p.longitude, place: p.name)
+            return
+        }
         let p = config.scenePlace
         weather.start(at: Coordinate(latitude: p.latitude, longitude: p.longitude))
     }
