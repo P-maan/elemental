@@ -107,6 +107,48 @@ distribution requires, and development certificates cannot be notarized. The
 paid Developer Program is the only route to an app that opens by double-click
 for someone who has never heard of `xattr`.
 
+### Distributing a .pkg
+
+`./package.sh` builds `build/Elemental-<version>.pkg`, which is the best
+distribution available without an Apple Developer account — and the right one
+even with it.
+
+Both a `.pkg` and a zipped `.app` get quarantined when downloaded. The
+difference is what happens next:
+
+| | downloaded `.app` | downloaded `.pkg` |
+| --- | --- | --- |
+| Dialog | "is damaged and can't be opened" | "from an unidentified developer" |
+| Way forward | none offered — Terminal only | right-click → Open, or Privacy & Security → Open Anyway |
+| After install | quarantined again on every download | **installed app is not quarantined at all** |
+
+That last row is the point. Files laid down by an installer do not inherit
+quarantine, so the user clears it once for the installer and the app in
+`/Applications` opens by double-click from then on.
+
+The screen saver is not in the payload — it belongs in `~/Library/Screen Savers`,
+which is per-user, and a payload installs as root into absolute paths. It is
+carried as a resource and copied by the postinstall script, which resolves the
+console user properly (`$USER` is `root` at that point, so it is no help).
+
+With an account, both dialogs disappear:
+
+```bash
+export ELEMENTAL_INSTALLER_ID="Developer ID Installer: Your Name (TEAMID)"
+export ELEMENTAL_NOTARY_PROFILE="elemental"
+./package.sh
+```
+
+Note that signing an *installer* needs a different certificate from signing an
+*app* — `Developer ID Installer` vs `Developer ID Application`. Being issued one
+does not give you the other.
+
+### Releasing
+
+```bash
+gh release create v0.1 build/Elemental-0.1.pkg --title "Elemental 0.1" --notes "..."
+```
+
 ### Signing
 
 The default build is ad-hoc signed, which works on the machine that built it and
