@@ -562,6 +562,10 @@ final class DesktopGridView: NSView {
         case 51, 117: removeSelected()           // delete / forward delete
         case 48: cycleSelection()                // tab
         case 49: cycleSize()                     // space
+        // Same bindings as the full-screen editor. One model, one set of keys —
+        // learning them in the miniature must carry over.
+        case 33: model.nudgeSelectedWetness(by: -0.1)  // [
+        case 30: model.nudgeSelectedWetness(by:  0.1)  // ]
         default: handled = false
         }
         if !handled { super.keyDown(with: event) }

@@ -253,6 +253,25 @@ func continuousRoundedRect(_ r: NSRect, radius: CGFloat) -> NSBezierPath {
 /// snapshot the overlay's Cancel restores wants a stable type.
 struct WidgetPlacement: Equatable {
     var rect: CGRect
+
+    /// How wet this one is allowed to get, 0 dry to 1 fully.
+    ///
+    /// Per-element rather than global because the widgets on a desk are not
+    /// interchangeable: a clock you read at a glance wants to stay legible, and
+    /// a photo widget is the one you actually want water running down. The
+    /// global switch could only ever say "widgets, all of them, yes or no".
+    var wetness: Float = 1
+
+    init(rect: CGRect, wetness: Float = 1) {
+        self.rect = rect
+        self.wetness = wetness
+    }
+
+    /// Ordered so call sites that build the rect inline stay readable.
+    init(wetnessFromConfig w: Float, rect: CGRect) {
+        self.rect = rect
+        self.wetness = w
+    }
 }
 
 // MARK: - Handles
@@ -493,7 +512,8 @@ final class PlacementModel {
     var widgetRects: [WidgetRect] {
         widgets.map {
             WidgetRect(x: Float($0.rect.minX), y: Float($0.rect.minY),
-                       w: Float($0.rect.width), h: Float($0.rect.height))
+                       w: Float($0.rect.width), h: Float($0.rect.height),
+                       wetness: $0.wetness)
         }
     }
 
@@ -503,7 +523,8 @@ final class PlacementModel {
     /// of the four.
     func setWidgetRects(_ rects: [WidgetRect]) {
         setWidgets(rects.map {
-            WidgetPlacement(rect: CGRect(x: CGFloat($0.x), y: CGFloat($0.y),
+            WidgetPlacement(wetnessFromConfig: $0.wetness,
+                            rect: CGRect(x: CGFloat($0.x), y: CGFloat($0.y),
                                          width: CGFloat($0.w), height: CGFloat($0.h)))
         })
     }
@@ -946,8 +967,41 @@ final class PlacementModel {
                       p.width, p.height, r.width * 100, r.height * 100)
     }
 
+    /// Change the selected widget's wetness. Clamped, and a no-op for the dock,
+    /// which has no per-instance setting — it is one object, so the global
+    /// switch already says everything there is to say about it.
+    func setSelectedWetness(_ v: Float) {
+        guard case .widget(let i)? = selection, i < widgets.count else { return }
+        var w = widgets[i]
+        w.wetness = max(0, min(1, v))
+        setWidget(w, at: i)
+    }
+
+    /// Nudge it, for the keyboard. Returns the new value so the caller can say
+    /// what happened without re-reading the model.
+    @discardableResult
+    func nudgeSelectedWetness(by delta: Float) -> Float? {
+        guard case .widget(let i)? = selection, i < widgets.count else { return nil }
+        let v = max(0, min(1, widgets[i].wetness + delta))
+        setSelectedWetness(v)
+        return v
+    }
+
     /// The status line both editors show. One sentence, one wording.
     var selectionDescription: String {
+        // Wetness is appended rather than given its own line, because it is a
+        // property OF the selected thing and belongs in the sentence that
+        // describes it. Only shown when it is not the default: a line that says
+        // "100% wet" on every widget is noise, and the reader learns to skip it.
+        if case .widget(let i)? = selection, i < widgets.count,
+           widgets[i].wetness < 0.999 {
+            return baseSelectionDescription
+                 + String(format: "  ·  %.0f%% wet", widgets[i].wetness * 100)
+        }
+        return baseSelectionDescription
+    }
+
+    private var baseSelectionDescription: String {
         guard let ref = selection, let r = rect(of: ref) else {
             if !suggestions.isEmpty {
                 return "\(suggestions.count) suggested rectangle"
