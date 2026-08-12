@@ -127,6 +127,21 @@ build_app() {
   local APP="$BUILD/Elemental.app"
   mkdir -p "$APP/Contents/MacOS" "$APP/Contents/Resources"
   cp App/Info.plist "$APP/Contents/Info.plist"
+  # Stamp WHEN this binary was built.
+  #
+  # The updater compares a release's publish time against this rather than
+  # parsing version numbers out of tags. That removes a whole class of bug —
+  # "0.10" sorts before "0.9" as a string, so the first release past 0.9 would
+  # silently stop offering itself — and it means a tag can be named anything at
+  # all without breaking updates.
+  #
+  # It also gets the local-development case right for free: a tree you have just
+  # built is newer than the newest release, so it correctly offers nothing.
+  BUILD_DATE="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+  /usr/libexec/PlistBuddy -c "Add :ElementalBuildDate string $BUILD_DATE" \
+    "$APP/Contents/Info.plist" 2>/dev/null \
+    || /usr/libexec/PlistBuddy -c "Set :ElementalBuildDate $BUILD_DATE" \
+       "$APP/Contents/Info.plist"
   # The three icon designs, plus the default (002) under the name Info.plist
   # declares. Baked from the Icon Composer bundles by `Elemental --make-icons`
   # and checked in, so a build needs no icon toolchain — see App/AppIcons.swift.

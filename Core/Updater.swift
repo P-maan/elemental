@@ -71,6 +71,8 @@ struct SemVer: Comparable, CustomStringConvertible {
 
 /// A release newer than the one running.
 struct AvailableUpdate: Equatable {
+    /// Shown to the user. Display only — see `check`, where whether a release is
+    /// newer is decided by publish time rather than by this.
     var version: SemVer
     var notes: String
     var packageURL: URL
@@ -107,7 +109,19 @@ enum Updater {
         let body: String?
         let draft: Bool?
         let prerelease: Bool?
+        let published_at: String?
         let assets: [Asset]
+    }
+
+    /// When this binary was built, stamped into Info.plist by build.sh.
+    ///
+    /// Nil for a build made before that stamp existed, which is the only reason
+    /// the version comparison below is still here.
+    static var buildDate: Date? {
+        guard let s = Bundle.main.object(forInfoDictionaryKey: "ElementalBuildDate") as? String
+        else { return nil }
+        let f = ISO8601DateFormatter()
+        return f.date(from: s)
     }
 
     /// Ask GitHub what the newest release is. Nil means "nothing to do" for any
@@ -126,12 +140,41 @@ enum Updater {
         // A draft is not published and a prerelease is not for everybody's
         // parents. Neither should ever be offered automatically.
         guard rel.draft != true, rel.prerelease != true else { return nil }
-        guard let newest = SemVer(rel.tag_name), newest > currentVersion else { return nil }
+
+        // ---- Is this release newer than what is running?
+        //
+        // Answered by TIME, not by parsing the tag. A tag is a label somebody
+        // typed; a publish timestamp is a fact, and comparing it to the moment
+        // this binary was built needs no convention about how versions are
+        // named. It also removes the failure that string comparison hides for
+        // months — "0.10" sorts before "0.9" — without replacing it with a
+        // hand-rolled parser that has its own edge cases.
+        //
+        // Compared against THIS BUILD rather than against "the newest release
+        // I have seen", which is the important distinction. Plain
+        // freshest-wins would happily install an older line over a newer one:
+        // publish a 0.4.1 patch for people still on 0.4 and every 0.5 install
+        // would take it as an update and go backwards. A build can only ever be
+        // superseded by something published after it was made.
+        let newest = SemVer(rel.tag_name)
+        if let built = buildDate,
+           let stamp = rel.published_at,
+           let published = ISO8601DateFormatter().date(from: stamp) {
+            // A minute of slack: the release is published moments after the
+            // binary inside it was built, so the artifact you are running is
+            // always fractionally older than its own release. Without this every
+            // install would immediately offer to reinstall itself.
+            guard published > built.addingTimeInterval(60) else { return nil }
+        } else {
+            // No build stamp — an install from before this existed. Fall back to
+            // comparing versions so those users are not stranded.
+            guard let n = newest, n > currentVersion else { return nil }
+        }
         // The .pkg is the artifact that can actually install itself. A release
         // carrying only the saver zip is not an update we can apply.
         guard let asset = rel.assets.first(where: { $0.name.hasSuffix(".pkg") }) else { return nil }
 
-        return AvailableUpdate(version: newest,
+        return AvailableUpdate(version: newest ?? currentVersion,
                                notes: rel.body ?? "",
                                packageURL: asset.browser_download_url,
                                bytes: asset.size)
