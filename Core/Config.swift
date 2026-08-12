@@ -355,6 +355,15 @@ struct Config: Codable, Equatable {
     /// identity. So it is set only when the flow reaches an end the user chose.
     var hasOnboarded: Bool = false
 
+    /// Look for new versions on GitHub, and offer them.
+    ///
+    /// On by default, and that default matters more than usual here: this app is
+    /// meant to be handed to people who will never go looking for an update, and
+    /// an install frozen on the day it was downloaded keeps every bug fixed
+    /// afterwards. Checking is quiet; nothing is ever installed without the user
+    /// agreeing to it.
+    var automaticUpdates: Bool = true
+
     /// Fetch live weather. Off means the scene renders a clear calm day.
     var liveWeather: Bool = true
 
@@ -578,6 +587,7 @@ extension Config {
         // silently fails to load — which for this one would mean onboarding
         // replaying on every launch forever.
         hasOnboarded       = c.lenient(.hasOnboarded, d.hasOnboarded)
+        automaticUpdates   = c.lenient(.automaticUpdates, d.automaticUpdates)
         playbackOnWake     = c.lenient(.playbackOnWake, d.playbackOnWake)
         playbackMaxSeconds = c.lenient(.playbackMaxSeconds, d.playbackMaxSeconds)
         animateOnLock      = c.lenient(.animateOnLock, d.animateOnLock)
