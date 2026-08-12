@@ -62,8 +62,32 @@ echo "  app    -> $APPS/Elemental.app"
 # it running the old code with the new resources, which fails in confusing ways.
 pkill -f "Elemental.app/Contents/MacOS" 2>/dev/null || true
 sleep 1
+
+# An existing install may be ROOT-OWNED, because package.sh's installer put it
+# there. A plain `rm -rf` then fails on every file inside it, prints a wall of
+# "Permission denied", and — the part that actually bites — CARRIES ON, so the
+# old app is still in place, still gets launched, and the user is told the
+# install succeeded while running the previous version. Refuse instead, and say
+# exactly what to do.
+if [[ -e "$APPS/Elemental.app" && ! -w "$APPS/Elemental.app" ]]; then
+  if [[ $EUID -ne 0 ]]; then
+    echo
+    echo "  The copy in /Applications was installed by the .pkg and is owned by root,"
+    echo "  so it cannot be replaced without elevated rights. Either:"
+    echo
+    echo "      sudo ./install.sh          # replace it in place"
+    echo "      open build/Elemental-*.pkg  # or reinstall through the installer"
+    echo
+    exit 1
+  fi
+fi
 rm -rf "$APPS/Elemental.app"
 cp -R "$SRC" "$APPS/Elemental.app"
+# Installed under sudo, the bundle would be left owned by root and the next
+# plain run would hit exactly the problem above. Hand it back.
+if [[ $EUID -eq 0 && -n "${SUDO_USER:-}" ]]; then
+  chown -R "$SUDO_USER" "$APPS/Elemental.app"
+fi
 
 # ---- the screen saver, if it was built
 if [[ -d "$SAVER" ]]; then

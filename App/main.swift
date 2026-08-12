@@ -787,7 +787,27 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             b.image = Mark.menuBarImage()
         }
         let menu = NSMenu()
-        menu.addItem(withTitle: "Elemental", action: nil, keyEquivalent: "").isEnabled = false
+        // Name and version together, as the menu's title row.
+        //
+        // Worth having for a reason beyond tidiness: this app updates itself
+        // from GitHub, and the first question about any bug is "which build is
+        // that". Without a version on screen the answer is a guess — the About
+        // box that would normally carry it does not exist here, because
+        // Elemental is LSUIElement and has no application menu at all.
+        //
+        // Read from the bundle rather than written down, so it cannot drift from
+        // what is actually running.
+        let shortVersion = Bundle.main
+            .object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String ?? "?"
+        let header = menu.addItem(withTitle: "Elemental \(shortVersion)",
+                                  action: nil, keyEquivalent: "")
+        header.isEnabled = false
+        // Dimmed and small: it is a label, not a command, and it should not
+        // compete with the items underneath that actually do something.
+        header.attributedTitle = NSAttributedString(
+            string: "Elemental \(shortVersion)",
+            attributes: [.font: NSFont.systemFont(ofSize: 11, weight: .semibold),
+                         .foregroundColor: NSColor.secondaryLabelColor])
         menu.addItem(.separator())
         menu.addItem(withTitle: "Settings…", action: #selector(showSettings), keyEquivalent: ",")
             .target = self
