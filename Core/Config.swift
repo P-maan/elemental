@@ -347,6 +347,14 @@ struct Config: Codable, Equatable {
     /// Which icon design the app wears. 002 — the El mark — is the default.
     var appIcon: AppIconStyle = .mark
 
+    /// Whether the first-run flow has been completed.
+    ///
+    /// Not "has the app launched before" — that is a different question and the
+    /// wrong one. A user who quits during onboarding should see it again; a user
+    /// who finished it should never see it, even after a rebuild mints a new code
+    /// identity. So it is set only when the flow reaches an end the user chose.
+    var hasOnboarded: Bool = false
+
     /// Fetch live weather. Off means the scene renders a clear calm day.
     var liveWeather: Bool = true
 
@@ -566,6 +574,10 @@ extension Config {
         saver              = c.lenient(.saver, d.saver)
         appIcon            = c.lenient(.appIcon, d.appIcon)
         liveWeather        = c.lenient(.liveWeather, d.liveWeather)
+        // Trap 10 in HANDOFF.md: every stored property must appear here or it
+        // silently fails to load — which for this one would mean onboarding
+        // replaying on every launch forever.
+        hasOnboarded       = c.lenient(.hasOnboarded, d.hasOnboarded)
         playbackOnWake     = c.lenient(.playbackOnWake, d.playbackOnWake)
         playbackMaxSeconds = c.lenient(.playbackMaxSeconds, d.playbackMaxSeconds)
         animateOnLock      = c.lenient(.animateOnLock, d.animateOnLock)

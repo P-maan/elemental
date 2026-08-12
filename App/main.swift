@@ -139,10 +139,35 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         // it before it takes" looks like from the outside.
         applyPlaybackSetting()
         updatePowerState()
+        // First run. Presented AFTER the wallpaper exists, so quitting the flow
+        // early still leaves a working scene behind rather than a blank desktop.
+        if !config.hasOnboarded { presentOnboarding() }
+
         // Seed the scene-place change detector. Left at nil, the first config
         // change of the session always looked like a move to somewhere new and
         // restarted the weather poller and cleared the falling rain for nothing.
         previousScenePlace = config.scenePlace
+    }
+
+    private var onboarding: OnboardingController?
+
+    private func presentOnboarding() {
+        onboarding = OnboardingController(
+            config: config, device: device, location: location,
+            onPlaceFurniture: { [weak self] in
+                guard let self else { return }
+                // Settings opens on the Elements pane, where "Place Widgets on
+                // Screen" is the first control. Driving the overlay directly from
+                // here would need SettingsWindowController to expose its panes,
+                // and one extra click is a poor reason to widen that surface.
+                self.showSettings()
+            },
+            onFinish: { [weak self] cfg in
+                guard let self else { return }
+                self.applyConfig(cfg)
+                self.onboarding = nil
+            })
+        onboarding?.present()
     }
 
     /// Persist the settings the app writes by itself at launch — but not when
