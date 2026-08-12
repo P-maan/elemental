@@ -47,6 +47,16 @@ import ScreenCaptureKit
 
 // MARK: - The permission
 
+extension Notification.Name {
+    /// Posted immediately before anything raises a system permission prompt.
+    ///
+    /// The placement overlay is full-screen and modal, so a prompt raised while
+    /// it is up appears over a screen the user cannot interact with — and the
+    /// Settings pane they need to adjust afterwards is behind it. Whoever is
+    /// about to ask posts this; the overlay stands down.
+    static let elementalPermissionPrompt = Notification.Name("Elemental.permissionPromptWillShow")
+}
+
 enum ScreenRecording {
 
     /// Whether we can capture. This ASKS THE SYSTEM WHAT IT ALREADY DECIDED and
@@ -60,6 +70,7 @@ enum ScreenRecording {
     /// process — macOS requires a relaunch — so the caller should say so rather
     /// than leaving the user pressing Refresh at an overlay that never changes.
     static func request() {
+        NotificationCenter.default.post(name: .elementalPermissionPrompt, object: nil)
         _ = CGRequestScreenCaptureAccess()
         if let url = URL(string:
             "x-apple.systempreferences:com.apple.preference.security?Privacy_ScreenCapture") {

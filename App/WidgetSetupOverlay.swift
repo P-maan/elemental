@@ -803,6 +803,15 @@ final class WidgetSetupOverlay: NSObject, NSWindowDelegate {
                        name: NSApplication.didBecomeActiveNotification, object: nil)
         nc.addObserver(self, selector: #selector(appDeactivated),
                        name: NSApplication.didResignActiveNotification, object: nil)
+        // A permission prompt cannot be answered through a full-screen modal
+        // overlay: the system dialog needs the Settings pane behind it to be
+        // reachable afterwards, and this covers the whole display. So save what
+        // is here and get out of the way rather than leaving the user to work
+        // out why nothing responds. Saving rather than cancelling is deliberate
+        // — they were placing furniture, not abandoning it, and losing the work
+        // to a permission dialog would be its own bug.
+        nc.addObserver(self, selector: #selector(permissionPromptWillShow),
+                       name: .elementalPermissionPrompt, object: nil)
 
         NSApp.activate(ignoringOtherApps: true)
         window.makeKeyAndOrderFront(nil)
@@ -973,6 +982,12 @@ final class WidgetSetupOverlay: NSObject, NSWindowDelegate {
     // MARK: - Finishing
 
     @objc private func save() { finish(saved: true) }
+
+    @objc private func permissionPromptWillShow() {
+        guard !finished else { return }
+        model.commit()
+        finish(saved: true)
+    }
 
     @objc private func cancel() {
         model.setWidgets(snapshot.widgets)

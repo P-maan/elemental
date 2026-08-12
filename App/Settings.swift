@@ -1369,6 +1369,8 @@ final class LocationPane: Pane, NSSearchFieldDelegate, NSTableViewDataSource, NS
     // MARK: - Buttons
 
     @objc private func requestLocation() {
+        // Stand the placement overlay down first — see .elementalPermissionPrompt.
+        NotificationCenter.default.post(name: .elementalPermissionPrompt, object: nil)
         owner?.delegate?.location.onUnavailable = { msg in
             let a = NSAlert()
             a.messageText = "Location unavailable"
