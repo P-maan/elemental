@@ -65,6 +65,90 @@ cp -R build/Elemental.saver ~/Library/Screen\ Savers/
 open -g build/Elemental.app
 ```
 
+### Installing on another Mac, without an Apple Developer account
+
+The default build is ad-hoc signed. An ad-hoc bundle runs perfectly well on any
+Mac — what it cannot survive is the **quarantine** attribute, which macOS
+attaches to anything arriving through a browser download or AirDrop. Ad hoc plus
+quarantine produces:
+
+> "Elemental is damaged and can't be opened. You should move it to the Trash."
+
+which is untrue. Nothing is damaged; Gatekeeper cannot find a Developer ID or a
+notarization ticket for a quarantined bundle and reports that in the least
+helpful way available.
+
+Two ways around it:
+
+**Copy it without quarantine.** A USB stick, `scp`, `rsync` or a network share
+does not set the attribute at all, and the app just works. Best for a machine
+you can physically reach.
+
+```bash
+scp -r build/Elemental.app other-mac:/Applications/
+```
+
+**Or strip the quarantine after downloading**, which is what `install.sh` does —
+it copies the app and the saver into place, clears the attribute recursively
+(per file, not just the bundle root, or the executable inside stays quarantined)
+and verifies it actually went:
+
+```bash
+./install.sh
+```
+
+Neither is a security bypass in any meaningful sense: you are telling your own
+Mac that you trust software you deliberately fetched — the same judgement
+Gatekeeper asks you to make in System Settings, made at the command line.
+
+A **free** Apple ID does not solve this. It can issue an "Apple Development"
+certificate, but not the "Developer ID Application" certificate that
+distribution requires, and development certificates cannot be notarized. The
+paid Developer Program is the only route to an app that opens by double-click
+for someone who has never heard of `xattr`.
+
+### Distributing a .pkg
+
+`./package.sh` builds `build/Elemental-<version>.pkg`, which is the best
+distribution available without an Apple Developer account — and the right one
+even with it.
+
+Both a `.pkg` and a zipped `.app` get quarantined when downloaded. The
+difference is what happens next:
+
+| | downloaded `.app` | downloaded `.pkg` |
+| --- | --- | --- |
+| Dialog | "is damaged and can't be opened" | "from an unidentified developer" |
+| Way forward | none offered — Terminal only | right-click → Open, or Privacy & Security → Open Anyway |
+| After install | quarantined again on every download | **installed app is not quarantined at all** |
+
+That last row is the point. Files laid down by an installer do not inherit
+quarantine, so the user clears it once for the installer and the app in
+`/Applications` opens by double-click from then on.
+
+The screen saver is not in the payload — it belongs in `~/Library/Screen Savers`,
+which is per-user, and a payload installs as root into absolute paths. It is
+carried as a resource and copied by the postinstall script, which resolves the
+console user properly (`$USER` is `root` at that point, so it is no help).
+
+With an account, both dialogs disappear:
+
+```bash
+export ELEMENTAL_INSTALLER_ID="Developer ID Installer: Your Name (TEAMID)"
+export ELEMENTAL_NOTARY_PROFILE="elemental"
+./package.sh
+```
+
+Note that signing an *installer* needs a different certificate from signing an
+*app* — `Developer ID Installer` vs `Developer ID Application`. Being issued one
+does not give you the other.
+
+### Releasing
+
+```bash
+gh release create v0.1 build/Elemental-0.1.pkg --title "Elemental 0.1" --notes "..."
+```
+
 ### Signing
 
 The default build is ad-hoc signed, which works on the machine that built it and
