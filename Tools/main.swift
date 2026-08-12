@@ -506,6 +506,14 @@ state.astro = Astro.update(lat: lat, lon: lon, facingAz: Double(state.facingAz),
 renderer.state = state
 renderer.resize(width: width, height: height)
 
+// --shower N: pin the shower rate so the spawn path is testable offscreen,
+// where no host pushes Astro.activeShower in. MUST be before the render loop —
+// set after it, every frame has already been drawn and the counters read zero,
+// which looks exactly like a dead feature.
+if let r = args["shower"].flatMap(Double.init) {
+    renderer.meteorShower = (perHour: Float(r), alt: 45, az: 30)
+}
+
 // Stand-in furniture so splash behaviour can be exercised offscreen. The real
 // hosts derive this from NSScreen and the dock preferences; here it is just a
 // bar across the bottom the right sort of size.
@@ -679,6 +687,20 @@ var pixels = [UInt8](repeating: 0, count: rowBytes * height)
 pixels.withUnsafeMutableBytes { p in
     tex.getBytes(p.baseAddress!, bytesPerRow: rowBytes,
                  from: MTLRegionMake2D(0, 0, width, height), mipmapLevel: 0)
+}
+
+// ---------------------------------------------------------------- --meteors
+//
+// Which shower is running, where its radiant is, and how many an hour.
+if args["meteors"] != nil {
+    let la = num("lat", 28.4453), lo = num("lon", 77.5148)
+    if let m = Astro.activeShower(lat: la, lon: lo, date: date) {
+        print(String(format: "%@  radiant alt %.1f az %.1f  %.1f/hour  %.0f km/s",
+                     m.shower.name, m.alt, m.az, m.perHour, m.shower.speed))
+    } else {
+        print("no shower active, or its radiant is down")
+    }
+    exit(0)
 }
 
 // ---------------------------------------------------------------- --water

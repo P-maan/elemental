@@ -561,6 +561,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private func refreshAstro() {
         let a = currentAstro()
         surfaces.values.forEach { $0.updateAstro(a) }
+        // Same inputs, same cadence: a shower is where-you-are and when-it-is,
+        // exactly like the sun's altitude, so it is refreshed with it.
+        let p = config.scenePlace
+        let shower = Astro.activeShower(lat: p.latitude, lon: p.longitude)
+            .map { (perHour: Float($0.perHour), alt: Float($0.alt), az: Float($0.az)) }
+        surfaces.values.forEach { $0.updateMeteorShower(shower) }
     }
 
     /// A settings control changed.

@@ -233,6 +233,10 @@ final class WallpaperSurface: NSObject, CAMetalDisplayLinkDelegate {
         renderer.state.astro = astro
     }
 
+    func updateMeteorShower(_ s: (perHour: Float, alt: Float, az: Float)?) {
+        renderer.meteorShower = s
+    }
+
     func updateWeather(_ w: WeatherState) {
         renderer.state.weather = w
         // A new reading can change what the scene needs to be drawn AT.

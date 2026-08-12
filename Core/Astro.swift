@@ -36,6 +36,110 @@ struct Coordinate: Codable, Equatable {
 
 enum Astro {
 
+    // MARK: - Meteor showers
+
+    /// A shower, as an observer needs it: when it peaks, where it comes from,
+    /// and how fast it falls.
+    ///
+    /// This is the honest limit of what can be done without a feed, and it is a
+    /// different kind of claim from the radar work. Radar OBSERVES where the
+    /// rain is. Nothing observes an individual meteor before it happens, so a
+    /// shower is SIMULATION SHAPED BY REAL DATA: the dates, the radiants and the
+    /// rates are measured quantities from the IMO's working list, and what the
+    /// scene does with them is generate plausible meteors at the right rate from
+    /// the right point in the sky. A meteor you see here is not a meteor
+    /// somebody saw. The shower being active, its radiant being where it is, and
+    /// roughly how many an hour there should be, all are.
+    struct Shower {
+        let name: String
+        /// Peak, as month and day. Solar-longitude drift across a few years is
+        /// under a day for all of these, which is well inside the window below.
+        let month: Int, day: Int
+        /// Days either side over which the shower is worth drawing at all.
+        let spread: Double
+        /// Radiant, J2000, in degrees.
+        let ra: Double, dec: Double
+        /// Zenithal hourly rate at peak, with the radiant overhead and a dark
+        /// sky. The scene never sees this number — it is the ceiling that
+        /// altitude, moonlight and cloud all cut into.
+        let zhr: Double
+        /// Atmospheric entry speed, km/s. This is what makes a Leonid a streak
+        /// and a Taurid a slow drifting ember, and it is the whole reason two
+        /// showers do not look alike.
+        let speed: Double
+    }
+
+    /// The showers worth drawing. Radiants and rates from the IMO working list.
+    static let showers: [Shower] = [
+        Shower(name: "Quadrantids",    month: 1,  day: 3,  spread: 1.5,
+               ra: 230.0, dec:  49.5, zhr: 110, speed: 41),
+        Shower(name: "Lyrids",         month: 4,  day: 22, spread: 3,
+               ra: 271.0, dec:  33.5, zhr: 18,  speed: 49),
+        Shower(name: "Eta Aquariids",  month: 5,  day: 6,  spread: 5,
+               ra: 338.0, dec:  -1.0, zhr: 50,  speed: 66),
+        Shower(name: "Perseids",       month: 8,  day: 12, spread: 4,
+               ra:  48.0, dec:  58.0, zhr: 100, speed: 59),
+        Shower(name: "Orionids",       month: 10, day: 21, spread: 4,
+               ra:  95.0, dec:  16.0, zhr: 20,  speed: 66),
+        Shower(name: "Leonids",        month: 11, day: 17, spread: 2,
+               ra: 152.0, dec:  22.0, zhr: 15,  speed: 71),
+        Shower(name: "Geminids",       month: 12, day: 14, spread: 3,
+               ra: 112.0, dec:  33.0, zhr: 150, speed: 35),
+        Shower(name: "Ursids",         month: 12, day: 22, spread: 2,
+               ra: 217.0, dec:  76.0, zhr: 10,  speed: 33),
+    ]
+
+    /// What, if anything, is falling tonight.
+    ///
+    /// Returns the radiant's horizontal position and an hourly rate already cut
+    /// down by everything that actually suppresses one: how far from the peak we
+    /// are, how low the radiant sits, and how bright the sky is. Below the
+    /// horizon there is nothing to see — a radiant under the ground produces no
+    /// meteors, not fewer.
+    static func activeShower(lat: Double, lon: Double, date: Date = Date())
+        -> (shower: Shower, alt: Double, az: Double, perHour: Double)?
+    {
+        let cal = Calendar(identifier: .gregorian)
+        let comps = cal.dateComponents(in: TimeZone(identifier: "UTC")!, from: date)
+        guard let mo = comps.month, let dy = comps.day, let yr = comps.year else { return nil }
+
+        var best: (Shower, Double)?
+        for sh in showers {
+            guard var peak = cal.date(from: DateComponents(timeZone: TimeZone(identifier: "UTC"),
+                                                           year: yr, month: sh.month, day: sh.day,
+                                                           hour: 12)) else { continue }
+            // A shower peaking on 3 January is nearer to 31 December than the
+            // year boundary suggests. Take whichever of last year, this year and
+            // next year is closest, so the turn of the year is not a cliff.
+            for dy2 in [-1, 1] {
+                if let alt = cal.date(byAdding: .year, value: dy2, to: peak),
+                   abs(alt.timeIntervalSince(date)) < abs(peak.timeIntervalSince(date)) {
+                    peak = alt
+                }
+            }
+            let days = abs(peak.timeIntervalSince(date)) / 86400
+            guard days <= sh.spread else { continue }
+            // Activity falls away either side of the peak, steeply. A Gaussian
+            // in days is the standard description and it is close enough.
+            let f = exp(-(days * days) / (0.5 * sh.spread * sh.spread))
+            if best == nil || f > best!.1 { best = (sh, f) }
+        }
+        guard let (sh, nearPeak) = best else { return nil }
+
+        let n = julianDay(date) - 2451545.0
+        let gmst = (280.46061837 + 360.98564736629 * n).truncatingRemainder(dividingBy: 360)
+        let h = horizontal(gmst: gmst, lon: lon, ra: sh.ra, dec: sh.dec, lat: lat)
+        guard h.alt > 5 else { return nil }
+
+        // The standard correction: observed rate scales with the sine of the
+        // radiant's altitude. A radiant on the horizon shows almost nothing
+        // because most of its meteors are below it.
+        let byAlt = sin(h.alt * D2R)
+        let perHour = sh.zhr * nearPeak * byAlt
+        guard perHour > 0.5 else { return nil }
+        return (sh, h.alt, h.az, perHour)
+    }
+
     // MARK: - Rare events, from geometry alone
 
     /// How deep the moon is in the earth's umbra, 0..1.
@@ -162,6 +266,12 @@ enum Astro {
     /// only their difference is ever used, but it makes the Pi's "FACING E"
     /// toast read 180 degrees wrong. Storing real bearings here means a facing
     /// of 180 genuinely points south.
+    /// Test hook for the offscreen harness.
+    static func horizontalPublic(gmst: Double, lon: Double, ra: Double, dec: Double,
+                                 lat: Double) -> (alt: Double, az: Double) {
+        horizontal(gmst: gmst, lon: lon, ra: ra, dec: dec, lat: lat)
+    }
+
     private static func horizontal(gmst: Double, lon: Double, ra: Double, dec: Double, lat: Double)
         -> (alt: Double, az: Double)
     {
