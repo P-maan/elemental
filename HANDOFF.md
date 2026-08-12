@@ -162,15 +162,19 @@ granted headroom and is the one surface where it could work.
 ## Left to do
 
 **Unfinished:**
-- Furniture tracelines read as hard-edged rectangles rather than water on a
-  surface. The fix is in how the film RENDERS, not detection. An agent declined
-  to do it blind because the film never accumulates in the offscreen harness —
-  make it accumulate first, then fix.
-- Furniture detection finds roughly half the widgets, two spurious, dock edge 23%
-  short. The user's idea — difference the screenshot against our OWN rendered
-  wallpaper, since Elemental IS the wallpaper — is right and largely unbuilt.
-  Translucent furniture shows up as regions where our render has sharp cell edges
-  and the screenshot does not.
+- ~~Furniture tracelines as hard-edged rectangles~~ — FIXED. `lipF` is the
+  furniture's top edge in cell units and only its INTEGER part was ever read, so
+  a band's base snapped to the nearest cell boundary, up to ~40 backing pixels
+  from the real edge, while its top feathered correctly. The sub-cell machinery
+  was all there and nothing fed it.
+- ~~Furniture detection by differencing~~ — BUILT AND WIRED. `DiffGrid` in
+  App/FurnitureDetector.swift compares the screenshot against a live
+  `DesktopReference.render` of the same scene; called from the placement overlay
+  and the Elements pane, with a documented fallback to edge detection when the
+  reference is not contemporaneous (an old screenshot against tonight's sky
+  fragments into specks). This entry said "largely unbuilt" for a whole session
+  after it was built, and was repeated to the user as outstanding work. CHECK
+  THE CODE BEFORE TRUSTING THIS FILE.
 - Settings reaching the saver on window close (the user's suggestion: lock in the
   update when the panel closes).
 
@@ -178,15 +182,16 @@ granted headroom and is the one surface where it could work.
 water running down a stacked pane of glass; per-element furniture knobs (blocked
 — the engine reads only global options from `Core/Furniture.swift`).
 
-**Known, unfixed:** dead `liveWeather` and `SurfaceStyle.hasAskedForLocation`
-fields.
+**~~Known, unfixed: dead fields~~** — RESOLVED. `liveWeather` was a real feature
+never wired; it now works and has a control. `SurfaceStyle.hasAskedForLocation`
+described a mechanism that does not exist and was removed.
 
-**The saver does not follow the weather** (reported 2026-08-11, not yet fixed).
-Ruled out by static analysis: ByHost config delivery (correct, resolves to
-Greater Noida), `mirrorsDesktop` surface-style resolution, the legacyScreenSaver
-sandbox network entitlement (`network.client` IS granted), the fetch/reschedule
-chain in `WeatherService`, and the easer's retarget guard. NSLog does not reach
-`log show`, so the remaining diagnosis needs the saver running and observed.
+**~~The saver does not follow the weather~~** — FIXED. Two causes, both about a
+mirroring surface being treated as independent: it adopted the desktop's
+published reading only while its OWN fetch had never succeeded, so the moment
+that landed it diverged; and it eased in from a default clear sky over
+WeatherEaser's minutes-long timescales instead of snapping. See `SaverWeather`
+and `adoptDesktopWeatherIfMirroring`. `--saverhealth` diagnoses it.
 
 **Fixed since this file was written** (see git log for the reasoning):
 - the saturated red band at the bottom of night tiles — green was collapsing to
