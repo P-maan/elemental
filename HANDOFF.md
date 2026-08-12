@@ -232,8 +232,14 @@ Verified: model said WMO 51 / 1.0 mm while radar showed 0.00 overhead.
 
 **Classification removed.** `continuousCloudBase` clamped a measured
 transmission into a band around a hand-tuned `SceneKind` table. Gone; table
-deleted. `effectiveKind` still drives morphology/precipForm/snowHabit — that is
-the remaining classification and the next thing to derive.
+deleted.
+
+NOTE, checked 2026-08-12: `effectiveKind`, `morphology`, `precipForm` and
+`snowHabit` are ALREADY measurement-first and were misdescribed here as the
+"remaining classification". `effectiveKind` reads observed thunder, snow amount,
+radar-gated precipitation and measured cover; the other three lead with the
+observer's own classification and fall back to measured rate, gustiness,
+temperature and frozen fraction. There is no WMO bucket driving behaviour.
 
 **Colour path made to obey depth.** Sky hue is gated by per-cell `seeThrough`;
 the element blend is driven by coverage, not saturation (a neutral overcast was

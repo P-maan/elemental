@@ -1228,9 +1228,13 @@ struct WeatherState: Equatable, Codable {
     /// It used to be clamped into a ±band around that table's value for the
     /// current `effectiveKind`, "so a bad transmission can never take the sky
     /// somewhere the tuning has never been". That clamp is gone. It let a
-    /// CLASSIFICATION overrule a measurement: `effectiveKind` is derived from a
-    /// WMO code, and the deck brightness of a real sky is not a function of which
-    /// of six buckets an integer code fell into. Two skies with identical
+    /// CLASSIFICATION overrule a measurement: it collapsed the sky into one of
+    /// six buckets and then read brightness off a table indexed by the bucket,
+    /// and the deck brightness of a real sky is not a function of which bucket it
+    /// fell into. (`effectiveKind` itself is measurement-derived — observed
+    /// thunder, snow amount, radar-gated precipitation, measured cover — so the
+    /// fault was never the bucket's provenance. It was that six buckets cannot
+    /// carry a continuous quantity.) Two skies with identical
     /// measured transmission would render at different brightness because one was
     /// filed as `.cloud` and the other as `.rain`, and a correctly measured dark
     /// afternoon could be lifted back up simply because the code said `.cloud`.
