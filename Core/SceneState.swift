@@ -76,6 +76,13 @@ struct Uniforms {
     /// How much the wall shimmers, 0..1. Occupies what was `pad1`, so the struct
     /// keeps its field order and its 224 bytes — see the mirroring note above.
     var shimmer: Float = 0.35
+    // ---- The three appearance axes. Appended, so every field before this keeps
+    // its offset; four scalars, which takes the struct from 224 to 240 and keeps
+    // it a multiple of 16. See the mirroring note at the top.
+    var material: Int32 = 0
+    var rounding: Float = 0
+    var halftone: Float = 0
+    var pad2: Float = 0
 }
 
 struct GPUBreather { var ax, ay, R, per, s1, s2, ph, ph2: Float }
@@ -112,6 +119,46 @@ enum HeadingMode: Int32, Codable, CaseIterable {
 /// of the engine. More shapes and finishes are expected.
 enum MosaicShape: Int32, Codable, CaseIterable { case square = 0, dot = 1 }
 enum MosaicFinish: Int32, Codable, CaseIterable { case glass = 0, flat = 1 }
+
+/// What the cells are MADE OF.
+///
+/// `shape` and `finish` were two booleans wearing enum clothes — square-or-dot
+/// and glass-or-flat — and between them they could express four looks, of which
+/// two were interesting. They also conflated things that are not related: dots
+/// carried tone by SIZE while squares carried it by colour, so switching shape
+/// silently changed how the picture was read, and "flat" meant "no material"
+/// rather than a material of its own.
+///
+/// Split into three independent axes instead, each of which means one thing:
+/// this, which is how light behaves at the surface; `rounding`, which is the
+/// outline; and `halftone`, which is whether size carries tone. Every old
+/// combination is still reachable and a great many new ones are — a rounded
+/// square that shrinks with tone is the sequin wall, and neither old mode could
+/// produce it.
+enum MosaicMaterial: Int32, Codable, CaseIterable {
+    /// Transmissive. Refracts what is behind it, brightens at the rim, carries
+    /// a broad sheen. The original look.
+    case glass = 0
+    /// Reflective and opaque. No transmission at all — a metal tile shows you
+    /// the room, not the wall behind it — so the sky is MIRRORED rather than
+    /// seen through, and the specular is tight and tinted by the surface.
+    case metal = 1
+    /// Opaque and mostly diffuse, with a soft wide highlight. Reads as a solid
+    /// object rather than a window: the tone is the tone, and the light only
+    /// models the form.
+    case plastic = 2
+    /// No surface model at all. One colour per cell, shaded only by the relief.
+    case matte = 3
+
+    var title: String {
+        switch self {
+        case .glass:   return "Glass"
+        case .metal:   return "Metal"
+        case .plastic: return "Plastic"
+        case .matte:   return "Matte"
+        }
+    }
+}
 
 // MARK: - Weather
 
@@ -1587,6 +1634,11 @@ struct SceneState {
 
     var shape: MosaicShape = .square
     var finish: MosaicFinish = .glass
+    var material: MosaicMaterial = .glass
+    /// 0 square, 1 circle. See MosaicMaterial.
+    var rounding: Float = 0
+    /// 0 tiles fill the cell, 1 size carries tone.
+    var halftone: Float = 0
 
     /// Nominal cell rows down the screen. Cell size derives from this, so the
     /// mosaic keeps the same visual scale on any display.

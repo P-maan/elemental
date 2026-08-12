@@ -400,6 +400,17 @@ state.dispersion = Float(num("disperse", 0.15))
 state.frost = Float(num("frost", 0))
 state.splay = Float(num("splay", 0.15))
 state.shape  = str("shape", "square") == "dot" ? .dot : .square
+// The three appearance axes. `--shape dot` still works and simply sets both of
+// the axes it used to conflate, so every existing invocation keeps its meaning.
+switch str("material", "glass") {
+case "metal":   state.material = .metal
+case "plastic": state.material = .plastic
+case "matte":   state.material = .matte
+default:        state.material = .glass
+}
+let isDot = str("shape", "square") == "dot"
+state.rounding = Float(num("rounding", isDot ? 1 : 0))
+state.halftone = Float(num("halftone", isDot ? 1 : 0))
 state.finish = str("finish", "glass") == "flat" ? .flat : .glass
 state.lowFX  = args["lowfx"] != nil
 

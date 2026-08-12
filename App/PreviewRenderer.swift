@@ -53,6 +53,11 @@ struct PreviewSpec: Hashable {
 
     var shape: MosaicShape = .square
     var finish: MosaicFinish = .glass
+    /// The three appearance axes. A preview that does not carry them shows a
+    /// picture the wallpaper will not draw, which is worse than no preview.
+    var material: MosaicMaterial = .glass
+    var rounding: Double = 0
+    var halftone: Double = 0
     var gridRows: Int = 36
 
     // Relief, 0...100.
@@ -94,6 +99,7 @@ struct PreviewSpec: Hashable {
         var s = PreviewSpec()
         s.width = Int(pixels.width); s.height = Int(pixels.height)
         s.shape = c.shape; s.finish = c.finish; s.gridRows = c.gridRows
+        s.material = c.material; s.rounding = c.rounding; s.halftone = c.halftone
         s.depth = pct(c.reliefDepth)
         s.emphasis = pct(c.emphasis)
         s.light = pct(c.lightIntensity)
@@ -112,6 +118,9 @@ struct PreviewSpec: Hashable {
     static func surface(_ c: Config, _ st: Config.SurfaceStyle, pixels: CGSize) -> PreviewSpec {
         var s = desktop(c, pixels: pixels)
         s.shape = st.shape; s.finish = st.finish; s.gridRows = st.gridRows
+        s.material = (st.finish == .flat) ? .matte : .glass
+        s.rounding = (st.shape == .dot) ? 1 : 0
+        s.halftone = (st.shape == .dot) ? 1 : 0
         s.facingAz = Int(st.facingAz.rounded())
         s.dynamic = st.headingMode == .dynamic
         if let n = st.scenePlaceName, let p = c.allPlaces.first(where: { $0.name == n }) {
@@ -162,6 +171,9 @@ struct PreviewSpec: Hashable {
         var s = SceneState()
         s.shape = shape
         s.finish = finish
+        s.material = material
+        s.rounding = Float(max(0, min(1, rounding)))
+        s.halftone = Float(max(0, min(1, halftone)))
         s.gridRows = gridRows
         s.facingAz = Float(facingAz)
         // A night preview exists to show the moon through the glass, so the

@@ -81,6 +81,13 @@ struct Uniforms {
     // How much the wall shimmers, 0..1. Occupies what was `pad1`, so the struct
     // keeps its field order and its 224 bytes — see the mirroring note above.
     float shimmer;
+    // The three appearance axes. Appended so every field above keeps its
+    // offset; four scalars takes the struct from 224 to 240, still a multiple
+    // of 16. Mirrored BY HAND against SceneState.swift — trap 5.
+    int   material;            // 0 glass 1 metal 2 plastic 3 matte
+    float rounding;            // 0 square .. 1 circle
+    float halftone;            // 0 fills the cell .. 1 size carries tone
+    float pad2;
 };
 
 // Rain is rasterised at this multiple of the cell grid in each axis.
@@ -2488,194 +2495,98 @@ inline float dotRadius(float lum, float time, float phase) {
 /// `rot` is the splay angle for this block, in radians. It turns the face
 /// outline inside the cell so a wall of blocks is not perfectly coursed.
 inline float3 styleCell(float3 col, float2 cuv, float cellPx, float lum,
-                        float phase, float time, int shape, int finish,
-                        bool flank, float2 lightDir, float lightI, float rot,
+                        float phase, float time, int material, float rounding,
+                        float halftone, bool flank, float2 lightDir, float lightI,
                         float splay, float depth, float hNorm)
 {
-    if (rot != 0.0f) {
-        float cs = cos(rot), sn = sin(rot);
-        float2 d = cuv - 0.5f;
-        cuv = 0.5f + float2(d.x * cs - d.y * sn, d.x * sn + d.y * cs);
-    }
-    if (shape == 1) {
-        // ---- dots: SDF circle, radius from cell luminance (roomstand.py:2587)
-        //
-        // DEPTH IN DOT MODE IS NOT EXTRUSION. The square wall carries depth by
-        // being a wall — parallax, flanks, shadow between blocks — and none of
-        // that survives on a field of separated beads: a dot has no side face to
-        // see, and the gaps between dots are already background, so there is
-        // nothing for a shadow to fall on. Worse, the relief warp foreshortens
-        // the face a dot is drawn on, which does not read as depth at all — it
-        // reads as the dot being SQUASHED, which is the "dots are getting
-        // squeezed" report.
-        //
-        // So dots carry depth the way separated objects actually do it, by
-        // aerial perspective: near ones are larger and stand clear of the
-        // background, far ones shrink and sink back into it. Both cues come off
-        // the same height field the extrusion uses, so the two shapes agree
-        // about what is near even though they show it completely differently.
-        float ln = saturate(lum);
-        float near = saturate(hNorm);
-        // Depth barely touches the SIZE any more. Size is the halftone's job —
-        // it is how tone is carried — and a depth term with a 0.38 swing on it
-        // was overriding that, pulling bright dots back below the radius where
-        // they merge. Distance now shows itself almost entirely in contrast
-        // against the gap, below.
-        float dotR = dotRadius(lum, time, phase) * (0.94f + 0.10f * near);
-        float d = length(cuv - 0.5f);
-        float aa = 0.5f / cellPx;                 // half-pixel feather, no aliasing
-        float m = 1.0f - smoothstep(dotR - aa, dotR + aa, d);
+    // A flank is the sheared side of a block. It has no outline, no grout and no
+    // surface treatment: its whole appearance is the relief lighting the caller
+    // applies. Drawing the front-face treatment here is what made an early
+    // version look like a bevel again.
+    if (flank) return col;
 
-        if (finish == 0) {
-            // ---- A glass dot is a BEAD, not a filled circle.
-            //
-            // It used to get a fixed highlight blob at (0.38, 0.36) and nothing
-            // else — no curvature, no light direction, no transmission — while
-            // the square got the whole glass treatment. That is why a dot read
-            // as a flat disc with a sticker on it.
-            //
-            // Everything here comes off one quantity: the sphere normal. The
-            // bead is a hemisphere of radius dotR standing on the cell, so at a
-            // point q cells from its centre the surface normal is
-            // (q, sqrt(1 - |q|^2)) — out of the screen at the crown, lying flat
-            // at the rim. Refraction through it is done by the caller, which has
-            // the cell texture; the rest is here.
-            float2 q  = (cuv - 0.5f) / max(dotR, 1e-3f);
-            float  rr = min(dot(q, q), 1.0f);
-            float3 n  = float3(q, sqrt(max(0.0f, 1.0f - rr)));
+    // ---- ONE OUTLINE, from square to circle.
+    //
+    // This used to be two code paths that shared nothing: `max(|dx|,|dy|)` for a
+    // square and `length()` for a dot, each with its own shading underneath.
+    // They are the same shape at two settings of one exponent — a superellipse
+    // is a circle at 2 and approaches a square as it grows — so there is no
+    // reason for two of anything, and a great deal of reason for one: every
+    // value BETWEEN them becomes reachable, which is where rounded tiles live.
+    float pw = mix(8.0f, 2.0f, saturate(rounding));
+    float2 dd = abs(cuv - 0.5f);
+    float m = powr(powr(dd.x, pw) + powr(dd.y, pw), 1.0f / pw);
 
-            // The light is lifted out of the screen plane so the crown of a bead
-            // is never fully dark when the source is low: a real light in front
-            // of a wall still reaches the tops of what is on it.
-            float3 l3 = normalize(float3(lightDir, 0.62f));
+    // ---- SIZE, which is a separate question from shape.
+    //
+    // Tone can be carried by colour, with every tile filling its cell, or by
+    // SIZE, with dark tiles shrinking away and bright ones growing until they
+    // meet. The old code tied that choice to the outline — picking dots changed
+    // both at once — so a round tile that filled its cell, or a square one that
+    // shrank with tone, simply could not be expressed. The second of those is
+    // the sequin wall.
+    float full = 0.5f - 0.11f * splay;
+    float fill = mix(full, dotRadius(lum, time, phase), saturate(halftone));
 
-            // Curvature. One side of the bead faces the light and the other is
-            // turned away — this is what makes it round.
-            float diff = saturate(dot(n, l3));
-            col *= 1.0f + lightI * (0.62f * diff - 0.24f);
+    float aa = 0.5f / max(cellPx, 1.0f);
+    float mask = 1.0f - smoothstep(fill - aa, fill + aa, m);
+    if (mask <= 0.002f) return float3(0.0f);
 
-            // The specular. Tight, and placed by the actual light direction, so
-            // the highlights across the wall all point at the sun rather than
-            // sitting in the same corner of every cell.
-            float3 hv = normalize(l3 + float3(0.0f, 0.0f, 1.0f));
-            // TWO speculars, not one. A single lobe reads as plastic: real glass
-            // has a tight mirror glint from the surface and a broader, softer
-            // bloom from light that entered, bounced inside and came back out.
-            // Having both is most of the difference between "shiny" and "glass".
-            float specTight = powr(saturate(dot(n, hv)), 96.0f);
-            float specWide  = powr(saturate(dot(n, hv)), 14.0f);
-            col += specTight * (0.34f + 0.62f * lightI);
-            col += specWide  * (0.08f + 0.16f * lightI);
+    // ---- ONE SURFACE. The same dome serves every outline, because it is built
+    // from the same exponent: at 2 it is the bead, at 8 it is the pressed
+    // pillow, and the lens in presentPass uses the same curve so the highlight
+    // and the refraction cannot disagree about which way the face points.
+    float2 uu = (cuv - 0.5f) / max(fill, 1e-3f);
+    float rr = powr(powr(abs(uu.x), pw) + powr(abs(uu.y), pw), 1.0f / pw);
+    float dome = sqrt(saturate(1.0f - min(rr, 1.0f) * min(rr, 1.0f)));
+    float3 n3 = normalize(float3(uu * 0.80f, dome * 0.75f + 0.30f));
 
-            // Fresnel, hard. Glass goes mirror-bright at grazing incidence, and
-            // that bright rim around the edge is the single strongest cue that a
-            // thing is glass rather than paint — it was at 0.13 and doing almost
-            // nothing. Schlick's exponent is 5; 3.6 was a softening that spread
-            // the rim into a general lightening and lost the edge it exists to
-            // draw.
-            float fres = powr(1.0f - n.z, 5.0f);
-            col += fres * (0.34f + 0.30f * ln);
+    // Grazing, so each highlight sits on the lit FLANK. Head-on light puts the
+    // brightest point at every dome's crown and a wall of those reads as LEDs.
+    float3 l3 = normalize(float3(lightDir, 0.30f));
+    float3 hv = normalize(l3 + float3(0.0f, 0.0f, 1.0f));
+    float diff = saturate(dot(n3, l3));
+    float fres = powr(1.0f - n3.z, 5.0f);
+    float ln   = saturate(lum);
 
-            // The inner caustic: light through the top of a bead concentrates on
-            // the far side of it, which is why a water drop on glass has a
-            // BRIGHT crescent opposite the highlight and not a symmetric shine.
-            float caustic = powr(saturate(dot(-n.xy, lightDir) * 0.5f + 0.5f), 5.0f);
-            col += caustic * 0.16f * lightI;
-        }
-        col *= m;
-        // Sink back into the background with distance. This is the half of the
-        // cue that makes a field of dots read as having depth at all: contrast
-        // against the gap falls off with range, exactly as it does across a
-        // room, so the far beads recede instead of every dot sitting on one
-        // plane at equal strength.
-        col *= 0.58f + 0.42f * near;
+    if (material == 0) {
+        // GLASS. Transmissive: the body keeps its colour, the rim goes
+        // mirror-bright, and the sheen is broad because daylight is an enormous
+        // diffuse source and its reflection is not a dot.
+        col *= 1.0f + lightI * (0.55f * diff - 0.22f);
+        col += powr(saturate(dot(n3, hv)), 22.0f) * (0.14f + 0.26f * lightI);
+        col += fres * (0.16f + 0.20f * lightI);
+
+    } else if (material == 1) {
+        // METAL. Opaque, so the body goes dark away from the light instead of
+        // staying lit by what is behind it — that darkening is most of what
+        // separates metal from glass. The highlight is tight and TINTED by the
+        // surface, because a metal reflects its own colour where a dielectric
+        // reflects white.
+        col *= 0.30f + 0.90f * diff;
+        float3 tint = col / max(dot(col, float3(0.333f)), 0.04f);
+        col += tint * powr(saturate(dot(n3, hv)), 70.0f) * (0.40f + 0.70f * lightI);
+        col += tint * fres * (0.20f + 0.24f * lightI);
+
+    } else if (material == 2) {
+        // PLASTIC. Opaque and mostly diffuse, with one wide soft highlight that
+        // is WHITE rather than tinted — the giveaway of a dielectric — and no
+        // rim brightening to speak of, so it reads as a solid object rather than
+        // a window.
+        col *= 0.55f + 0.58f * diff;
+        col += powr(saturate(dot(n3, hv)), 11.0f) * (0.09f + 0.15f * lightI);
+        col += fres * 0.05f * ln;
+
     } else {
-        if (flank) return col;                 // side wall: no front-face detail
-
-        // Distance from the block's edge, in the rotated frame. Squares are
-        // tested this way rather than with four separate comparisons because it
-        // is what lets splay rotate the outline as one shape.
-        float2 d   = abs(cuv - 0.5f);
-        float  m   = max(d.x, d.y);            // 0 centre, 0.5 edge
-        float  in0 = 0.5f - 0.11f * splay;     // splayed blocks shrink slightly
-
-        if (finish == 0) {
-            // Glass: a one-pixel rim, lit on the side the light comes from and
-            // shadowed opposite. The relief now carries the moulding, so this
-            // is only the crisp arris along the top of the block.
-            float e = clamp(1.2f / max(cellPx, 1.0f), 0.02f, 0.14f);
-            if (m > in0 - e) {
-                float2 s = sign(cuv - 0.5f);
-                // Which edge are we on: the x one or the y one?
-                float2 n = (d.x > d.y) ? float2(s.x, 0.0f) : float2(0.0f, s.y);
-                col += dot(n, lightDir) * 0.30f;
-            }
-
-            // ---- The tile is a DOME, not a flat face with a lit edge.
-            //
-            // This is the whole difference between "shiny" and "glass". Pressed
-            // glass tiles are pillows: the face curves from rim to crown, so the
-            // surface normal turns continuously across it, and every cue the eye
-            // uses — where the diffuse falls off, where the highlight sits, how
-            // the rim goes mirror-bright — comes out of that one curve. A flat
-            // face plus a painted rim and a painted glint cannot look like it,
-            // because both are stuck where they were painted while a real
-            // highlight MOVES as the light does.
-            //
-            // A superellipse, not a sphere: the shape is a rounded SQUARE, and
-            // an exponent of four is the squircle everything on this platform is
-            // drawn with. At the rim the normal lies almost flat, at the crown
-            // it points at the viewer.
-            float2 uu = (cuv - 0.5f) / max(in0, 1e-3f);      // -1..1 across the tile
-            float rr = powr(powr(abs(uu.x), 4.0f) + powr(abs(uu.y), 4.0f), 0.25f);
-            float dome = sqrt(saturate(1.0f - rr * rr));
-            float3 n3 = normalize(float3(uu * 0.80f, dome * 0.75f + 0.30f));
-            // GRAZING, not head-on. With the light nearly along the view axis
-            // the brightest point of every dome is its crown, so every tile gets
-            // an identical pip in the middle and a wall of them reads as LEDs.
-            // Laying the light down moves each highlight to the lit FLANK, where
-            // it belongs, and gives the wall a direction.
-            float3 l3d = normalize(float3(lightDir, 0.30f));
-
-            // Diffuse across the pillow. This is what actually makes it read as
-            // a curved solid — the gradient from lit flank to shaded flank does
-            // more work than any highlight, and it cannot be faked with a
-            // painted blob.
-            float diffT = saturate(dot(n3, l3d));
-            col *= 1.0f + lightI * (0.55f * diffT - 0.22f);
-
-            // ONE broad specular. The tight 110-exponent lobe was a point source
-            // reflected in a mirror, which is not what a sky is: daylight is an
-            // enormous diffuse source and its reflection in glass is a wide soft
-            // sheen, not a dot. Broad, and weak enough to be a sheen rather than
-            // a lamp.
-            float3 hvT = normalize(l3d + float3(0.0f, 0.0f, 1.0f));
-            float sW = powr(saturate(dot(n3, hvT)), 22.0f);
-            col += sW * (0.14f + 0.26f * lightI);
-
-            // Fresnel on the true normal, so the rim brightens all the way round
-            // rather than only where a painted band was put.
-            float fT = powr(1.0f - n3.z, 5.0f);
-            col += fT * (0.16f + 0.20f * lightI);
-
-            if (m > in0) col *= 0.72f;         // the block does not fill the cell
-        } else {
-            // Flat: grout gaps, no rim.
-            //
-            // The grout YIELDS to the relief. A painted 0.08-cell dark band on
-            // all four sides of every tile is a much louder edge than a real
-            // crevice, and with depth up it was drawing a flat black lattice
-            // over the top of the geometry — the blocks were there and you
-            // could not see them for the grid. So the band narrows and lifts as
-            // the blocks come out of the wall, because by then the separation
-            // between them is being carried by their own side faces and the
-            // occlusion in the gaps. At depth 0 this is exactly the old flat
-            // tile, byte for byte.
-            float w = 0.08f * (1.0f - 0.72f * depth);
-            if (m > in0 - w) col *= mix(0.42f, 0.66f, depth);
-        }
+        // MATTE. No surface model at all: one colour per cell, shaded only by
+        // the relief. The grout YIELDS to the relief for the reason it always
+        // did — once the blocks stand out, their own side faces separate them
+        // and a painted lattice on top is louder than the geometry.
+        float w = 0.08f * (1.0f - 0.72f * depth);
+        if (m > full - w) col *= mix(0.42f, 0.66f, depth);
     }
-    return col;
+
+    return col * mask;
 }
 
 fragment float4 presentPass(VOut in [[stage_in]],
@@ -2737,7 +2648,7 @@ fragment float4 presentPass(VOut in [[stage_in]],
     // channel so edges fringe, and frost averages the neighbourhood so the
     // transmitted image arrives scattered. All three are meaningless on a flat
     // tile, which is opaque, so they are skipped there entirely.
-    if (U.finish == 0 && rel.h > 0.001f
+    if (U.material == 0 && rel.h > 0.001f
         && (U.refractAmt > 0.005f || U.frostAmt > 0.005f)) {
         // How far along the view the transmitted image is taken from. Bounded,
         // because a block is a short light pipe and not a periscope: what you
@@ -3459,7 +3370,7 @@ fragment float4 presentPass(VOut in [[stage_in]],
     // appears at the rim and vanishes at the crown, exactly where a real bead
     // puts it. Frost scatters what arrives. Both are skipped on a flat finish,
     // which has nothing to transmit, and outside the bead, which is empty cell.
-    if (U.shape == 1 && U.finish == 0
+    if (U.rounding > 0.5f && U.material == 0
         && (U.refractAmt > 0.005f || U.frostAmt > 0.005f)) {
         float  dr = dotRadius(lum, U.time, phase);
         float2 q  = (suv - 0.5f) / max(dr, 1e-3f);
@@ -3508,13 +3419,11 @@ fragment float4 presentPass(VOut in [[stage_in]],
     // the ones that were doing the real work: it jitters HEIGHT in heightPass,
     // so the courses are not perfectly graded, and it tips the front face for
     // the light below. Rise and fall, not spin.
-    float rot = 0.0f;
-    // How near this block stands, 0 flush with the wall to 1 fully proud. The
-    // square shape shows this by extrusion; the dot shape uses it for aerial
-    // perspective instead. See styleCell.
+    // How near this block stands, 0 flush with the wall to 1 fully proud.
     float hNorm = (hmax > 1e-4f) ? saturate(rel.h / hmax) : 0.0f;
-    col = styleCell(col, suv, dc.size, lum, phase, U.time, U.shape, U.finish,
-                    rel.flank, L, I, rot, U.splayAmt, U.depthAmt, hNorm);
+    col = styleCell(col, suv, dc.size, lum, phase, U.time,
+                    U.material, U.rounding, U.halftone,
+                    rel.flank, L, I, U.splayAmt, U.depthAmt, hNorm);
 
     // ---- Relief shading. Front faces, side faces, and the crevices between.
     if (hmax > 0.0005f) {

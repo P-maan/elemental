@@ -990,6 +990,12 @@ final class SurfacePane: Pane {
         for (i, combo) in Self.styleCombos.enumerated() {
             var s = base
             s.shape = combo.0; s.finish = combo.1
+            // The four tiles are PRESETS over the three axes, not a shape/finish
+            // pair any more. `dot` always meant round AND size-carries-tone; it
+            // is written out here rather than left implied.
+            s.material = (combo.1 == .flat) ? .matte : .glass
+            s.rounding = (combo.0 == .dot) ? 1 : 0
+            s.halftone = (combo.0 == .dot) ? 1 : 0
             styleChoices[i].show(s)
         }
         densityStrip.show(base) { s, v in s.gridRows = Int(v) }
@@ -1023,6 +1029,9 @@ final class SurfacePane: Pane {
         switch role {
         case .desktop:
             c.shape = st.shape; c.finish = st.finish; c.gridRows = st.gridRows
+            c.material = (st.finish == .flat) ? .matte : .glass
+            c.rounding = (st.shape == .dot) ? 1 : 0
+            c.halftone = (st.shape == .dot) ? 1 : 0
             c.poster = st.poster; c.headingMode = st.headingMode
             c.facingAz = st.facingAz; c.scenePlaceName = st.scenePlaceName
         case .lock:  c.lock = st

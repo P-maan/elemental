@@ -160,8 +160,31 @@ struct Config: Codable, Equatable {
     /// what "works from anywhere" has to mean.
     var headingMode: HeadingMode = .dynamic
 
+    // ---- Appearance, on three independent axes.
+    //
+    // `shape` and `finish` are kept ONLY to migrate an existing config; nothing
+    // reads them after `init(from:)` has run. They cannot simply be deleted: a
+    // config written by 0.2 has them and has none of the three below, and a user
+    // updating should not have their wallpaper change shape underneath them.
     var shape: MosaicShape = .square
     var finish: MosaicFinish = .glass
+
+    /// What the cells are made of. See `MosaicMaterial`.
+    var material: MosaicMaterial = .glass
+
+    /// Outline: 0 a square, 1 a circle, anything between a rounded square.
+    /// Replaces the old square-or-dot switch with the continuum it always was.
+    var rounding: Double = 0
+
+    /// Whether SIZE carries tone. 0 fills the cell and lets colour carry it; 1
+    /// is a halftone, where a dark cell's tile shrinks to nothing and a bright
+    /// one grows until it meets its neighbours.
+    ///
+    /// Separated from `rounding` because they were tangled: choosing dots used
+    /// to change BOTH the outline and how the picture was read, so there was no
+    /// way to have round tiles that filled their cells, or square ones that
+    /// shrank with tone. The second is the sequin wall.
+    var halftone: Double = 0
 
     /// Nominal mosaic rows down the screen.
     var gridRows: Int = 36
@@ -533,6 +556,9 @@ struct Config: Codable, Equatable {
         state.headingMode = headingMode
         state.shape = shape
         state.finish = finish
+        state.material = material
+        state.rounding = Float(max(0, min(1, rounding)))
+        state.halftone = Float(max(0, min(1, halftone)))
         state.gridRows = gridRows
         state.poster = Float(poster)
         state.reliefDepth = Float(reliefDepth)
@@ -622,6 +648,20 @@ extension Config {
         hasOnboarded       = c.lenient(.hasOnboarded, d.hasOnboarded)
         automaticUpdates   = c.lenient(.automaticUpdates, d.automaticUpdates)
         shimmer            = c.lenient(.shimmer, d.shimmer)
+
+        // ---- Appearance: take the new axes if they are there, otherwise
+        // derive them from the old pair so an existing install looks identical
+        // after an update. `dot` meant round AND size-carries-tone, which is
+        // exactly the two axes it was conflating.
+        if let m: MosaicMaterial = try? c.decodeIfPresent(MosaicMaterial.self, forKey: .material) {
+            material = m
+            rounding = c.lenient(.rounding, d.rounding)
+            halftone = c.lenient(.halftone, d.halftone)
+        } else {
+            material = (finish == .flat) ? .matte : .glass
+            rounding = (shape == .dot) ? 1 : 0
+            halftone = (shape == .dot) ? 1 : 0
+        }
         playbackOnWake     = c.lenient(.playbackOnWake, d.playbackOnWake)
         playbackMaxSeconds = c.lenient(.playbackMaxSeconds, d.playbackMaxSeconds)
         animateOnLock      = c.lenient(.animateOnLock, d.animateOnLock)

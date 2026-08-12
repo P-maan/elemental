@@ -894,6 +894,9 @@ final class ElementalRenderer {
         // the exact minute. See Astro.lunarEclipseDepth.
         u.eclipse = max(0, min(1, state.astro.lunarEclipse))
         u.shimmer = max(0, min(1, state.shimmer))
+        u.material = state.material.rawValue
+        u.rounding = max(0, min(1, state.rounding))
+        u.halftone = max(0, min(1, state.halftone))
 
         uniformBuf.contents().copyMemory(from: &u, byteCount: MemoryLayout<Uniforms>.stride)
     }
