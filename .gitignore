@@ -1,4 +1,10 @@
-# Build output — build.sh writes the app, the saver and the CLI renderer here.
 build/
-
+*.dSYM/
 .DS_Store
+
+# Signing material. The private key must never be committed; the CSR is public
+# but there is no reason for it to live in the repo either.
+*.p12
+*.key
+*.certSigningRequest
+*.cer
