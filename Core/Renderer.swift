@@ -893,6 +893,7 @@ final class ElementalRenderer {
         // Rare events, from geometry — no feed, so this works offline and on
         // the exact minute. See Astro.lunarEclipseDepth.
         u.eclipse = max(0, min(1, state.astro.lunarEclipse))
+        u.shimmer = max(0, min(1, state.shimmer))
 
         uniformBuf.contents().copyMemory(from: &u, byteCount: MemoryLayout<Uniforms>.stride)
     }

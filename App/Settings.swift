@@ -452,6 +452,7 @@ final class GeneralPane: Pane {
     private var dispersS: LabelledSlider!
     private var frostS: LabelledSlider!
     private var splayS: LabelledSlider!
+    private var shimmerS: LabelledSlider!
     private var riseS: LabelledSlider!
     private var iconPicker: AppIconPicker!
     /// The whole glass card. These three describe light passing THROUGH a
@@ -567,7 +568,11 @@ final class GeneralPane: Pane {
         fpsPop = popup(Self.fpsChoices.map { "\($0) fps" }, #selector(changed))
         speedPop = popup(Self.speedChoices.map(\.0), #selector(changed))
         replayPop = popup(Self.replayChoices.map(\.0), #selector(changed))
+        shimmerS = slider("Shimmer", 0...1, #selector(changed), pct)
         let motion = Card("Motion", symbol: "waveform")
+        motion.add(shimmerS.container)
+        motion.note("A slow drift of light across the wall. Costs frames — a still scene can "
+                  + "otherwise be drawn a handful of times a second, and movement cannot.")
         motion.add(row("Frame rate", fpsPop))
         motion.add(row("Speed", speedPop))
         motion.note("Frame rate is how often it is drawn; speed is how fast the world runs. Lowering "
@@ -630,6 +635,7 @@ final class GeneralPane: Pane {
     override func sync(_ c: Config) {
         loginCheck.state = (SMAppService.mainApp.status == .enabled) ? .on : .off
         liveWeatherCheck.state = c.liveWeather ? .on : .off
+        shimmerS.value = c.shimmer
         fpsPop.selectItem(at: Self.fpsChoices.firstIndex(of: c.maxFPS) ?? 2)
         speedPop.selectItem(at: Self.speedChoices.firstIndex { abs($0.1 - c.motionSpeed) < 0.001 } ?? 3)
         replayPop.selectItem(at: c.playbackOnWake
@@ -727,6 +733,7 @@ final class GeneralPane: Pane {
         c.lowPowerOnBattery = lowPowerCheck.state == .on
         c.syncLockScreen = lockSyncCheck.state == .on
         c.reliefDepth = depthS.value
+        c.shimmer = shimmerS.value
         c.emphasis = emphS.value
         c.lightIntensity = lightS.value
         c.splay = splayS.value

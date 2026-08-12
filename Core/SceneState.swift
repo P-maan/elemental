@@ -73,7 +73,9 @@ struct Uniforms {
     /// Depth of a lunar eclipse, 0..1. Occupies what was `pad0`, so the struct
     /// keeps its field order and its 224 bytes — see the mirroring note above.
     var eclipse: Float = 0
-    var pad1: Float = 0
+    /// How much the wall shimmers, 0..1. Occupies what was `pad1`, so the struct
+    /// keeps its field order and its 224 bytes — see the mirroring note above.
+    var shimmer: Float = 0.35
 }
 
 struct GPUBreather { var ax, ay, R, per, s1, s2, ph, ph2: Float }
@@ -1616,6 +1618,8 @@ struct SceneState {
     /// Per-block jitter of height, tilt and rotation, so the courses are not
     /// perfectly regular.
     var splay: Float = 0.15
+    /// How much the wall shimmers, 0..1. See Config.shimmer.
+    var shimmer: Float = 0.35
 
     /// How long a block takes to RISE to a new height, 0..1, where 0 is the old
     /// behaviour — the height field is assigned, so a block that should be

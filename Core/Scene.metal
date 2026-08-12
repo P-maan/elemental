@@ -73,7 +73,9 @@ struct Uniforms {
     // Depth of a lunar eclipse, 0..1. Occupies what was `pad0`, so the struct
     // keeps its field order and its 224 bytes — see the mirroring note above.
     float eclipse;
-    float pad1;
+    // How much the wall shimmers, 0..1. Occupies what was `pad1`, so the struct
+    // keeps its field order and its 224 bytes — see the mirroring note above.
+    float shimmer;
 };
 
 // Rain is rasterised at this multiple of the cell grid in each axis.
@@ -1075,6 +1077,38 @@ fragment CellOut cellPass(VOut in [[stage_in]],
     // climbs into the bright part of the ramp instead.
     L += skyBrAmt * 104.0f * (0.80f + 0.20f * visNorm) * (1.0f - covF * 0.14f)
        * (0.32f + 1.24f * (cyp / H));
+
+    // ---- shimmer, on purpose this time.
+    //
+    // The wall used to shimmer, and it was an ACCIDENT: cells crossing
+    // quantisation boundaries at slightly different moments. That is why it read
+    // as life sometimes and as noise the rest of the time — it was uncorrelated
+    // between neighbours and discontinuous in time, which is the definition of
+    // jitter rather than of movement. Fixing the quantiser removed it, and with
+    // it the only thing keeping a still sky from looking frozen.
+    //
+    // So this puts it back deliberately, with the two properties the accident
+    // could never have. It is SPATIALLY COHERENT — the wavelengths are tens of
+    // cells across, so neighbours move together and it reads as light travelling
+    // over a surface rather than as cells flickering independently. And it is
+    // CONTINUOUS in time, so nothing steps; combined with the soft staircase in
+    // the posterizer it can vary a cell across a tonal boundary without a pop.
+    //
+    // Amplitude is small on purpose: a handful of luminance units at full
+    // setting, which is enough to see and not enough to compete with the
+    // weather.
+    if (U.shimmer > 0.001f) {
+        // Periods of roughly five, eight and twelve seconds. The first draft ran
+        // three to five times slower than this and felt LAGGY rather than calm —
+        // a shimmer whose period is half a minute does not read as movement at
+        // all, it reads as the picture being slow to catch up. Layering three
+        // rates that do not divide into each other keeps it from settling into
+        // an obvious pulse.
+        float sh = sin(x * 0.0021f + y * 0.0017f + sec * 0.80f)
+                 + 0.70f * sin(x * 0.0037f - y * 0.0029f + sec * 0.52f + 2.1f)
+                 + 0.50f * sin(x * 0.0009f + y * 0.0043f + sec * 1.27f + 4.3f);
+        L += sh * 2.6f * U.shimmer;
+    }
 
     // humidity haze
     if (humidF > 0.2f) L += humidF * 18.0f * sin(x * 0.008f + y * 0.01f + sec * 0.05f);
@@ -2519,14 +2553,29 @@ inline float3 styleCell(float3 col, float2 cuv, float cellPx, float lum,
             // the highlights across the wall all point at the sun rather than
             // sitting in the same corner of every cell.
             float3 hv = normalize(l3 + float3(0.0f, 0.0f, 1.0f));
-            float spec = powr(saturate(dot(n, hv)), 46.0f);
-            col += spec * (0.16f + 0.34f * lightI);
+            // TWO speculars, not one. A single lobe reads as plastic: real glass
+            // has a tight mirror glint from the surface and a broader, softer
+            // bloom from light that entered, bounced inside and came back out.
+            // Having both is most of the difference between "shiny" and "glass".
+            float specTight = powr(saturate(dot(n, hv)), 96.0f);
+            float specWide  = powr(saturate(dot(n, hv)), 14.0f);
+            col += specTight * (0.34f + 0.62f * lightI);
+            col += specWide  * (0.08f + 0.16f * lightI);
 
-            // Fresnel. Glass goes mirror-bright at grazing incidence, which is
-            // the bright ring around the edge of a real bead and the single
-            // cheapest cue that a thing is glass and not paint.
-            float fres = powr(1.0f - n.z, 3.6f);
-            col += fres * 0.13f * (0.35f + 0.65f * ln);
+            // Fresnel, hard. Glass goes mirror-bright at grazing incidence, and
+            // that bright rim around the edge is the single strongest cue that a
+            // thing is glass rather than paint — it was at 0.13 and doing almost
+            // nothing. Schlick's exponent is 5; 3.6 was a softening that spread
+            // the rim into a general lightening and lost the edge it exists to
+            // draw.
+            float fres = powr(1.0f - n.z, 5.0f);
+            col += fres * (0.34f + 0.30f * ln);
+
+            // The inner caustic: light through the top of a bead concentrates on
+            // the far side of it, which is why a water drop on glass has a
+            // BRIGHT crescent opposite the highlight and not a symmetric shine.
+            float caustic = powr(saturate(dot(-n.xy, lightDir) * 0.5f + 0.5f), 5.0f);
+            col += caustic * 0.16f * lightI;
         }
         col *= m;
         // Sink back into the background with distance. This is the half of the
@@ -2554,8 +2603,56 @@ inline float3 styleCell(float3 col, float2 cuv, float cellPx, float lum,
                 float2 s = sign(cuv - 0.5f);
                 // Which edge are we on: the x one or the y one?
                 float2 n = (d.x > d.y) ? float2(s.x, 0.0f) : float2(0.0f, s.y);
-                col += dot(n, lightDir) * 0.16f;
+                col += dot(n, lightDir) * 0.30f;
             }
+
+            // ---- The tile is a DOME, not a flat face with a lit edge.
+            //
+            // This is the whole difference between "shiny" and "glass". Pressed
+            // glass tiles are pillows: the face curves from rim to crown, so the
+            // surface normal turns continuously across it, and every cue the eye
+            // uses — where the diffuse falls off, where the highlight sits, how
+            // the rim goes mirror-bright — comes out of that one curve. A flat
+            // face plus a painted rim and a painted glint cannot look like it,
+            // because both are stuck where they were painted while a real
+            // highlight MOVES as the light does.
+            //
+            // A superellipse, not a sphere: the shape is a rounded SQUARE, and
+            // an exponent of four is the squircle everything on this platform is
+            // drawn with. At the rim the normal lies almost flat, at the crown
+            // it points at the viewer.
+            float2 uu = (cuv - 0.5f) / max(in0, 1e-3f);      // -1..1 across the tile
+            float rr = powr(powr(abs(uu.x), 4.0f) + powr(abs(uu.y), 4.0f), 0.25f);
+            float dome = sqrt(saturate(1.0f - rr * rr));
+            float3 n3 = normalize(float3(uu * 0.80f, dome * 0.75f + 0.30f));
+            // GRAZING, not head-on. With the light nearly along the view axis
+            // the brightest point of every dome is its crown, so every tile gets
+            // an identical pip in the middle and a wall of them reads as LEDs.
+            // Laying the light down moves each highlight to the lit FLANK, where
+            // it belongs, and gives the wall a direction.
+            float3 l3d = normalize(float3(lightDir, 0.30f));
+
+            // Diffuse across the pillow. This is what actually makes it read as
+            // a curved solid — the gradient from lit flank to shaded flank does
+            // more work than any highlight, and it cannot be faked with a
+            // painted blob.
+            float diffT = saturate(dot(n3, l3d));
+            col *= 1.0f + lightI * (0.55f * diffT - 0.22f);
+
+            // ONE broad specular. The tight 110-exponent lobe was a point source
+            // reflected in a mirror, which is not what a sky is: daylight is an
+            // enormous diffuse source and its reflection in glass is a wide soft
+            // sheen, not a dot. Broad, and weak enough to be a sheen rather than
+            // a lamp.
+            float3 hvT = normalize(l3d + float3(0.0f, 0.0f, 1.0f));
+            float sW = powr(saturate(dot(n3, hvT)), 22.0f);
+            col += sW * (0.14f + 0.26f * lightI);
+
+            // Fresnel on the true normal, so the rim brightens all the way round
+            // rather than only where a painted band was put.
+            float fT = powr(1.0f - n3.z, 5.0f);
+            col += fT * (0.16f + 0.20f * lightI);
+
             if (m > in0) col *= 0.72f;         // the block does not fill the cell
         } else {
             // Flat: grout gaps, no rim.
@@ -3358,7 +3455,20 @@ fragment float4 presentPass(VOut in [[stage_in]],
         }
     }
 
-    float rot = U.splayAmt * cellJit(rel.cell, 4.7f) * 0.22f;
+    // Splay does NOT rotate a block.
+    //
+    // It used to turn each face inside its cell by up to 0.22 radians, on the
+    // reasoning that a wall of blocks should not be perfectly coursed. What that
+    // actually reads as is every tile sitting at its own crooked angle — and
+    // since the outline turns with it, the eye sees ROTATION, which is the one
+    // thing a wall of tiles does not do. Tiles are laid straight; what varies is
+    // how far each one stands out and how it catches the light.
+    //
+    // So the rotation is gone and splay keeps its other two effects, which are
+    // the ones that were doing the real work: it jitters HEIGHT in heightPass,
+    // so the courses are not perfectly graded, and it tips the front face for
+    // the light below. Rise and fall, not spin.
+    float rot = 0.0f;
     // How near this block stands, 0 flush with the wall to 1 fully proud. The
     // square shape shows this by extrusion; the dot shape uses it for aerial
     // perspective instead. See styleCell.
@@ -3399,10 +3509,13 @@ fragment float4 presentPass(VOut in [[stage_in]],
                 occ += saturate(dh / (hmax * 0.45f)) * (1.0f - smoothstep(0.0f, 0.6f, d));
             }
             shade *= 1.0f - saturate(occ) * 0.55f;
-            // Splay also tips the front face, so a wall of blocks catches the
-            // light unevenly instead of returning one flat value.
+            // Splay tips the front face, so a wall of blocks catches the light
+            // unevenly instead of returning one flat value. This is now the
+            // whole of what splay does to the FACE — the outline is never turned
+            // — and it is the half that was always meant to read as light rather
+            // than as geometry, so it carries a little more weight than before.
             float2 tilt = float2(cellJit(rel.cell, 11.3f), cellJit(rel.cell, 29.1f));
-            shade *= 1.0f + I * dot(tilt, L) * U.splayAmt * 1.1f;
+            shade *= 1.0f + I * dot(tilt, L) * U.splayAmt * 1.35f;
         }
         col *= max(shade, 0.0f);
     }

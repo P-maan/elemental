@@ -350,6 +350,22 @@ final class WallpaperSurface: NSObject, CAMetalDisplayLinkDelegate {
         }
         if w.isThundering { need = ceiling }       // a flash IS one frame
         if w.wind > 30 { need = max(need, 14) }    // gale-driven streak lean
+
+        // SHIMMER IS MOTION, and motion needs frames.
+        //
+        // The dry-sky rate of 6 exists because a still scene genuinely has
+        // nothing moving in it. Shimmer breaks that premise: it is a continuous
+        // drift across the whole wall, and at 6 fps a continuous drift does not
+        // look calm, it looks like the picture is struggling to keep up — which
+        // is precisely the "laggy" the shimmer is supposed to cure. Six frames a
+        // second is fine for a sky that changes over minutes and useless for one
+        // that changes over seconds.
+        //
+        // Scaled by the setting, so turning the shimmer down gives the energy
+        // back rather than paying for motion nobody asked for. Off is exactly
+        // the old behaviour.
+        let shimmer = Float(max(0, min(1, lastConfig?.shimmer ?? 0)))
+        if shimmer > 0.02 { need = max(need, 10 + 20 * shimmer) }
         let preferred = max(4, min(ceiling, need))
 
         // A NARROW range when nothing is moving, a wide one when something is.

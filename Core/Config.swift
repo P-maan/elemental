@@ -365,6 +365,16 @@ struct Config: Codable, Equatable {
     /// identity. So it is set only when the flow reaches an end the user chose.
     var hasOnboarded: Bool = false
 
+    /// How much the wall shimmers, 0 still to 1 lively.
+    ///
+    /// The scene used to shimmer by accident — cells crossing quantisation
+    /// boundaries at slightly different moments — which is why it read as life
+    /// sometimes and as noise the rest of the time. Fixing that removed the only
+    /// thing keeping a still sky from looking frozen, so it is back on purpose,
+    /// spatially coherent and continuous in time. Costs frames: see
+    /// `applyFrameRate`.
+    var shimmer: Double = 0.35
+
     /// Look for new versions on GitHub, and offer them.
     ///
     /// On by default, and that default matters more than usual here: this app is
@@ -532,6 +542,7 @@ struct Config: Codable, Equatable {
         state.dispersion = Float(dispersion)
         state.frost = Float(frost)
         state.splay = Float(splay)
+        state.shimmer = Float(shimmer)
         state.reliefRise = Float(reliefRise)
     }
 }
@@ -610,6 +621,7 @@ extension Config {
         // replaying on every launch forever.
         hasOnboarded       = c.lenient(.hasOnboarded, d.hasOnboarded)
         automaticUpdates   = c.lenient(.automaticUpdates, d.automaticUpdates)
+        shimmer            = c.lenient(.shimmer, d.shimmer)
         playbackOnWake     = c.lenient(.playbackOnWake, d.playbackOnWake)
         playbackMaxSeconds = c.lenient(.playbackMaxSeconds, d.playbackMaxSeconds)
         animateOnLock      = c.lenient(.animateOnLock, d.animateOnLock)
