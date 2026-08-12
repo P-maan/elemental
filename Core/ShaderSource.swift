@@ -2419,8 +2419,28 @@ inline Relief castRelief(texture2d<float> heights, sampler s, float2 g,
 /// Radius of a dot, in cell fractions. Shared by the mask and by the bead's
 /// lens, which have to agree on where the glass actually is.
 inline float dotRadius(float lum, float time, float phase) {
-    return (0.24f + saturate(lum) * 0.46f)
-         * (0.90f + 0.10f * sin(time * 0.9f + phase * 6.28f));
+    // A HALFTONE, which means the interesting part is the gaps.
+    //
+    // The old range was 0.24 to 0.70 of the cell, and both ends were wrong.
+    //
+    // The floor meant a black cell still carried a quarter-cell dot, so nothing
+    // ever went properly dark and the field never breathed. The ceiling was the
+    // worse mistake: circles on a square grid TOUCH at radius 0.5 and, past
+    // about 0.6, the space left between four of them closes into a small
+    // four-pointed star. Those stars are the whole signature of the look — a
+    // sequin wall reads as sequins because of the black diamonds between them,
+    // not because of the discs. Capped at 0.70 and then shrunk again by the
+    // depth term, the dots were held just below the range where that happens, so
+    // they stayed separated islands on a flat background: a dot screen, not a
+    // halftone.
+    //
+    // Radius now goes as the SQUARE ROOT of luminance, because a disc's area is
+    // what carries tone and area goes as r^2. A linear radius spends most of its
+    // travel in the dark end and crushes the highlights, which is exactly where
+    // the merging should be happening.
+    float t = saturate(lum);
+    return (0.05f + 0.75f * sqrt(t))
+         * (0.94f + 0.06f * sin(time * 0.9f + phase * 6.28f));
 }
 
 /// Draw the face of one mosaic block.
@@ -2462,7 +2482,12 @@ inline float3 styleCell(float3 col, float2 cuv, float cellPx, float lum,
         // about what is near even though they show it completely differently.
         float ln = saturate(lum);
         float near = saturate(hNorm);
-        float dotR = dotRadius(lum, time, phase) * (0.80f + 0.38f * near);
+        // Depth barely touches the SIZE any more. Size is the halftone's job —
+        // it is how tone is carried — and a depth term with a 0.38 swing on it
+        // was overriding that, pulling bright dots back below the radius where
+        // they merge. Distance now shows itself almost entirely in contrast
+        // against the gap, below.
+        float dotR = dotRadius(lum, time, phase) * (0.94f + 0.10f * near);
         float d = length(cuv - 0.5f);
         float aa = 0.5f / cellPx;                 // half-pixel feather, no aliasing
         float m = 1.0f - smoothstep(dotR - aa, dotR + aa, d);
