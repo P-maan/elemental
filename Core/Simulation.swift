@@ -1181,7 +1181,9 @@ final class SceneSimulation {
         // width. A dock spanning most of the screen catches far more than one
         // small widget, and that ratio is the whole of why they look different.
         var lipWidth: Float = 0
-        for s in surfaces where marks(s.kind) { lipWidth += s.w }
+        // Weighted by each lip's own wetness, so a widget turned down throws
+        // proportionally less spray rather than the same amount as its neighbour.
+        for s in surfaces where marks(s.kind) { lipWidth += s.w * max(0, min(1, s.wetness)) }
         guard lipWidth > 0 else { sprayAccum = 0; return }
         let widthFrac = min(2.5, lipWidth / max(W, 1))
 
@@ -1749,9 +1751,14 @@ final class SceneSimulation {
         // material only says how much of it this object is able to keep.
         for i in 0..<films.count {
             let m = surfaces[i].material
-            let cap = min(1, m.retention)
+            // Per-element control, on top of the material's own ceiling. A
+            // widget the user has turned down is drier than an identical one
+            // beside it, which the global switch could never express — it could
+            // only say "widgets, all of them, yes or no".
+            let own = max(0, min(1, surfaces[i].wetness))
+            let cap = min(1, m.retention) * own
             films[i].lip = min(films[i].lip, cap)
-            films[i].wet = min(films[i].wet, min(1, m.retention * 0.85))
+            films[i].wet = min(films[i].wet, min(1, m.retention * 0.85) * own)
             if m.shed > 1 {
                 // Sheds faster than the baseline: drain the excess.
                 let drain = dt * 0.30 * (m.shed - 1)

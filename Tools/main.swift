@@ -531,7 +531,10 @@ if args["dock"] != nil || args["widget"] != nil {
     if args["widget"] != nil {
         let wW = W * 0.26, wH = H * 0.20
         out.append(Surface(x: W * 0.09, y: H * 0.30, w: wW, h: wH, kind: .widget))
-        out.append(Surface(x: W * 0.63, y: H * 0.16, w: wW * 0.8, h: wH * 0.7, kind: .widget))
+        // Second widget takes --widgetwet, so per-element wetness is testable:
+        // two identical lips in the same rain, one turned down.
+        out.append(Surface(x: W * 0.63, y: H * 0.16, w: wW * 0.8, h: wH * 0.7,
+                           kind: .widget, wetness: Float(num("widgetwet", 1))))
     }
     renderer.surfaces = out
 }
