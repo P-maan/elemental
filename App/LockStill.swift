@@ -213,6 +213,11 @@ final class LockStillExporter {
         CGImageDestinationAddImage(dest, img, nil)
         guard CGImageDestinationFinalize(dest) else { return }
 
+        // BEFORE the first overwrite, and only ever once — see `captureOriginal`.
+        // Elemental replaces the desktop picture permanently, and until now
+        // nothing anywhere remembered what was there first.
+        Self.captureOriginal(screens: screens)
+
         for screen in screens {
             try? NSWorkspace.shared.setDesktopImageURL(fileURL, for: screen, options: [:])
         }
@@ -300,6 +305,94 @@ final class LockStillExporter {
         // The old fixed names are deliberately NOT deleted: the store may still
         // reference one, and removing it is what left the lock screen pointing
         // at nothing. mirrorToReferencedPaths keeps them current instead.
+    }
+
+    // MARK: - The wallpaper that was there first
+
+    /// Where the user's own desktop picture is remembered.
+    ///
+    /// A plain JSON sidecar rather than a Config field, deliberately. This has
+    /// to survive things Config does not: a corrupt preferences file, a reset to
+    /// defaults, a reinstall, and a user who has never opened Settings. Losing
+    /// it is not a cosmetic failure — it means somebody's wallpaper is gone with
+    /// no way back.
+    private static var originalRecordURL: URL {
+        Config.directory.appendingPathComponent("original-wallpaper.json")
+    }
+
+    /// What was on each display before Elemental first touched it.
+    private struct OriginalWallpaper: Codable {
+        /// Keyed by display name, because `NSScreen` identity does not survive a
+        /// relaunch and a raw index silently reassigns itself when a monitor is
+        /// unplugged — which would restore the wrong picture to the wrong screen.
+        var byScreen: [String: String] = [:]
+        var capturedAt: Date = Date()
+    }
+
+    /// Remember the user's own wallpaper, ONCE, before we replace it.
+    ///
+    /// Elemental permanently replaces the desktop picture, and nothing here ever
+    /// recorded what was there first — so the honest description of the feature
+    /// was "this takes your wallpaper and there is no way back". This is the way
+    /// back.
+    ///
+    /// WRITTEN ONCE AND NEVER UPDATED, which is the whole correctness argument.
+    /// The obvious implementation — read the current wallpaper each time before
+    /// overwriting — destroys the thing it is trying to save: the second export
+    /// reads back Elemental's own still and records THAT as the original, so
+    /// after two minutes the "original" is a picture of the sky and the user's
+    /// real wallpaper is gone. So the file is created if absent and otherwise
+    /// left completely alone, and any path inside our own directory is refused
+    /// even on that first write, in case a previous install got there first.
+    static func captureOriginal(screens: [NSScreen]) {
+        let fm = FileManager.default
+        guard !fm.fileExists(atPath: originalRecordURL.path) else { return }
+
+        var rec = OriginalWallpaper()
+        for screen in screens {
+            guard let url = NSWorkspace.shared.desktopImageURL(for: screen) else { continue }
+            // Never record one of our own stills as the original.
+            if url.path.hasPrefix(Config.directory.path) { continue }
+            let key = screen.localizedName
+            rec.byScreen[key] = url.path
+        }
+        // Nothing worth saving — every display was already showing an Elemental
+        // still. Do NOT write an empty record: that would permanently mark the
+        // original as captured and block a real capture later.
+        guard !rec.byScreen.isEmpty else { return }
+
+        try? fm.createDirectory(at: Config.directory, withIntermediateDirectories: true)
+        guard let data = try? JSONEncoder().encode(rec) else { return }
+        try? data.write(to: originalRecordURL)
+        NSLog("Elemental: remembered original wallpaper for %d display(s)", rec.byScreen.count)
+    }
+
+    /// Put the user's own wallpaper back. Returns false if there is nothing to
+    /// restore, or if the file it named has since been deleted.
+    @discardableResult
+    static func restoreOriginal() -> Bool {
+        guard let data = try? Data(contentsOf: originalRecordURL),
+              let rec = try? JSONDecoder().decode(OriginalWallpaper.self, from: data),
+              !rec.byScreen.isEmpty else { return false }
+
+        var restored = 0
+        for screen in NSScreen.screens {
+            guard let path = rec.byScreen[screen.localizedName] else { continue }
+            // The picture may have been moved or deleted in the meantime. A
+            // missing file would set the desktop to nothing at all, which is a
+            // worse outcome than leaving the sky up.
+            guard FileManager.default.fileExists(atPath: path) else { continue }
+            try? NSWorkspace.shared.setDesktopImageURL(URL(fileURLWithPath: path),
+                                                      for: screen, options: [:])
+            restored += 1
+        }
+        return restored > 0
+    }
+
+    /// Whether there is a remembered wallpaper to go back to — for Settings, so
+    /// the button can say what it will actually do.
+    static var hasOriginal: Bool {
+        FileManager.default.fileExists(atPath: originalRecordURL.path)
     }
 
     private func makeImage(from tex: MTLTexture, width: Int, height: Int) -> CGImage? {
