@@ -41,7 +41,27 @@ CORE=(Core/SceneState.swift Core/Astro.swift Core/Simulation.swift \
       Core/Furniture.swift Core/Observation.swift Core/Calibration.swift \
       Core/SkyImagery.swift Core/Updater.swift Core/ShaderSource.swift)
 
-SWIFTFLAGS=(-O -wmo)
+# ---------------------------------------------------------------- deployment
+#
+# THE DEPLOYMENT TARGET MUST BE EXPLICIT, and leaving it out is not a harmless
+# omission — it silently ships a build that only runs on the machine that made
+# it. With no `-target`, swiftc takes its minimum from the BUILD HOST, so a Mac
+# on macOS 27 produces a binary stamped `minos 27.0`, and every older Mac
+# refuses to launch it. Measured on the released 0.2: `vtool -show-build` gave
+# minos 27.0 while Info.plist advertised LSMinimumSystemVersion 14.0, so the
+# package installed happily on macOS 26 and then would not open. Exactly the
+# machines this is meant for — the family laptops nobody upgrades — were the
+# ones locked out, and nothing in the build said so.
+#
+# Pinned to the SAME version Info.plist claims, so the two cannot drift apart
+# again. This also buys a compile-time safety net: with the floor at 14.0,
+# swiftc REFUSES to compile an unguarded call to any API newer than 14, so
+# "works here, crashes on their Mac" turns into a build error here instead.
+#
+# Check the result, never assume it:  vtool -show-build build/Elemental.app/Contents/MacOS/Elemental
+DEPLOY_TARGET="$(uname -m)-apple-macos14.0"
+
+SWIFTFLAGS=(-O -wmo -target "$DEPLOY_TARGET")
 
 # ---------------------------------------------------------------- targets
 
