@@ -59,9 +59,55 @@ CORE=(Core/SceneState.swift Core/Astro.swift Core/Simulation.swift \
 # "works here, crashes on their Mac" turns into a build error here instead.
 #
 # Check the result, never assume it:  vtool -show-build build/Elemental.app/Contents/MacOS/Elemental
-DEPLOY_TARGET="$(uname -m)-apple-macos14.0"
+DEPLOY_MIN="14.0"
 
-SWIFTFLAGS=(-O -wmo -target "$DEPLOY_TARGET")
+# ---------------------------------------------------------------- architecture
+#
+# AND THE SAME MISTAKE ON THE OTHER AXIS. Pinning the OS floor above fixed half
+# the problem; `uname -m` left the ARCHITECTURE taken from the build host, so an
+# Apple Silicon Mac produced an arm64-only binary and no Intel Mac could launch
+# it at any OS version. Confirmed on the released 0.2 with `lipo -info`:
+# "Non-fat file: ... is architecture: arm64". Same failure, same cause — a build
+# quietly inheriting a property of the machine that made it — and again it was
+# invisible from here, because the machine that built it is the one machine it
+# was guaranteed to run on.
+#
+# Universal by default. An Intel family laptop is exactly the machine this is
+# for, and it is the one that would never have reported the problem.
+#
+# ELEMENTAL_ARCHS=arm64 halves build time for local iteration. That is a real
+# convenience and also a real hazard, which is why package.sh REFUSES to build
+# an installer from a thin binary — the fast path cannot escape into a release.
+# Unquoted on purpose: this file runs under bash (see the shebang), where an
+# unquoted expansion word-splits, which is exactly what turns "arm64 x86_64"
+# into two array elements. Do not "fix" it by quoting.
+# shellcheck disable=SC2206
+ARCHES=(${ELEMENTAL_ARCHS:-arm64 x86_64})
+
+SWIFTFLAGS=(-O -wmo)
+
+# Build one product for every architecture, then join the slices.
+#
+# swiftc takes a single -target, so a universal binary is N compiles and a
+# lipo. A failing slice is a HARD ERROR rather than a warning: the whole point
+# here is that a build cannot silently narrow what it runs on.
+swift_build() {
+  local out="$1"; shift
+  local slices=() a slice
+  for a in "${ARCHES[@]}"; do
+    slice="${out}.${a}"
+    swiftc "${SWIFTFLAGS[@]}" -target "${a}-apple-macos${DEPLOY_MIN}" \
+      -o "$slice" "$@"
+    slices+=("$slice")
+  done
+  # bash arrays are 0-indexed. This file's shebang is bash, not zsh.
+  if (( ${#slices[@]} == 1 )); then
+    mv -f "${slices[0]}" "$out"
+  else
+    lipo -create "${slices[@]}" -output "$out"
+    rm -f "${slices[@]}"
+  fi
+}
 
 # ---------------------------------------------------------------- targets
 
@@ -155,7 +201,7 @@ notarize_bundle() {
 
 build_render() {
   echo "==> elemental-render (offscreen still exporter)"
-  swiftc "${SWIFTFLAGS[@]}" -o "$BUILD/elemental-render" \
+  swift_build "$BUILD/elemental-render" \
     "${CORE[@]}" Tools/main.swift \
     -framework Metal -framework CoreGraphics -framework ImageIO \
     -framework UniformTypeIdentifiers -framework Foundation
@@ -186,7 +232,7 @@ build_app() {
   # and checked in, so a build needs no icon toolchain — see App/AppIcons.swift.
   cp Icons/Elemental00*.icns "$APP/Contents/Resources/"
   cp Icons/Elemental002.icns "$APP/Contents/Resources/AppIcon.icns"
-  swiftc "${SWIFTFLAGS[@]}" -o "$APP/Contents/MacOS/Elemental" \
+  swift_build "$APP/Contents/MacOS/Elemental" \
     "${CORE[@]}" App/*.swift \
     -framework AppKit -framework Metal -framework QuartzCore \
     -framework CoreLocation -framework ImageIO -framework UniformTypeIdentifiers
@@ -202,8 +248,8 @@ build_saver() {
   # -Xlinker -bundle produces an MH_BUNDLE. A plain -emit-library gives an
   # MH_DYLIB, which CFBundle will not load as a plug-in — the saver then shows
   # up in System Settings and renders grey.
-  swiftc "${SWIFTFLAGS[@]}" -emit-library -Xlinker -bundle \
-    -o "$SAV/Contents/MacOS/Elemental" \
+  swift_build "$SAV/Contents/MacOS/Elemental" \
+    -emit-library -Xlinker -bundle \
     "${CORE[@]}" Saver/*.swift \
     -module-name Elemental \
     -framework ScreenSaver -framework AppKit -framework Metal -framework QuartzCore

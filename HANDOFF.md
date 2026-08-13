@@ -109,6 +109,32 @@ open -g build/Elemental.app
    `--check` has always done. The semaphore pattern is only safe for plain async
    functions with no actor hop, like `SkyImagery.radar`.
 
+13. **A build silently inherits the machine that made it — on TWO axes.** Both
+   shipped in 0.2 and neither was visible from the build machine, because that
+   is the one machine the result was guaranteed to run on.
+   - **OS floor.** With no `-target`, swiftc takes its minimum from the host. On
+     macOS 27 that stamped `minos 27.0` while `Info.plist` advertised
+     `LSMinimumSystemVersion 14.0`, so the package installed happily on macOS 26
+     and then would not open.
+   - **Architecture.** `uname -m` left the arch as the host's, so the build was
+     arm64-only (`lipo -info` → "Non-fat file: ... arm64") and no Intel Mac
+     could launch it at any OS version.
+
+   Both are now pinned in `build.sh` (`DEPLOY_MIN`, `ARCHES`) and, more
+   importantly, **`package.sh` verifies rather than trusts** — it refuses to
+   build an installer unless the binary carries both slices and its real `minos`
+   matches what `Info.plist` promises. `ELEMENTAL_ARCHS=arm64` halves build time
+   for iteration and cannot reach a `.pkg`.
+
+   Check, never assume:
+   `lipo -archs build/Elemental.app/Contents/MacOS/Elemental`
+   `vtool -show-build build/Elemental.app/Contents/MacOS/Elemental`
+
+14. **`build.sh` runs under BASH** (see the shebang) even though the interactive
+   shell here is zsh. `read -A`, `${=var}` and 1-based array indexing are zsh
+   and are all wrong in that file; bash arrays are 0-indexed and unquoted
+   expansions word-split. The reverse trap (#2) still applies at the prompt.
+
 ## Recurring bug classes
 
 Most real bugs found here were one of four shapes. Look for them first:

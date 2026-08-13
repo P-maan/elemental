@@ -50,6 +50,42 @@ fi
 
 [[ -d build/Elemental.app ]] || { echo "error: build/Elemental.app missing"; exit 1; }
 
+# ---- Refuse to ship a build that only runs on the machine that made it.
+#
+# Two releases went out narrowed to their build host without anything saying so.
+# 0.2 was stamped minos 27.0 while its Info.plist advertised 14.0, so it
+# installed on macOS 26 and then would not open; it was also arm64-only, so no
+# Intel Mac could launch it at all. Both came from build.sh inheriting a
+# property of this machine, and both were invisible from this machine, because
+# it is the one machine the result was guaranteed to work on.
+#
+# So the installer checks rather than trusts. ELEMENTAL_ARCHS=arm64 stays
+# available for fast local iteration; it just cannot reach a .pkg.
+BIN="build/Elemental.app/Contents/MacOS/Elemental"
+ARCHS_BUILT="$(lipo -archs "$BIN" 2>/dev/null || echo "")"
+MINOS_BUILT="$(vtool -show-build "$BIN" 2>/dev/null | awk '/minos/{print $2; exit}')"
+PLIST_MIN="$(defaults read "$PWD/App/Info.plist" LSMinimumSystemVersion 2>/dev/null || echo "?")"
+
+if [[ "${ELEMENTAL_ALLOW_THIN:-}" != "1" ]]; then
+  for want in arm64 x86_64; do
+    case " $ARCHS_BUILT " in
+      *" $want "*) ;;
+      *) echo "error: $BIN is missing the $want slice (has: ${ARCHS_BUILT:-none})."
+         echo "       An installer must run on every Mac, not just this one."
+         echo "       Rebuild with ./build.sh, or set ELEMENTAL_ALLOW_THIN=1 to override."
+         exit 1 ;;
+    esac
+  done
+fi
+# The binary's real floor must match what Info.plist promises. A package that
+# advertises 14.0 and refuses to launch below 27 is worse than one that says so.
+if [[ "$MINOS_BUILT" != "$PLIST_MIN" ]]; then
+  echo "error: binary minos is $MINOS_BUILT but Info.plist says $PLIST_MIN."
+  echo "       Fix DEPLOY_MIN in build.sh or LSMinimumSystemVersion in App/Info.plist."
+  exit 1
+fi
+echo "==> verified: $ARCHS_BUILT, minos $MINOS_BUILT"
+
 STAGE="$(mktemp -d)"
 SCRIPTS="$(mktemp -d)"
 trap 'rm -rf "$STAGE" "$SCRIPTS"' EXIT
