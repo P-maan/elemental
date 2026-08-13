@@ -553,6 +553,71 @@ struct WeatherState: Equatable, Codable {
     /// Fraction of the surrounding ~900 km carrying echo, 0..1. -1 unmeasured.
     var radarCoverage: Float = -1
 
+    // MARK: - Satellite
+    //
+    // The same argument radar makes about rain, made about cloud. Open-Meteo
+    // gives three percentages for one grid box and says nothing about how the
+    // cloud is arranged inside it, so the deck has always been noise shaped to
+    // hit an average — the coverage right, the arrangement invented. Infrared
+    // supplies the arrangement, and because a thermal channel measures how cold
+    // each column's top is, it supplies the height as well.
+
+    /// What the satellite saw, or nil if none answered.
+    ///
+    /// ONE OPTIONAL RATHER THAN FOUR SENTINEL FIELDS, and that is a
+    /// compatibility decision rather than a stylistic one. This struct is
+    /// encoded whole into the preferences bridge the screen saver reads, and
+    /// Swift's synthesized `Codable` does NOT fall back to a property's default
+    /// when a key is missing — it throws. So every bare field added here breaks
+    /// decoding of every payload written by the previous version, and the saver
+    /// answers with a default clear sky until the app happens to publish again.
+    /// That is exactly the "saver is not following the weather" failure, bought
+    /// for the price of adding a field.
+    ///
+    /// An Optional decodes through `decodeIfPresent`, so a payload that predates
+    /// this simply yields nil — which is already the correct reading of "nobody
+    /// looked". Nesting also means the next satellite field costs no
+    /// compatibility at all, because the key it lands inside already exists.
+    var sat: SatelliteLook?
+
+    /// The LOW deck's cover after the satellite has had its say, 0..1.
+    ///
+    /// The model is a forecast for a grid box tens of kilometres wide; the
+    /// satellite is a photograph of the sky above the roof. Where they disagree
+    /// about whether anything is overhead, the photograph should win — the same
+    /// reasoning that lets radar overrule modelled rain, and the same failure it
+    /// fixes: a scene drawn overcast because the forecast expected cloud
+    /// somewhere in the box, on an afternoon with a hole over the house.
+    ///
+    /// But ONLY the low deck, and only when the tops are warm, and that
+    /// restriction is the whole subtlety here. Infrared measures the top of the
+    /// atmosphere and nothing underneath it, so a sheet of cirrus at ten
+    /// kilometres and a closed stratus lid at three hundred metres both read as
+    /// "cloud overhead" while being the two skies the altitude split exists to
+    /// tell apart. Letting raw satellite presence drive this would regrow
+    /// exactly the bug `Simulation.swift` removed when it stopped high cirrus
+    /// from raising a quarter-strength lid.
+    ///
+    /// Temperature separates them. A warm top IS the low deck, because there is
+    /// nothing above it to be seen instead; a cold top is cirrus or deep
+    /// convection and says nothing about what is beneath. So the satellite's
+    /// share of the answer scales with how warm the tops are, and against high
+    /// cloud it fades to zero and hands the question back to the model, which is
+    /// the only source that knows what is underneath.
+    ///
+    /// Degrades to the modelled value exactly when no satellite answered.
+    var reconciledLowCloud: Float {
+        let modelled = cloudLow / 100
+        guard let s = sat else { return modelled }
+        // 1 where the tops are warm enough to be the low deck itself, falling to
+        // 0 by the time they are cold enough to be cirrus over the top of it.
+        let warm = 1 - max(0, min(1, (s.topness - 0.35) / 0.35))
+        // Scaled by how square-on the view is. A limb view has no business
+        // overruling a forecast — see `SatelliteLook.confidence`.
+        let share = 0.5 * warm * s.confidence
+        return max(0, min(1, modelled * (1 - share) + s.here * share))
+    }
+
     /// How much is falling, after the radar has had its say.
     ///
     /// The model still supplies the RATE — radar tiles give echo strength, not

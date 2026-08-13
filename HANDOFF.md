@@ -87,6 +87,28 @@ open -g build/Elemental.app
    MUST be added there or it silently fails to load. Every stored property must
    be covered.
 
+11. **`WeatherState` uses SYNTHESIZED `Codable`, which is strict.** Swift does
+   *not* fall back to a property's default value when a key is missing — it
+   throws `keyNotFound`. `WeatherState` is encoded whole into the ByHost
+   preferences bridge the saver reads, so **adding a bare stored property breaks
+   decoding of every payload written by the previous version**, and the saver
+   answers with a default clear sky until the app happens to publish again.
+   That is precisely the "saver is not following the weather" symptom, and it
+   arrives one release *after* the change that caused it. Add new readings as a
+   nested `Optional` struct (see `WeatherState.sat`) — Optionals decode through
+   `decodeIfPresent`, so an older payload yields nil, which is already the right
+   reading of "nobody looked". Verified both directions with a scratch binary;
+   old code reading a new payload is fine, because unknown keys are ignored.
+
+12. **Never block the main thread waiting on `WeatherService.fetch`.** It hops to
+   the main actor to publish its reading, so a `DispatchSemaphore.wait` on main
+   deadlocks it. The failure is deceptive: radar and satellite have already
+   logged their success by then, so the probe prints a working satellite next to
+   "model unavailable" and reads exactly like a fetch failure. Pump instead —
+   `while !done { RunLoop.main.run(mode: .default, before: …) }`, which is what
+   `--check` has always done. The semaphore pattern is only safe for plain async
+   functions with no actor hop, like `SkyImagery.radar`.
+
 ## Recurring bug classes
 
 Most real bugs found here were one of four shapes. Look for them first:

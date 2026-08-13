@@ -31,10 +31,47 @@ refines a cell only when the source varies across it.
 | Open-Meteo | Cloud by altitude, precipitation, wind, UV, visibility, air quality |
 | METAR | Ground truth from the nearest aerodrome — ceiling, obscuration, present weather |
 | RainViewer radar | Whether precipitation is overhead, and where it is |
+| Geostationary infrared | Where the cloud is, and how cold its tops are |
 
 Everything degrades. No network gives you a correct sky for your location and
 time of day; no location permission falls back to a longitude estimated from
-your timezone; no radar leaves the precipitation model exactly as it was.
+your timezone; no radar leaves the precipitation model exactly as it was; no
+satellite leaves the cloud deck exactly as it was.
+
+### Where the cloud is
+
+A forecast gives three percentages for a grid box tens of kilometres wide and
+says nothing about how the cloud inside it is arranged, so the deck used to be
+noise shaped to hit that average — the amount right, the arrangement invented.
+Infrared fixes the arrangement, and because a thermal channel measures how cold
+each column's top is, it also says which deck the cloud belongs to.
+
+No single free keyless service covers the planet, so it takes two publishers:
+
+| Satellite | Longitude | Via | Covers |
+| --- | --- | --- | --- |
+| GOES-West | 137.0°W | NASA GIBS | Pacific, western North America |
+| GOES-East | 75.2°W | NASA GIBS | the Americas, western Atlantic |
+| Meteosat | 0.0° | EUMETSAT | Europe, Africa, eastern Atlantic |
+| Meteosat IODC | 45.5°E | EUMETSAT | Middle East, India, Indian Ocean |
+| Himawari | 140.7°E | NASA GIBS | east Asia, Australia, west Pacific |
+
+GIBS carries no Meteosat at all, which alone would leave Europe, Africa and
+western India with nothing.
+
+The nearest satellite is chosen by true viewing angle — a great-circle distance
+from the point it hangs over, not latitude and longitude tested separately,
+because those do not trade off independently. How far off nadir a place sits
+then decides how much its image is believed: full weight out to 45°, fading to
+none by 70°, and nothing at all beyond that. A satellite looking at your sky
+edge-on smears cloud well away from where it really is, and a reading like that
+has no business overruling a forecast.
+
+The satellite **redistributes** cloud without rescaling it: the profile is
+divided by its own mean before it is applied, so it moves the deck from where
+there is a gap to where there is a mass and leaves the total to the model. It is
+allowed to change the amount only for the low deck, and only when the tops are
+warm enough to be that deck rather than cirrus sitting over the top of it.
 
 **Central principle: measurement beats classification.** Behaviour is gated on
 something measured rather than on a weather-code bucket, and every term degrades
@@ -214,6 +251,10 @@ claim here was checked.
 # What the radar sees: coverage, whether it is overhead, and a west-to-east bar
 ./build/elemental-render --radar --lat 51.5 --lon -0.12
 
+# What the satellite sees, against what the model predicted. The number that
+# matters is the disagreement — that is where the sky used to be drawn wrong.
+./build/elemental-render --satellite --lat 51.5 --lon -0.12
+
 # Water simulation counters — splashes, films, droplets
 ./build/elemental-render --kind rain --rain 8 --dock --widget --warmup 900 --water
 
@@ -229,7 +270,7 @@ Time is `--at 2026-08-11T19:45 --tz Asia/Kolkata`. There is no `--hour`.
 Core/Scene.metal        the engine — cell pass, height field, presentation
 Core/SceneState.swift   GPU uniform mirror, WeatherState and its derived layer
 Core/Simulation.swift   the stateful half: streaks, droplets, films, lightning
-Core/SkyImagery.swift   radar composite: where the precipitation actually is
+Core/SkyImagery.swift   radar and satellite: where the weather actually is
 Core/Weather.swift      Open-Meteo    Core/Observation.swift  METAR
 Core/Astro.swift        ephemeris, lunar eclipse
 Core/Renderer.swift     Metal host, scene clock, wake replay, weather easing

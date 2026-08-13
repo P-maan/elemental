@@ -112,7 +112,15 @@ final class WeatherService {
         // cloud split, the model carries no position and no ground truth.
         async let echo = SkyImagery.radar(lat: lat, lon: lon)
 
-        guard var w = await wx else { _ = await obs; _ = await echo; return nil }
+        // And where the CLOUD actually is. The model gives three percentages
+        // and no arrangement; infrared gives the arrangement and how cold the
+        // tops are. Fetched alongside for the same reason as radar — neither
+        // source can replace the other.
+        async let sat = SkyImagery.satellite(lat: lat, lon: lon)
+
+        guard var w = await wx else {
+            _ = await obs; _ = await echo; _ = await sat; return nil
+        }
         if let r = await echo {
             w.radarEcho = r.here
             w.radarCoverage = r.coverage
@@ -120,6 +128,12 @@ final class WeatherService {
             NSLog("Elemental: %@", SkyImagery.describe(r))
         } else {
             _ = await echo
+        }
+        if let s = await sat {
+            w.sat = s
+            NSLog("Elemental: %@", SkyImagery.describe(s))
+        } else {
+            _ = await sat
         }
         if let a = await air {
             w.aqi = a.aqi

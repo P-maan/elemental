@@ -583,7 +583,10 @@ final class SceneSimulation {
         // cover figure with no breakdown — an older cache, a partial fetch. Then
         // it all goes in the low deck, matching the same fallback in Renderer,
         // because that is the reading that hides the most.
-        var deckCover = w.cloudLow / 100
+        // Satellite-reconciled where a satellite answered and the tops are warm
+        // enough to be this deck rather than something above it; the plain
+        // modelled figure otherwise. See `reconciledLowCloud`.
+        var deckCover = w.reconciledLowCloud
         if w.cloudLow + w.cloudMid + w.cloudHigh < 2 && w.cover > 2 { deckCover = covF }
         deckCover = max(0, min(1, deckCover))
         updateCloudEdge(sec: sec, covF: deckCover, weather: w)
@@ -666,6 +669,61 @@ final class SceneSimulation {
             let p = prof <= knee ? prof
                   : 1 - (1 - knee) * expf(-(prof - knee) / (1 - knee))
             edgeArr[c] = prof <= 0 ? 0 : depth * (0.25 + 0.75 * p)
+        }
+        applySatelliteToDeck(weather: w)
+    }
+
+    /// Put the deck where the satellite says the cloud actually is.
+    ///
+    /// Everything above this line is invented. `n` is three sine waves, and its
+    /// only claim is that the deck averages out to the measured cover — so the
+    /// AMOUNT of cloud has always been right and its ARRANGEMENT has always been
+    /// fiction. On a broken-cloud afternoon that is the most visible remaining
+    /// lie in the scene, because the one thing anybody can check by looking up
+    /// is whether there is a hole where the window is showing one.
+    ///
+    /// REDISTRIBUTES, it does not rescale. The profile is divided by its own
+    /// mean before it is applied, so this moves cloud from where the satellite
+    /// sees a gap to where it sees a mass and leaves the total alone. That
+    /// split is the honest one: infrared sees the top of the atmosphere and can
+    /// say where cloud is but not how deep it runs, while the model knows the
+    /// depth and nothing about the shape. Taking the amount from the satellite
+    /// as well would throw away the better source for it and double-count the
+    /// coverage that `reconciledLowCloud` has already weighed.
+    ///
+    /// Blended for the same two reasons radar is: the sampled window is far
+    /// wider than the strip of sky a window shows, so applying it raw would
+    /// compress a frontal system into the frame; and a limb view has navigation
+    /// error the procedural field does not. So it biases the deck rather than
+    /// dictating it, and with no satellite the field is exactly what it was.
+    private func applySatelliteToDeck(weather w: WeatherState) {
+        guard let s = w.sat, s.profile.count >= 4, !edgeArr.isEmpty else { return }
+        let prof = s.profile
+        let mean = prof.reduce(0, +) / Float(prof.count)
+        // A near-empty profile has no arrangement to contribute, and dividing
+        // by it would turn sensor noise into cloud banks.
+        guard mean > 0.02 else { return }
+
+        for c in 0..<cols {
+            // Same mapping radar uses, so the two describe the same piece of
+            // sky: the centre of the frame is the centre of the sampled window
+            // and the frame spans a modest slice of it.
+            let t = (Float(c) / Float(max(1, cols - 1)) - 0.5) * 0.42 + 0.5
+            let fi = t * Float(prof.count - 1)
+            let i0 = max(0, min(prof.count - 1, Int(fi)))
+            let i1 = min(prof.count - 1, i0 + 1)
+            let f = fi - Float(i0)
+            let cloud = prof[i0] * (1 - f) + prof[i1] * f
+
+            // Relative to the window's own average: 1 is a typical column, 2 is
+            // twice the cloud of a typical one, 0 is a hole.
+            let rel = cloud / mean
+            // Faded out toward the limb: a grazing view displaces cloud far
+            // enough horizontally that arranging the deck by it would be
+            // confidently wrong rather than vaguely right.
+            let k: Float = 0.45 * s.confidence
+            let factor = max(0.25, min(2.2, 1 + (rel - 1) * k))
+            edgeArr[c] *= factor
         }
     }
 

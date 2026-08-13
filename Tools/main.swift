@@ -113,6 +113,74 @@ if args["radar"] != nil {
     exit(0)
 }
 
+// ---------------------------------------------------------------- --satellite
+//
+// What the geostationary infrared sees over a place: how much cloud, whether
+// any of it is overhead, how cold the tops are, and where the gaps are.
+//
+// Prints the model alongside, because the number that matters is not the
+// satellite's coverage on its own but whether it AGREES with Open-Meteo. Where
+// they disagree is exactly where the scene has been wrong — an overcast deck
+// drawn because the forecast expected cloud somewhere in a grid box tens of
+// kilometres wide, on an afternoon with a hole over the house.
+if args["satellite"] != nil {
+    let la = num("lat", 28.4453), lo = num("lon", 77.5148)
+    var wx: WeatherState?
+    var done = false
+    // Goes through the REAL path rather than calling SkyImagery directly, which
+    // matters more than it looks: `WeatherService.fetch` is where the satellite
+    // is actually consumed, so this exercises the wiring rather than a parallel
+    // copy of it.
+    //
+    // Pumped rather than blocked on a semaphore, which is not a style choice.
+    // `fetch` hops to the main actor to publish its reading, so parking the main
+    // thread in `DispatchSemaphore.wait` deadlocks it — and deadlocks it AFTER
+    // the radar and satellite logs have already printed, so the probe reported a
+    // perfectly working satellite alongside "model unavailable" and looked for
+    // all the world like a fetch failure. `--check` above pumps for this reason.
+    Task { wx = await WeatherService.fetch(lat: la, lon: lo); done = true }
+    let deadline = Date().addingTimeInterval(90)
+    while !done && Date() < deadline {
+        RunLoop.main.run(mode: .default, before: Date().addingTimeInterval(0.05))
+    }
+
+    guard let w = wx else {
+        print("model unavailable — no network, or the feed is rate limiting")
+        exit(0)
+    }
+    guard let s = w.sat else {
+        print("satellite unavailable for lat \(la) lon \(lo)")
+        print("  no geostationary sector within 70 deg of that longitude,")
+        print("  |lat| > 70, or the image would not decode")
+        exit(0)
+    }
+    print(SkyImagery.describe(s))
+
+    let p = s.profile
+    if !p.isEmpty {
+        let step = max(1, p.count / 48)
+        var bar = ""
+        var i = 0
+        while i < p.count {
+            let v = p[i]
+            bar += v < 0.08 ? "." : (v < 0.3 ? ":" : (v < 0.6 ? "+" : "#"))
+            i += step
+        }
+        print("  W \(bar) E   (cloud across ~900 km)")
+    }
+    print(String(format: "  model  low %.0f%%  mid %.0f%%  high %.0f%%",
+                 w.cloudLow, w.cloudMid, w.cloudHigh))
+    print(String(format: "  sat    overhead %.0f%%  area %.0f%%  tops %.2f (%@)",
+                 s.here * 100, s.coverage * 100, s.topness,
+                 s.topness < 0.35 ? "warm — this deck"
+                                  : (s.topness < 0.7 ? "mid" : "cold — above it")))
+    // The low deck is what the satellite is allowed to move, so that is the
+    // number worth printing: what the model said, and what it became.
+    print(String(format: "  deck   modelled %.0f%%  ->  drawn %.0f%%",
+                 w.cloudLow, w.reconciledLowCloud * 100))
+    exit(0)
+}
+
 // ---------------------------------------------------------------- --edr
 //
 // What headroom this machine's displays actually offer.
@@ -509,7 +577,13 @@ if args["live"] != nil {
     let svc = WeatherService()
     svc.onUpdate = { w in wx = w; done = true }
     svc.start(at: Coordinate(latitude: lat, longitude: lon))
-    let deadline = Date().addingTimeInterval(20)
+    // 45s, not 20. The reading now waits on the model, METAR, air quality,
+    // radar AND a satellite image, and the satellite alone allows 20 seconds —
+    // so the old deadline could expire mid-fetch and render DEFAULT weather
+    // while reporting only a line on stderr. A harness that quietly falls back
+    // to made-up conditions is the specific way this project has been fooled
+    // before, so the deadline has to sit above the sum of what it waits on.
+    let deadline = Date().addingTimeInterval(45)
     while !done && Date() < deadline {
         RunLoop.main.run(mode: .default, before: Date().addingTimeInterval(0.05))
     }
