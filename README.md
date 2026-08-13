@@ -260,6 +260,12 @@ claim here was checked.
 
 # Why the screen saver is wrong, named specifically
 ./build/elemental-render --saverhealth
+
+# MEASURE the wall instead of looking at it. Every visual fault in this project
+# was found by rendering a PNG and staring at it, which is slow and unreliable —
+# the faults that matter are statistical, not local. "Every tile carries the
+# same highlight" is invisible in one tile and obvious across a thousand.
+./build/elemental-render --analyze --rows 40 --kind rain --rain 4 --cover 90
 ```
 
 Time is `--at 2026-08-11T19:45 --tz Asia/Kolkata`. There is no `--hour`.

@@ -783,6 +783,190 @@ pixels.withUnsafeMutableBytes { p in
                  from: MTLRegionMake2D(0, 0, width, height), mipmapLevel: 0)
 }
 
+// ---------------------------------------------------------------- --analyze
+//
+// MEASURE THE WALL INSTEAD OF LOOKING AT IT.
+//
+// Every visual fault found in this project so far was found by rendering a PNG
+// and staring at it, which is slow, expensive, and — worse — unreliable, because
+// the faults that matter here are statistical rather than local. "Every tile
+// carries the same highlight" is invisible in any one tile and obvious in the
+// distribution across a thousand of them. So is "the grout spacing alternates",
+// and so is "the noise is periodic". Those are numbers, and a number can be
+// checked in a loop, by a subagent, at every grid density, for free.
+//
+// What each figure is FOR — every one of these corresponds to a real fault that
+// actually shipped in this codebase:
+//
+//   clone       Tiles are clones of each other. THE headline number. The
+//               per-tile pattern is taken with its own mean removed, so this
+//               measures SHAPE, not brightness — a wall may shade smoothly
+//               across the sky and still be a grid of identical pillows, which
+//               is exactly the state the engine is in. 1.00 is a perfect
+//               stamp; real material wants distinctly below 1.
+//
+//   hlSpread    Where the brightest point sits inside each tile, as a fraction
+//               of the cell. If the light is a distant source and nothing
+//               varies per tile, every highlight lands in the same spot and
+//               this collapses toward 0. It is the same fault as `clone`
+//               measured a different way, and it survives changes that game
+//               correlation.
+//
+//   pitchVar    Spread of the detected grout spacing. Catches the fractional
+//               pitch that made tiles alternate 42/43 px.
+//
+//   periodic    Strongest off-centre peak in the tile's own autocorrelation.
+//               Catches noise that repeats — the sin(x)*cos(y) roughness that
+//               came out as a woven cross-hatch scored high here.
+//
+//   clip        Fraction of pixels pinned at 0 or 255. Catches an effect that
+//               reads as "brighter" rather than "softer" and blows out.
+//
+//   chroma      Mean and spread of saturation. A material with no colour
+//               variance between tiles is a plastic one.
+//
+// Deliberately prints a flat, greppable line per metric so a script can diff two
+// runs, and does NOT judge — thresholds live with the caller, because what
+// counts as too uniform depends on the material being asked for.
+if args["analyze"] != nil {
+    let g = SceneSimulation.gridGeometry(pixelWidth: Float(width),
+                                         pixelHeight: Float(height),
+                                         gridRows: state.gridRows)
+    let sp = Int(g.pitch.rounded())
+    func lum(_ x: Int, _ y: Int) -> Float {
+        let i = y * rowBytes + x * 4
+        return 0.2126 * Float(pixels[i]) + 0.7152 * Float(pixels[i + 1])
+             + 0.0722 * Float(pixels[i + 2])
+    }
+
+    // ---- sample a block of interior tiles, avoiding the frame edges where the
+    // relief ramp deliberately flattens the lean.
+    let nx = max(1, min(24, width / sp - 4)), ny = max(1, min(24, height / sp - 4))
+    let x0 = max(1, (width / sp - nx) / 2), y0 = max(1, (height / sp - ny) / 2)
+    var tiles: [[Float]] = []
+    var hlx: [Float] = [], hly: [Float] = []
+    for ty in 0..<ny {
+        for tx in 0..<nx {
+            let ox = (x0 + tx) * sp, oy = (y0 + ty) * sp
+            guard ox + sp <= width, oy + sp <= height else { continue }
+            var t = [Float](repeating: 0, count: sp * sp)
+            var best: Float = -1, bx = 0, by = 0
+            for j in 0..<sp {
+                for i in 0..<sp {
+                    let v = lum(ox + i, oy + j)
+                    t[j * sp + i] = v
+                    if v > best { best = v; bx = i; by = j }
+                }
+            }
+            // Mean removed: we are asking about the PATTERN, not the tone.
+            let m = t.reduce(0, +) / Float(t.count)
+            for k in 0..<t.count { t[k] -= m }
+            tiles.append(t)
+            hlx.append(Float(bx) / Float(sp)); hly.append(Float(by) / Float(sp))
+        }
+    }
+
+    func corr(_ a: [Float], _ b: [Float]) -> Float {
+        var sab: Float = 0, saa: Float = 0, sbb: Float = 0
+        for k in 0..<min(a.count, b.count) { sab += a[k] * b[k]; saa += a[k] * a[k]; sbb += b[k] * b[k] }
+        let d = (saa * sbb).squareRoot()
+        return d > 1e-6 ? sab / d : 0
+    }
+    func sd(_ v: [Float]) -> Float {
+        guard v.count > 1 else { return 0 }
+        let m = v.reduce(0, +) / Float(v.count)
+        return (v.map { ($0 - m) * ($0 - m) }.reduce(0, +) / Float(v.count)).squareRoot()
+    }
+
+    // Pairwise correlation over a bounded sample — O(n^2) on a thousand tiles
+    // is pointless when a few hundred pairs already pin the mean.
+    var cs: [Float] = []
+    if tiles.count > 1 {
+        var i = 0
+        while i + 1 < tiles.count && cs.count < 400 {
+            cs.append(corr(tiles[i], tiles[i + 1]))
+            if i + 7 < tiles.count { cs.append(corr(tiles[i], tiles[i + 7])) }
+            i += 1
+        }
+    }
+    let clone = cs.isEmpty ? 0 : cs.reduce(0, +) / Float(cs.count)
+
+    // ---- grout spacing, from FULL-COLUMN means.
+    //
+    // The first version of this sampled five pixels at mid-height and took the
+    // darkest column in each cell-wide strip, and it was simply wrong: with
+    // relief in the frame the darkest column is often a block's shaded flank
+    // rather than the grout, so it reported 15px of spread on a grid whose
+    // pitch is an integer by construction. A metric that manufactures a defect
+    // is worse than no metric, because it sends you to fix the wrong thing.
+    //
+    // Grout is dark along its ENTIRE length, and nothing else in the frame is,
+    // so averaging each column over the full height separates it from local
+    // shading by a wide margin.
+    var colMean = [Float](repeating: 0, count: width)
+    for x in 0..<width {
+        var acc: Float = 0
+        for y in stride(from: 0, to: height, by: 2) { acc += lum(x, y) }
+        colMean[x] = acc / Float(max(1, (height + 1) / 2))
+    }
+    let overall = colMean.reduce(0, +) / Float(width)
+    // A grout column is a local minimum that is also meaningfully below the
+    // frame's own average, which rejects the shallow dips inside a wide tile.
+    var minima: [Int] = []
+    for x in 1..<(width - 1) {
+        if colMean[x] <= colMean[x - 1], colMean[x] < colMean[x + 1], colMean[x] < overall * 0.97 {
+            if let last = minima.last, x - last < max(3, sp / 3) {
+                if colMean[x] < colMean[last] { minima[minima.count - 1] = x }
+            } else {
+                minima.append(x)
+            }
+        }
+    }
+    var spacings: [Float] = []
+    for i in 1..<max(1, minima.count) { spacings.append(Float(minima[i] - minima[i - 1])) }
+    // Keep only spacings near the expected pitch; a missed line doubles the gap
+    // and would otherwise dominate the spread with an artefact of detection.
+    spacings = spacings.filter { abs($0 - Float(sp)) < Float(sp) * 0.5 }
+
+    // ---- periodicity inside a tile: strongest non-trivial autocorrelation lag.
+    var periodic: Float = 0
+    if let t0 = tiles.first, sp > 6 {
+        let base = corr(t0, t0)
+        for lag in 2..<(sp / 2) {
+            var shifted = [Float](repeating: 0, count: sp * sp)
+            for j in 0..<sp { for i in 0..<sp { shifted[j * sp + i] = t0[j * sp + ((i + lag) % sp)] } }
+            periodic = max(periodic, base > 0 ? corr(t0, shifted) : 0)
+        }
+    }
+
+    var clipLo = 0, clipHi = 0
+    var sats: [Float] = []
+    for y in stride(from: 0, to: height, by: 3) {
+        for x in stride(from: 0, to: width, by: 3) {
+            let i = y * rowBytes + x * 4
+            let r = Float(pixels[i]), gg = Float(pixels[i + 1]), b = Float(pixels[i + 2])
+            let mx = max(r, max(gg, b)), mn = min(r, min(gg, b))
+            if mx >= 254 { clipHi += 1 }; if mx <= 1 { clipLo += 1 }
+            sats.append(mx > 1 ? (mx - mn) / mx : 0)
+        }
+    }
+    let nSamp = Float(max(1, sats.count))
+    let satMean = sats.reduce(0, +) / nSamp
+
+    print("analyze  rows \(g.rows) cols \(g.cols) pitch \(sp)px  tiles \(tiles.count)")
+    print(String(format: "  clone     %.3f    (1.000 = every tile identical)", clone))
+    print(String(format: "  hlSpread  %.3f %.3f  (x,y sd of brightest point, cell fractions)",
+                 sd(hlx), sd(hly)))
+    print(String(format: "  pitchVar  %.3f px  (spread of grout spacing; 0 = perfectly even)",
+                 sd(spacings)))
+    print(String(format: "  periodic  %.3f    (tile autocorrelation peak; high = repeating grain)",
+                 periodic))
+    print(String(format: "  clip      %.2f%% white  %.2f%% black",
+                 Float(clipHi) / nSamp * 100, Float(clipLo) / nSamp * 100))
+    print(String(format: "  chroma    %.3f mean  %.3f sd", satMean, sd(sats)))
+    if args["out"] == nil { exit(0) }
+}
+
 // ---------------------------------------------------------------- --meteors
 //
 // Which shower is running, where its radiant is, and how many an hour.
