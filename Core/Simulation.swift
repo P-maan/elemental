@@ -481,13 +481,51 @@ final class SceneSimulation {
     /// OUR cell boundaries the screenshot has lost. Two independent derivations
     /// of the same grid is exactly the kind of thing that drifts, so there is
     /// one.
+    /// Rows to use when the user has not picked a number.
+    ///
+    /// A ROW COUNT IS THE WRONG THING TO FIX ACROSS DISPLAYS, which is why this
+    /// exists. Cell size is `height / rows`, so a fixed count gives a different
+    /// physical tile on every screen: 62 rows is a fine mosaic on a laptop and a
+    /// wall of bathroom tiles on a 27-inch monitor at the same viewing distance.
+    /// What should stay constant is how big a tile actually LOOKS, so the target
+    /// here is a cell size in POINTS — device-independent by definition — and
+    /// the row count falls out of whatever display it lands on.
+    ///
+    /// 21.5 pt is not invented: it is the cell size the user arrived at by hand
+    /// after living with it (62 rows on a 2658 px display at 2x), which is
+    /// better evidence than any reasoning from first principles about acuity.
+    static func autoRows(pixelHeight: Float, scale: Float) -> Int {
+        let targetPoints: Float = 21.5
+        let cell = max(6, (targetPoints * max(1, scale)).rounded())
+        // Bounded at both ends. Below about a dozen rows it stops being a mosaic
+        // and becomes colour blocking; past 160 the cells approach the point
+        // where the grid disappears and it is just a blurry photograph.
+        return max(12, min(160, Int((pixelHeight / cell).rounded())))
+    }
+
     static func gridGeometry(pixelWidth: Float, pixelHeight: Float,
-                             gridRows: Int) -> (cols: Int, rows: Int, pitch: Float) {
-        var sp = max(6, (pixelHeight / Float(max(1, gridRows))).rounded())
-        let r = max(1, Int((pixelHeight / sp).rounded()))
-        sp = pixelHeight / Float(r)
-        return (max(1, Int((pixelWidth / sp).rounded())),
-                max(1, Int((pixelHeight / sp).rounded())), sp)
+                             gridRows: Int,
+                             scale: Float = 2) -> (cols: Int, rows: Int, pitch: Float) {
+        // 0 means "choose for me".
+        let want = gridRows > 0 ? gridRows : autoRows(pixelHeight: pixelHeight, scale: scale)
+
+        // THE PITCH STAYS A WHOLE NUMBER OF PIXELS. It used to be rounded here
+        // and then immediately un-rounded by re-deriving it as height/rows so
+        // the rows filled the frame exactly — which put every tile boundary on
+        // a fractional pixel. Measured on the user's own display: 2658/62 =
+        // 42.87, so tiles alternated between 42 and 43 pixels wide and the
+        // grout came out visibly uneven, one line thin and the next thick,
+        // across the whole wall. A mosaic is judged on the regularity of its
+        // grid more than on anything happening inside a tile, so an exact fit
+        // to the frame is worth far less than tiles that are all the same size.
+        let sp = max(6, (pixelHeight / Float(max(1, want))).rounded())
+
+        // Rounded UP so the grid still covers the frame. With an integer pitch
+        // the last row and column can overhang by up to one cell; overhanging
+        // the screen edge is invisible, whereas rounding down would leave an
+        // unpainted strip along the bottom or the right.
+        return (max(1, Int((pixelWidth  / sp).rounded(.up))),
+                max(1, Int((pixelHeight / sp).rounded(.up))), sp)
     }
 
     func resize(pixelWidth: Float, pixelHeight: Float, gridRows: Int) {
