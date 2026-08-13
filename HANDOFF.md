@@ -62,6 +62,14 @@ open -g build/Elemental.app
 3. **A failed build leaves the previous binary in place**, so you will test stale
    code and conclude your change worked, or did nothing. Always check the build
    before believing a render.
+4a. **`--kind` IS NOT A FLAG EITHER**, and neither is anything else you assume.
+   `--kind rain` is silently ignored; weather comes from `--code N` (WMO), plus
+   `--rain`, `--cover` and friends. An unknown flag is accepted and dropped, so
+   the render looks plausible and answers a different question than the one you
+   asked. This has now cost time twice, under two different names. **Before
+   using a flag you have not personally seen work, grep for it:**
+   `grep -n '"kind"' Tools/main.swift` — no match means it does nothing.
+
 4. **`--hour` IS NOT A FLAG.** `elemental-render --hour 10` silently renders at
    the current wall clock and prints a reassuring summary. Every frame labelled
    with an hour that way was rendered at whatever time it happened to be. Use

@@ -2389,8 +2389,81 @@ struct Relief {
     float2 nrm;      // flank only: outward normal in screen axes
 };
 
-inline Relief castRelief(texture2d<float> heights, sampler s, float2 g,
-                         float cols, float rows, float hmax)
+// ---- THE BLOCK IS THE FACE, EXTRUDED.
+//
+// The face of a block is a superellipse: `styleCell` draws it from an exponent
+// `pw` that runs 8 (square) to 2 (circle) with `rounding`, inset to a half-width
+// `fill`. The SOLID, until now, was a full axis-aligned cell — the raycast below
+// marched a lattice of unit cells and took the cell boundary as the hit. So a
+// rounded tile sat on a square column, and wherever the column's flat side wall
+// showed past the rounded face you got a hard straight edge on a shape that has
+// no straight edges. It is most obvious exactly where the user saw it: on a
+// block that is RISING, where the side is widest.
+//
+// So the column's cross-section is the face's own outline. Three numbers carry
+// it from one to the other: the half-width `rad`, the corner radius `crr`, and
+// what is left as flat side, `ee = rad - crr`.
+//
+// ---- Why a rounded rectangle and not the superellipse itself.
+//
+// A ray against a superellipse of arbitrary exponent has no closed form; it
+// wants a root find, and at two `powr` per evaluation, several evaluations per
+// candidate cell and up to six cells per pixel, that is transcendental work in
+// the hundreds of millions per frame at full screen. A rounded rectangle is the
+// same family sampled differently — EXACT at both ends of the slider (corner 0
+// is the square, corner = rad is the circle, which is what pw 8 and pw 2 mean)
+// — and it intersects a ray with a slab test and at most one quadratic.
+//
+// The corner radius is fixed by making the two curves meet on the DIAGONAL as
+// well as on the axes, which is where a superellipse differs most from its box:
+// the superellipse reaches rad*sqrt2/2^(1/pw) at 45 degrees, the rounded box
+// reaches sqrt2*(rad - crr) + crr, and equating them gives the constant below.
+// The two outlines then agree at 0, 45 and 90 degrees, and BETWEEN those angles
+// the box runs a little INSIDE the superellipse — at most 3% of a half-cell,
+// well under a pixel at any usable pitch, and inside is the safe direction: the
+// silhouette is then set by the rounded outline and never by a wall standing
+// past it, which is the whole defect.
+//
+// ---- Why rounding 0 is left exactly alone.
+//
+// At rounding 0 the face is pw = 8, which is not quite a square — its corners
+// are already cut by 8% of the half-diagonal — and it is inset by splay. Handing
+// the column THAT outline changes every square-tile frame ever rendered: the
+// grout opens up, the sides stop meeting, and measured over a frame it moved
+// half the pixels. A square wall is not the bug. So the outline the column takes
+// ramps in with `rounding` itself: at 0 the solid is exactly the full cell it
+// has always been, and by 0.15 it is the face, which is where a tile has visibly
+// begun to round and the straight wall has become something you can see.
+inline float dotRadius(float lum, float time, float phase);   // defined in PASS B
+
+/// Half-width of a face that fills its cell. Splay pulls it in a little so the
+/// courses are not perfectly flush. Shared with `styleCell` so the solid and the
+/// face can never disagree about how big a block is.
+inline float cellFull(float splay)   { return 0.5f - 0.11f * splay; }
+/// The superellipse exponent, 8 (square) to 2 (circle). Also shared.
+inline float faceExp(float rounding) { return mix(8.0f, 2.0f, saturate(rounding)); }
+/// Corner radius of the equivalent rounded rectangle, as a fraction of the
+/// half-width. sqrt2/(sqrt2-1) = 3.4142136. Ramped to zero over the first sixth
+/// of the slider so a square block keeps its square column exactly.
+inline float faceCorner(float rounding) {
+    return 3.4142136f * (1.0f - exp2(-1.0f / faceExp(rounding)))
+         * smoothstep(0.0f, 0.15f, rounding);
+}
+/// How far the column follows the face's own width rather than filling its cell.
+/// Rounding brings it in; so does halftone, because there the face has genuinely
+/// shrunk and a bead has to extrude as a bead and not as a cell-wide post.
+inline float faceInset(float rounding, float halftone) {
+    return max(smoothstep(0.0f, 0.15f, rounding), saturate(halftone));
+}
+
+/// `full` is the face half-width at full size, `wIn` how far the column takes
+/// it (0 = the whole cell, as it always was), `cfrac` the corner radius as a
+/// fraction of that half-width, and `halftone`/`time` reproduce the per-cell
+/// shrink that makes tone out of size.
+inline Relief castRelief(texture2d<float> heights, texture2d<float> cells,
+                         sampler s, float2 g, float cols, float rows, float hmax,
+                         float full, float wIn, float cfrac,
+                         float halftone, float time)
 {
     Relief r;
     r.g = g; r.cell = floor(g); r.h = 0.0f; r.z = 0.0f;
@@ -2420,31 +2493,105 @@ inline Relief castRelief(texture2d<float> heights, sampler s, float2 g,
     float  uy  = abs((ci.y + max(stp.y, 0.0f)) - p.y) * ivy;
 
     float u = 0.0f, uHit = hmax, hHit = 0.0f;
-    float2 cHit = ci;
+    float2 cHit = ci, nHit = float2(0.0f);
     bool flank = false, done = false;
-    int axis = 0;
+    bool ht = (halftone > 0.001f);
 
     for (int i = 0; i < RELIEF_STEPS; ++i) {
-        float z0 = hmax - u;
-        float H  = cellHeight(heights, s, ci, cols, rows, hmax);
-        // Entered this cell already below its top: we are looking at its side.
-        // Never on the first cell — there the ray starts at the very top of the
-        // layer, where the only possible contact is a full-height top face.
-        if (i > 0 && H >= z0) {
-            uHit = u; hHit = H; cHit = ci; flank = true; done = true; break;
-        }
+        float H     = cellHeight(heights, s, ci, cols, rows, hmax);
         float uNext = min(ux, uy);
         bool  xNext = ux <= uy;
         float uEnd  = min(uNext, hmax);
-        if (H >= hmax - uEnd) {            // the ray descends onto its top face
-            uHit = hmax - H; hHit = H; cHit = ci; flank = false; done = true; break;
+
+        // ---- This block's cross-section. The DDA still marches the LATTICE —
+        // that is what makes finding candidates cheap — but a candidate cell is
+        // now only a bounding box, and what the ray has to hit is the outline
+        // inside it.
+        float rad = full;
+        if (ht) {
+            // Size carries tone, so each block has its own width and has to be
+            // asked for it. One fetch, and only in this mode.
+            float2 cc = clamp(ci, float2(0.0f), float2(cols - 1.0f, rows - 1.0f));
+            float  lc = cells.sample(s, cc + 0.5f).a;
+            float  ph = cellPhase(uint(cc.y * cols + cc.x));
+            rad = mix(full, dotRadius(lc, time, ph), saturate(halftone));
+        }
+        rad = mix(0.5f, rad, wIn);
+        float crr = rad * cfrac;
+        float ee  = rad - crr;
+
+        // The u span over which the ray is inside the column's bounding box,
+        // derived from the boundary crossings the DDA already carries: `ux` is
+        // where this cell ENDS in x, so it starts at ux - ivx, and the box's
+        // faces sit (0.5 -/+ rad) of a cell inside those. No divisions, and it
+        // degenerates correctly for an axis the ray barely travels along — there
+        // ivx is 1e9 and the two ends run off to the same infinity, which is
+        // exactly "always inside" or "never", by the sign.
+        float enX = ux - (0.5f + rad) * ivx, exX = ux - (0.5f - rad) * ivx;
+        float enY = uy - (0.5f + rad) * ivy, exY = uy - (0.5f - rad) * ivy;
+        float tIn = max(enX, enY);
+        float tA  = max(tIn, u);
+        float tB  = min(min(exX, exY), uEnd);
+
+        if (tA <= tB) {
+            // Where the ray meets this column's WALL, and which way that wall
+            // faces. `wall` is false only when the ray was already inside the
+            // outline as it entered the cell — the first cell, where it starts
+            // at the very top of the layer — and there the only contact
+            // possible is a top face, as before.
+            float2 qA   = p + lean * tA - (ci + 0.5f);
+            bool   wall = (tIn >= u - 1e-5f);
+            float2 nA   = float2(0.0f);
+            float  tEnt = tA;
+            bool   miss = false;
+            if (wall) {
+                bool  ex    = (enX >= enY);
+                float other = ex ? abs(qA.y) : abs(qA.x);
+                if (other <= ee) {
+                    // On the flat part of the side, which is the whole side at
+                    // rounding 0: the same axis-aligned normal as before.
+                    nA = ex ? float2(-stp.x, 0.0f) : float2(0.0f, -stp.y);
+                } else {
+                    // On a corner, where the wall curves away. The normal is the
+                    // arc's own, which is the entire point: an axis-aligned
+                    // normal here is what made a rounded block's sides read as
+                    // flat walls even before the silhouette gave it away.
+                    float2 C  = float2(qA.x >= 0.0f ? ee : -ee,
+                                       qA.y >= 0.0f ? ee : -ee);
+                    float2 m  = qA - C;
+                    float  aq = max(dot(lean, lean), 1e-12f);
+                    float  bq = dot(m, lean);
+                    float  cq = dot(m, m) - crr * crr;
+                    float  disc = bq * bq - aq * cq;
+                    if (disc < 0.0f) {
+                        miss = true;            // passes outside the corner
+                    } else {
+                        tEnt = tA + max((-bq - sqrt(disc)) / aq, 0.0f);
+                        if (tEnt > tB) miss = true;
+                        else nA = (qA + lean * (tEnt - tA) - C) / max(crr, 1e-5f);
+                    }
+                }
+            }
+            if (!miss) {
+                if (wall && hmax - tEnt < H) {   // met the side of the column
+                    uHit = tEnt; hHit = H; cHit = ci; flank = true;
+                    nHit = normalize(nA); done = true; break;
+                }
+                float uTop = hmax - H;           // descends onto its top face,
+                if (uTop >= tEnt && uTop <= tB) {// but only over its own outline
+                    uHit = uTop; hHit = H; cHit = ci; flank = false;
+                    done = true; break;
+                }
+            }
+            // Otherwise the ray goes past this column — through the gap its
+            // rounding leaves — and the march continues.
         }
         if (uEnd >= hmax) {                // reached the back wall
             uHit = hmax; hHit = H; cHit = ci; flank = false; done = true; break;
         }
         u = uNext;
-        if (xNext) { ci.x += stp.x; ux += ivx; axis = 0; }
-        else       { ci.y += stp.y; uy += ivy; axis = 1; }
+        if (xNext) { ci.x += stp.x; ux += ivx; }
+        else       { ci.y += stp.y; uy += ivy; }
     }
     if (!done) { uHit = hmax; hHit = 0.0f; cHit = floor(g); flank = false; }
 
@@ -2453,10 +2600,12 @@ inline Relief castRelief(texture2d<float> heights, sampler s, float2 g,
     r.h     = hHit;
     r.z     = hmax - uHit;
     r.flank = flank;
-    r.axis  = axis;
     // The face you can see is the one pointing back toward the camera, i.e.
-    // against the direction of travel.
-    if (flank) r.nrm = (axis == 0) ? float2(-stp.x, 0.0f) : float2(0.0f, -stp.y);
+    // against the direction of travel. `axis` is now read OFF that normal
+    // rather than off the lattice, so a corner hit is attributed to the side it
+    // mostly belongs to.
+    r.nrm   = flank ? nHit : float2(0.0f);
+    r.axis  = (abs(r.nrm.x) >= abs(r.nrm.y)) ? 0 : 1;
     return r;
 }
 
@@ -2549,7 +2698,10 @@ inline float3 styleCell(float3 col, float2 cuv, float cellPx, float lum,
     // is a circle at 2 and approaches a square as it grows — so there is no
     // reason for two of anything, and a great deal of reason for one: every
     // value BETWEEN them becomes reachable, which is where rounded tiles live.
-    float pw = mix(8.0f, 2.0f, saturate(rounding));
+    // Shared with the raycast, which extrudes this same outline — see the note
+    // above castRelief. Two copies of it is how the face and the solid came to
+    // be different shapes in the first place.
+    float pw = faceExp(rounding);
     float2 dd = abs(cuv - 0.5f);
     float m = powr(powr(dd.x, pw) + powr(dd.y, pw), 1.0f / pw);
 
@@ -2561,7 +2713,7 @@ inline float3 styleCell(float3 col, float2 cuv, float cellPx, float lum,
     // both at once — so a round tile that filled its cell, or a square one that
     // shrank with tone, simply could not be expressed. The second of those is
     // the sequin wall.
-    float full = 0.5f - 0.11f * splay;
+    float full = cellFull(splay);
     float fill = mix(full, dotRadius(lum, time, phase), saturate(halftone));
 
     float aa = 0.5f / max(cellPx, 1.0f);
@@ -2768,7 +2920,13 @@ fragment float4 presentPass(VOut in [[stage_in]],
     // the styling — then runs on the block the eye lands on rather than the one
     // that happens to sit under the pixel, which is the whole of the parallax.
     float  hmax = U.depthAmt * RELIEF_MAX;
-    Relief rel  = castRelief(heights, nearestS, px / SPv, U.cols, U.rows, hmax);
+    // The solid is the face extruded, so the cast is handed the face's own
+    // outline: half-width, corner radius, and the halftone shrink. See the note
+    // above castRelief.
+    Relief rel  = castRelief(heights, cells, nearestS, px / SPv, U.cols, U.rows,
+                             hmax, cellFull(U.splayAmt),
+                             faceInset(U.rounding, U.halftone),
+                             faceCorner(U.rounding), U.halftone, U.time);
 
     // A flank hit lands exactly ON a cell boundary, where floor() is a coin
     // toss and the grout test would fire. Push it a quarter-cell into the block

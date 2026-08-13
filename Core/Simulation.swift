@@ -457,7 +457,41 @@ final class SceneSimulation {
     ///   z,w = the element's centre within the cell, 0..1
     private(set) var glassCells: [SIMD4<Float>] = []
 
-    private var rng = SystemRandomNumberGenerator()
+    /// Deterministic by default, and that is a TESTABILITY decision.
+    ///
+    /// This was `SystemRandomNumberGenerator`, so two identical invocations of
+    /// the offscreen renderer produced different frames — measured at a mean
+    /// difference of 8.9/255 across 44% of pixels, from the three breathers
+    /// alone. Every before/after comparison the harness can make was therefore
+    /// noise-limited, and `--analyze` in particular could not tell a real
+    /// regression from a reseed. A harness that cannot reproduce its own output
+    /// cannot prove anything, which is most of what a harness is for.
+    ///
+    /// Nothing here wants system entropy. The breathers are three drifting light
+    /// pockets whose whole job is to look unplanned, and they look exactly as
+    /// unplanned from a fixed seed — the variety is in the drift, not in where
+    /// they started. ELEMENTAL_SEED overrides it if a different arrangement is
+    /// ever wanted, and a genuinely random one is `ELEMENTAL_SEED=$RANDOM`.
+    ///
+    /// SplitMix64 rather than the system generator: tiny, well-distributed, and
+    /// — the point — identical on every machine and every OS version, so a
+    /// measurement taken here reproduces on somebody else's Mac.
+    private struct SeededRNG: RandomNumberGenerator {
+        var state: UInt64
+        mutating func next() -> UInt64 {
+            state &+= 0x9E37_79B9_7F4A_7C15
+            var z = state
+            z = (z ^ (z >> 30)) &* 0xBF58_476D_1CE4_E5B9
+            z = (z ^ (z >> 27)) &* 0x94D0_49BB_1331_11EB
+            return z ^ (z >> 31)
+        }
+    }
+
+    private var rng: SeededRNG = {
+        let env = ProcessInfo.processInfo.environment["ELEMENTAL_SEED"]
+        return SeededRNG(state: UInt64(env ?? "") ?? 0x5EED_E1E3_0A11_C0DE)
+    }()
+
     private func rnd() -> Float { Float.random(in: 0..<1, using: &rng) }
 
     // MARK: Grid
