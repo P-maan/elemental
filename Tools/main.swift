@@ -479,6 +479,10 @@ default:        state.material = .glass
 let isDot = str("shape", "square") == "dot"
 state.rounding = Float(num("rounding", isDot ? 1 : 0))
 state.halftone = Float(num("halftone", isDot ? 1 : 0))
+// --roughness 0..1  surface finish: 0 polished, 1 ground glass
+// --depthmap  0..1  how much a block's own height colours it
+state.roughness = Float(num("roughness", 0))
+state.depthMap  = Float(num("depthmap", 0))
 state.finish = str("finish", "glass") == "flat" ? .flat : .glass
 state.lowFX  = args["lowfx"] != nil
 

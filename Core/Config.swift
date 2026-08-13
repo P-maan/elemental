@@ -186,6 +186,28 @@ struct Config: Codable, Equatable {
     /// shrank with tone. The second is the sequin wall.
     var halftone: Double = 0
 
+    /// How rough the surface is: 0 polished, 1 ground glass.
+    ///
+    /// The fourth appearance axis, and the one that makes the other three stop
+    /// looking rendered. A perfectly smooth dome returns an identical highlight
+    /// from every tile, so a wall of them reads as a repeated stamp rather than
+    /// a material. Roughness scatters the reflection — the same reason a frosted
+    /// pane glows where a polished one glints — and it is what separates
+    /// polished glass from sea glass, chrome from brushed steel, and a toy from
+    /// a moulded object.
+    var roughness: Double = 0
+
+    /// How much a block's HEIGHT colours it, 0..1.
+    ///
+    /// The relief already says how far each block stands out and carried that
+    /// entirely in its shading, so the wall had depth in its light and none in
+    /// its colour. This puts depth on the colour axis by aerial perspective:
+    /// proud blocks are the near layer and keep their colour, flush blocks are
+    /// the far one and are drawn toward the haze — desaturated, cooler, lower in
+    /// contrast, which is the measured behaviour of air in front of something
+    /// rather than a chosen palette.
+    var depthMap: Double = 0
+
     /// Nominal mosaic rows down the screen.
     var gridRows: Int = 36
 
@@ -559,6 +581,8 @@ struct Config: Codable, Equatable {
         state.material = material
         state.rounding = Float(max(0, min(1, rounding)))
         state.halftone = Float(max(0, min(1, halftone)))
+        state.roughness = Float(max(0, min(1, roughness)))
+        state.depthMap = Float(max(0, min(1, depthMap)))
         state.gridRows = gridRows
         state.poster = Float(poster)
         state.reliefDepth = Float(reliefDepth)
@@ -662,6 +686,13 @@ extension Config {
             rounding = (shape == .dot) ? 1 : 0
             halftone = (shape == .dot) ? 1 : 0
         }
+        // Independent of the block above: these are newer than the material
+        // migration, so a config written by any earlier version simply has no
+        // key for them and takes the default, which is off. Both are additions
+        // to how the wall looks, and an update should not silently restyle a
+        // wall somebody already chose.
+        roughness = c.lenient(.roughness, d.roughness)
+        depthMap  = c.lenient(.depthMap,  d.depthMap)
         playbackOnWake     = c.lenient(.playbackOnWake, d.playbackOnWake)
         playbackMaxSeconds = c.lenient(.playbackMaxSeconds, d.playbackMaxSeconds)
         animateOnLock      = c.lenient(.animateOnLock, d.animateOnLock)

@@ -897,6 +897,8 @@ final class ElementalRenderer {
         u.material = state.material.rawValue
         u.rounding = max(0, min(1, state.rounding))
         u.halftone = max(0, min(1, state.halftone))
+        u.roughness = max(0, min(1, state.roughness))
+        u.depthMap = max(0, min(1, state.depthMap))
 
         uniformBuf.contents().copyMemory(from: &u, byteCount: MemoryLayout<Uniforms>.stride)
     }

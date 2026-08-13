@@ -82,7 +82,18 @@ struct Uniforms {
     var material: Int32 = 0
     var rounding: Float = 0
     var halftone: Float = 0
-    var pad2: Float = 0
+    /// How rough the surface is, 0..1 — the "glass noise" axis. Occupies what
+    /// was `pad2`, so the struct keeps its field order and its 240 bytes.
+    var roughness: Float = 0
+    // ---- A third block of four, taking the struct from 240 to 256 and keeping
+    // it a multiple of 16. See the mirroring note at the top: append only, or
+    // every field after the seam shifts silently.
+    /// How much the block's own height colours it, 0..1. See `depthMap` in the
+    /// shader — the sky has layers, and this is what lets height read as one.
+    var depthMap: Float = 0
+    var pad3: Float = 0
+    var pad4: Float = 0
+    var pad5: Float = 0
 }
 
 struct GPUBreather { var ax, ay, R, per, s1, s2, ph, ph2: Float }
@@ -1704,6 +1715,10 @@ struct SceneState {
     var rounding: Float = 0
     /// 0 tiles fill the cell, 1 size carries tone.
     var halftone: Float = 0
+    /// 0 polished, 1 ground glass. Scatters the reflection — see `Config`.
+    var roughness: Float = 0
+    /// 0 height carries no colour, 1 full aerial perspective by height.
+    var depthMap: Float = 0
 
     /// Nominal cell rows down the screen. Cell size derives from this, so the
     /// mosaic keeps the same visual scale on any display.

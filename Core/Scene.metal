@@ -82,7 +82,14 @@ struct Uniforms {
     int   material;            // 0 glass 1 metal 2 plastic 3 matte
     float rounding;            // 0 square .. 1 circle
     float halftone;            // 0 fills the cell .. 1 size carries tone
-    float pad2;
+    float roughness;           // surface roughness / "glass noise", 0..1.
+                               // Took what was pad2, so the struct is unchanged
+                               // at 240 bytes.
+    // ---- a third block of four, taking the struct from 240 to 256 bytes.
+    float depthMap;            // how much a block's HEIGHT colours it, 0..1
+    float pad3;
+    float pad4;
+    float pad5;
 };
 
 // Rain is rasterised at this multiple of the cell grid in each axis.
@@ -2489,9 +2496,38 @@ inline float dotRadius(float lum, float time, float phase) {
 ///
 /// `rot` is the splay angle for this block, in radians. It turns the face
 /// outline inside the cell so a wall of blocks is not perfectly coursed.
+// ---- Value noise, for surface roughness.
+//
+// Written out rather than faked with sines. Products of sines were the first
+// attempt and they FAILED VISIBLY: sin(x)*cos(y) is periodic and axis-aligned,
+// so every tile came out carrying the same regular cross-hatch and the wall
+// read as woven screen rather than ground glass. Roughness exists to stop the
+// surface being a repeated stamp, so a repeating function cannot implement it.
+//
+// A hash gives each lattice point an independent value and the interpolation
+// between them has no preferred direction, so the grain is irregular at every
+// scale and shares no structure between neighbouring tiles.
+inline float hash21(float2 p) {
+    p = fract(p * float2(123.34f, 456.21f));
+    p += dot(p, p + 45.32f);
+    return fract(p.x * p.y);
+}
+
+inline float vnoise(float2 p) {
+    float2 i = floor(p), f = fract(p);
+    // Smoothstep the interpolant, or the lattice shows up as diamond creases.
+    f = f * f * (3.0f - 2.0f * f);
+    float a = hash21(i);
+    float b = hash21(i + float2(1.0f, 0.0f));
+    float c = hash21(i + float2(0.0f, 1.0f));
+    float d = hash21(i + float2(1.0f, 1.0f));
+    return mix(mix(a, b, f.x), mix(c, d, f.x), f.y);
+}
+
 inline float3 styleCell(float3 col, float2 cuv, float cellPx, float lum,
                         float phase, float time, int material, float rounding,
-                        float halftone, bool flank, float2 lightDir, float lightI,
+                        float halftone, float roughness, float depthMap,
+                        bool flank, float2 lightDir, float lightI,
                         float splay, float depth, float hNorm)
 {
     // A flank is the sheared side of a block. It has no outline, no grout and no
@@ -2536,6 +2572,55 @@ inline float3 styleCell(float3 col, float2 cuv, float cellPx, float lum,
     float dome = sqrt(saturate(1.0f - min(rr, 1.0f) * min(rr, 1.0f)));
     float3 n3 = normalize(float3(uu * 0.80f, dome * 0.75f + 0.30f));
 
+    // ---- ROUGHNESS. A perfectly smooth dome is the one thing real glass never
+    // is, and its absence is what made the wall read as rendered rather than
+    // cast: every tile returned an identical highlight from an identical
+    // surface, so the eye saw a repeated stamp instead of a material.
+    //
+    // Roughness is scattering. A rough surface has its microscopic facets
+    // pointing slightly away from the shape's normal, so the reflection lands
+    // in a spread of directions rather than one — which is why a frosted pane
+    // glows where a polished one glints. Modelled the same way: perturb the
+    // normal, then widen the specular lobe to match, because doing only the
+    // first gives a sharp highlight in a jittered place and looks like an
+    // error rather than a finish.
+    //
+    // FIXED IN SPACE, NEVER IN TIME, and this is the whole reason it is safe.
+    // Noise reseeded per frame is precisely the crawl that made the wall look
+    // jittery before; a surface that changes while you watch is not a surface.
+    // The seed is the cell's own stable `phase` plus the position INSIDE the
+    // cell, so each block keeps one unchanging finish and the grain stays put
+    // when the light moves across it. `time` is deliberately not involved.
+    float rough = saturate(roughness);
+    if (rough > 0.001f) {
+        // Seeded by the cell's own stable `phase`, so no two tiles share a
+        // grain, and by position INSIDE the cell, so the finish stays put while
+        // the light moves over it.
+        float2 q = cuv * 11.0f + phase * 131.0f;
+        // The normal is perturbed by the noise's GRADIENT, not its value. A
+        // surface tilts where its height CHANGES, so the slope is what a normal
+        // is made of — using the height directly would brighten and darken the
+        // face without ever turning it, which reads as dirt on the glass rather
+        // than texture in it.
+        const float e = 0.5f;
+        float2 g1 = float2(vnoise(q + float2(e, 0.0f)) - vnoise(q - float2(e, 0.0f)),
+                           vnoise(q + float2(0.0f, e)) - vnoise(q - float2(0.0f, e)));
+        // A second octave at a non-integer multiple: the coarse one is the
+        // shape the surface was ground to, the fine one is the tooth on it.
+        float2 q2 = q * 2.7f + 19.0f;
+        float2 g2 = float2(vnoise(q2 + float2(e, 0.0f)) - vnoise(q2 - float2(e, 0.0f)),
+                           vnoise(q2 + float2(0.0f, e)) - vnoise(q2 - float2(0.0f, e)));
+        float2 jitter = g1 + g2 * 0.45f;
+        // Squared, so the low end of the slider is a polish and only the top is
+        // a genuinely broken surface. Linear made the first tenth of travel
+        // already visibly frosted.
+        n3 = normalize(n3 + float3(jitter * (1.8f * rough * rough), 0.0f));
+    }
+    // Widened specular lobe. Divided rather than subtracted so the exponent
+    // stays positive at every roughness, and so the SAME factor can widen the
+    // very different exponents the three materials use.
+    float specWide = 1.0f / (1.0f + 3.2f * rough);
+
     // Grazing, so each highlight sits on the lit FLANK. Head-on light puts the
     // brightest point at every dome's crown and a wall of those reads as LEDs.
     float3 l3 = normalize(float3(lightDir, 0.30f));
@@ -2544,13 +2629,69 @@ inline float3 styleCell(float3 col, float2 cuv, float cellPx, float lum,
     float fres = powr(1.0f - n3.z, 5.0f);
     float ln   = saturate(lum);
 
+    // ---- DEPTH AS A COLOUR AXIS.
+    //
+    // The relief already says how far each block stands out, and until now that
+    // was carried entirely by shading — so the wall had depth in its light and
+    // none in its colour, which is not how looking at anything works. The sky
+    // is layered, and the eye reads those layers by COLOUR long before it reads
+    // them by brightness.
+    //
+    // Aerial perspective is the rule that governs it, and it is a measurement
+    // rather than a palette: the further away something is, the more air is in
+    // front of it, and that air scatters short wavelengths into the line of
+    // sight while absorbing the rest. So distance desaturates, cools toward the
+    // haze, and flattens contrast — which is why a far ridge is pale blue and a
+    // near one is green.
+    //
+    // Applied to `hNorm`, the block's own height: proud blocks are the near
+    // layer and keep their colour, flush blocks are the far one and are drawn
+    // toward the haze. BEFORE the material branch, because this belongs to the
+    // body of the block; the highlights that follow sit on top of it, the way
+    // a reflection sits on top of an object rather than being tinted by its
+    // distance.
+    //
+    // Per CELL, not per pixel — `hNorm` is one value for the whole block — so
+    // the rule that each cell carries one colour is preserved exactly.
+    float dmap = saturate(depthMap);
+    if (dmap > 0.001f) {
+        // -1 fully flush, +1 fully proud. Centred so the middle of the range is
+        // left alone and the effect opens outward in both directions, rather
+        // than tinting the entire wall one way.
+        float d  = hNorm * 2.0f - 1.0f;
+        float3 W = float3(0.2126f, 0.7152f, 0.0722f);
+        float  Y = dot(col, W);
+        // Saturation with nearness. Extrapolates past 1 for proud blocks, which
+        // is the intended direction — near things are MORE colourful, not just
+        // less hazy — so the result is clamped rather than trusted.
+        col = max(mix(float3(Y), col, saturate(1.0f + 0.40f * dmap * d)), 0.0f);
+        // Cool the far end and warm the near one. Small numbers on purpose: the
+        // sky's own colour is computed from scattering physics elsewhere in this
+        // file, and a decorative tint big enough to notice on its own would be
+        // fighting it.
+        col *= float3(1.0f + 0.07f * dmap * d,
+                      1.0f + 0.01f * dmap * d,
+                      1.0f - 0.06f * dmap * d);
+        // Contrast falls with distance, because scattered air light is added to
+        // everything equally and lifts the shadows toward the haze.
+        col = mix(float3(Y), col, saturate(1.0f + 0.18f * dmap * d));
+    }
+
     if (material == 0) {
         // GLASS. Transmissive: the body keeps its colour, the rim goes
         // mirror-bright, and the sheen is broad because daylight is an enormous
         // diffuse source and its reflection is not a dot.
         col *= 1.0f + lightI * (0.55f * diff - 0.22f);
-        col += powr(saturate(dot(n3, hv)), 22.0f) * (0.14f + 0.26f * lightI);
-        col += fres * (0.16f + 0.20f * lightI);
+        // Energy conserved as the lobe widens: a rough surface spreads the same
+        // reflected light over more directions, so the peak must come down as
+        // the highlight broadens. Without this, roughness reads as "brighter"
+        // rather than "softer" and the wall blows out at the top of the slider.
+        col += powr(saturate(dot(n3, hv)), 22.0f * specWide)
+             * (0.14f + 0.26f * lightI) * (0.35f + 0.65f * specWide);
+        // The rim is the last thing to go. Even ground glass keeps a bright
+        // edge, because grazing reflection survives roughness far better than
+        // face-on reflection does.
+        col += fres * (0.16f + 0.20f * lightI) * (0.55f + 0.45f * specWide);
 
     } else if (material == 1) {
         // METAL. Opaque, so the body goes dark away from the light instead of
@@ -2560,8 +2701,12 @@ inline float3 styleCell(float3 col, float2 cuv, float cellPx, float lum,
         // reflects white.
         col *= 0.30f + 0.90f * diff;
         float3 tint = col / max(dot(col, float3(0.333f)), 0.04f);
-        col += tint * powr(saturate(dot(n3, hv)), 70.0f) * (0.40f + 0.70f * lightI);
-        col += tint * fres * (0.20f + 0.24f * lightI);
+        // Metal is where roughness reads most strongly, because this is the
+        // difference between a mirror and a brushed finish — and the exponent
+        // starts tightest here, so it has the furthest to travel.
+        col += tint * powr(saturate(dot(n3, hv)), 70.0f * specWide)
+             * (0.40f + 0.70f * lightI) * (0.30f + 0.70f * specWide);
+        col += tint * fres * (0.20f + 0.24f * lightI) * (0.55f + 0.45f * specWide);
 
     } else if (material == 2) {
         // PLASTIC. Opaque and mostly diffuse, with one wide soft highlight that
@@ -2569,7 +2714,10 @@ inline float3 styleCell(float3 col, float2 cuv, float cellPx, float lum,
         // rim brightening to speak of, so it reads as a solid object rather than
         // a window.
         col *= 0.55f + 0.58f * diff;
-        col += powr(saturate(dot(n3, hv)), 11.0f) * (0.09f + 0.15f * lightI);
+        // Plastic is already the softest of the three, so roughness has least
+        // to do here — it takes a satin finish to a matte one.
+        col += powr(saturate(dot(n3, hv)), 11.0f * specWide)
+             * (0.09f + 0.15f * lightI) * (0.45f + 0.55f * specWide);
         col += fres * 0.05f * ln;
 
     } else {
@@ -3418,6 +3566,7 @@ fragment float4 presentPass(VOut in [[stage_in]],
     float hNorm = (hmax > 1e-4f) ? saturate(rel.h / hmax) : 0.0f;
     col = styleCell(col, suv, dc.size, lum, phase, U.time,
                     U.material, U.rounding, U.halftone,
+                    U.roughness, U.depthMap,
                     rel.flank, L, I, U.splayAmt, U.depthAmt, hNorm);
 
     // ---- Relief shading. Front faces, side faces, and the crevices between.
