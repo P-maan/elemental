@@ -87,7 +87,7 @@ struct Uniforms {
                                // at 240 bytes.
     // ---- a third block of four, taking the struct from 240 to 256 bytes.
     float depthMap;            // how much a block's HEIGHT colours it, 0..1
-    float pad3;
+    float grout;               // strength of the painted line between tiles, 0..1
     float pad4;
     float pad5;
 };
@@ -2676,6 +2676,7 @@ inline float vnoise(float2 p) {
 inline float3 styleCell(float3 col, float2 cuv, float cellPx, float lum,
                         float phase, float time, int material, float rounding,
                         float halftone, float roughness, float depthMap,
+                        float U_grout,
                         bool flank, float2 lightDir, float lightI,
                         float splay, float depth, float hNorm)
 {
@@ -2877,8 +2878,17 @@ inline float3 styleCell(float3 col, float2 cuv, float cellPx, float lum,
         // the relief. The grout YIELDS to the relief for the reason it always
         // did — once the blocks stand out, their own side faces separate them
         // and a painted lattice on top is louder than the geometry.
-        float w = 0.08f * (1.0f - 0.72f * depth);
-        if (m > full - w) col *= mix(0.42f, 0.66f, depth);
+        // THE GROUT IS WHY THE TILES LOOKED VIGNETTED. At its old fixed
+        // strength this darkened the outer band of every tile to about half
+        // brightness — measured at the user's settings, the outer 12% of each
+        // tile's radius — which reads as a dark ring around every block rather
+        // than as a line between them, and is most of what made flat tiles look
+        // like beads. It is a painted lattice, so it should be a choice.
+        float gr = saturate(U_grout);
+        if (gr > 0.001f) {
+            float w = 0.08f * (1.0f - 0.72f * depth) * gr;
+            if (m > full - w) col *= mix(mix(1.0f, 0.42f, gr), mix(1.0f, 0.66f, gr), depth);
+        }
     }
 
     return col * mask;
@@ -3724,7 +3734,7 @@ fragment float4 presentPass(VOut in [[stage_in]],
     float hNorm = (hmax > 1e-4f) ? saturate(rel.h / hmax) : 0.0f;
     col = styleCell(col, suv, dc.size, lum, phase, U.time,
                     U.material, U.rounding, U.halftone,
-                    U.roughness, U.depthMap,
+                    U.roughness, U.depthMap, U.grout,
                     rel.flank, L, I, U.splayAmt, U.depthAmt, hNorm);
 
     // ---- Relief shading. Front faces, side faces, and the crevices between.

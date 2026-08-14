@@ -237,7 +237,60 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             // user expects it, shows them what is being installed and where, and
             // means this app never holds an admin credential even briefly.
             NSWorkspace.shared.open(pkg)
+            self.relaunchWhenReplaced()
         }
+    }
+
+    /// Restart into the new version once the installer has laid it down.
+    ///
+    /// Without this an update APPEARS to do nothing. The installer replaces the
+    /// bundle in /Applications, but the process already running is the old
+    /// binary and keeps running indefinitely — this is a wallpaper, so there is
+    /// no natural moment at which anybody quits it. The user installs an update,
+    /// sees no change, and reasonably concludes it failed. On the next launch,
+    /// possibly days later, it silently becomes the new version.
+    ///
+    /// Detected by WATCHING THE INSTALLED BUNDLE'S VERSION rather than by
+    /// waiting on the installer process. We deliberately do not own that
+    /// process — it is Apple's UI, the user may take a minute over the
+    /// authentication dialog, and they may cancel outright. The version string
+    /// on disk is the only thing that actually answers "did the new one land",
+    /// and it answers it correctly for cancel (never changes) as well as for
+    /// success.
+    ///
+    /// The relaunch itself is handed to a detached shell that waits for THIS
+    /// process to exit before opening the app. Asking NSWorkspace to launch a
+    /// bundle whose identifier matches the running app just activates the
+    /// running instance, so the old binary would survive its own replacement.
+    private func relaunchWhenReplaced() {
+        let installed = URL(fileURLWithPath: "/Applications/Elemental.app")
+        let running = Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String ?? ""
+        let deadline = Date().addingTimeInterval(30 * 60)
+
+        func versionOnDisk() -> String? {
+            guard let d = NSDictionary(contentsOf:
+                    installed.appendingPathComponent("Contents/Info.plist")) else { return nil }
+            return d["CFBundleShortVersionString"] as? String
+        }
+
+        // Poll rather than use a file watcher: the installer replaces the whole
+        // bundle, so the directory this would be watching is itself swapped out
+        // and an FSEvent stream on it can be left pointing at a deleted inode.
+        let timer = Timer.scheduledTimer(withTimeInterval: 3, repeats: true) { t in
+            guard Date() < deadline else { t.invalidate(); return }
+            guard let v = versionOnDisk(), !running.isEmpty, v != running else { return }
+            t.invalidate()
+            NSLog("Elemental: updated to %@ on disk, restarting", v)
+
+            let p = Process()
+            p.executableURL = URL(fileURLWithPath: "/bin/sh")
+            p.arguments = ["-c",
+                "while kill -0 \(ProcessInfo.processInfo.processIdentifier) 2>/dev/null; "
+              + "do sleep 0.3; done; open -g \"\(installed.path)\""]
+            try? p.run()
+            NSApp.terminate(nil)
+        }
+        RunLoop.main.add(timer, forMode: .common)
     }
 
     /// Re-run the first-run flow from Settings. See GeneralPane.

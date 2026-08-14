@@ -483,6 +483,7 @@ state.halftone = Float(num("halftone", isDot ? 1 : 0))
 // --depthmap  0..1  how much a block's own height colours it
 state.roughness = Float(num("roughness", 0))
 state.depthMap  = Float(num("depthmap", 0))
+state.grout     = Float(num("grout", 0.35))
 state.finish = str("finish", "glass") == "flat" ? .flat : .glass
 state.lowFX  = args["lowfx"] != nil
 

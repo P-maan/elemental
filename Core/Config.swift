@@ -208,6 +208,16 @@ struct Config: Codable, Equatable {
     /// rather than a chosen palette.
     var depthMap: Double = 0
 
+    /// How strong the painted line between tiles is, 0..1.
+    ///
+    /// Was a fixed value, and at that strength it darkened the outer band of
+    /// every tile to roughly half brightness — a dark ring around each block
+    /// rather than a line between them, which is most of what made flat tiles
+    /// read as beads. Default is well below the old value; 0 removes it and
+    /// lets the relief alone separate the blocks, which is what the relief is
+    /// for.
+    var grout: Double = 0.35
+
     /// Nominal mosaic rows down the screen.
     var gridRows: Int = 36
 
@@ -583,6 +593,7 @@ struct Config: Codable, Equatable {
         state.halftone = Float(max(0, min(1, halftone)))
         state.roughness = Float(max(0, min(1, roughness)))
         state.depthMap = Float(max(0, min(1, depthMap)))
+        state.grout = Float(max(0, min(1, grout)))
         state.gridRows = gridRows
         state.poster = Float(poster)
         state.reliefDepth = Float(reliefDepth)
@@ -693,6 +704,7 @@ extension Config {
         // wall somebody already chose.
         roughness = c.lenient(.roughness, d.roughness)
         depthMap  = c.lenient(.depthMap,  d.depthMap)
+        grout     = c.lenient(.grout,     d.grout)
         playbackOnWake     = c.lenient(.playbackOnWake, d.playbackOnWake)
         playbackMaxSeconds = c.lenient(.playbackMaxSeconds, d.playbackMaxSeconds)
         animateOnLock      = c.lenient(.animateOnLock, d.animateOnLock)

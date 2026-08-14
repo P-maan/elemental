@@ -91,7 +91,9 @@ struct Uniforms {
     /// How much the block's own height colours it, 0..1. See `depthMap` in the
     /// shader — the sky has layers, and this is what lets height read as one.
     var depthMap: Float = 0
-    var pad3: Float = 0
+    /// Strength of the painted line between tiles, 0..1. Occupies what was
+    /// `pad3`, so the struct keeps its field order and its 256 bytes.
+    var grout: Float = 0.35
     var pad4: Float = 0
     var pad5: Float = 0
 }
@@ -1719,6 +1721,8 @@ struct SceneState {
     var roughness: Float = 0
     /// 0 height carries no colour, 1 full aerial perspective by height.
     var depthMap: Float = 0
+    /// 0 no painted line between tiles, 1 the old fixed grout.
+    var grout: Float = 0.35
 
     /// Nominal cell rows down the screen. Cell size derives from this, so the
     /// mosaic keeps the same visual scale on any display.
