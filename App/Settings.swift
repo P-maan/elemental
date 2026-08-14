@@ -451,6 +451,11 @@ final class GeneralPane: Pane {
     private var refractS: LabelledSlider!
     private var dispersS: LabelledSlider!
     private var frostS: LabelledSlider!
+    private var roundS: LabelledSlider!
+    private var halftoneS: LabelledSlider!
+    private var roughS: LabelledSlider!
+    private var depthMapS: LabelledSlider!
+    private var tilesCard: Card!
     private var splayS: LabelledSlider!
     private var shimmerS: LabelledSlider!
     private var riseS: LabelledSlider!
@@ -507,6 +512,38 @@ final class GeneralPane: Pane {
                   + "height as the sky changes, rather than being at it in the next frame. Instant "
                   + "is how it behaved before.")
         addCard(relief)
+
+        // ---- the tile itself
+        //
+        // These four were reachable only by picking a style preset, which set
+        // them as a bundle — so choosing "dots" made the tiles round AND made
+        // size carry the tone, with no way to want one without the other, and
+        // no way to see what you currently had. They are independent axes and
+        // are now independent controls.
+        roundS = slider("Corner rounding", 0...1, #selector(changed)) {
+            $0 < 0.02 ? "square" : ($0 > 0.98 ? "round" : String(format: "%.0f%%", $0 * 100))
+        }
+        halftoneS = slider("Halftone", 0...1, #selector(changed), pct)
+        roughS = slider("Roughness", 0...1, #selector(changed)) {
+            $0 < 0.02 ? "polished" : ($0 > 0.98 ? "ground" : String(format: "%.0f%%", $0 * 100))
+        }
+        depthMapS = slider("Depth colour", 0...1, #selector(changed), pct)
+
+        tilesCard = Card("Tiles", symbol: "square.grid.3x3")
+        tilesCard.add(captionLabel("The shape of a cell and the finish on it. Independent of the "
+                                 + "style presets above, which only set them all at once."))
+        tilesCard.add(row("Corner rounding", roundS.box))
+        tilesCard.add(row("Halftone", halftoneS.box))
+        tilesCard.add(row("Roughness", roughS.box))
+        tilesCard.add(row("Depth colour", depthMapS.box))
+        tilesCard.note("Corner rounding takes a cell from a square tile to a round bead, and the "
+                     + "block behind it follows — a rounded tile is extruded round, not stood on a "
+                     + "square post. Halftone is separate: at 0 every tile fills its cell and colour "
+                     + "carries the picture, at 1 a dark cell's tile shrinks to nothing and a bright "
+                     + "one grows until it meets its neighbours. Roughness scatters the reflection, "
+                     + "from polished to ground glass. Depth colour lets a block's height tint it, "
+                     + "near blocks keeping their colour and flush ones fading toward the haze.")
+        addCard(tilesCard)
 
         // ---- glass
         refractS = slider("Refraction", 0...1, #selector(changed), pct)
@@ -653,6 +690,10 @@ final class GeneralPane: Pane {
         refractS.value = c.refraction
         dispersS.value = c.dispersion
         frostS.value = c.frost
+        roundS.value = c.rounding
+        halftoneS.value = c.halftone
+        roughS.value = c.roughness
+        depthMapS.value = c.depthMap
         // The desktop's finish decides it: the lock screen and saver can differ,
         // but this is one shared wall and the pane it lives on is the general one.
         UI.setHidden([glassCard], c.finish != .glass)
@@ -741,6 +782,10 @@ final class GeneralPane: Pane {
         c.refraction = refractS.value
         c.dispersion = dispersS.value
         c.frost = frostS.value
+        c.rounding = roundS.value
+        c.halftone = halftoneS.value
+        c.roughness = roughS.value
+        c.depthMap = depthMapS.value
         for s in [depthS, emphS, lightS, splayS, riseS, refractS, dispersS, frostS] { s?.refresh() }
         // Cheap now, expensive later — the split that keeps the window smooth.
         updateLivePreview(c)
