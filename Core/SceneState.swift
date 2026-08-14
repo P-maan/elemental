@@ -94,7 +94,8 @@ struct Uniforms {
     /// Strength of the painted line between tiles, 0..1. Occupies what was
     /// `pad3`, so the struct keeps its field order and its 256 bytes.
     var grout: Float = 0.35
-    var pad4: Float = 0
+    /// Contact shadow between blocks, 0..1. Occupies what was `pad4`.
+    var shadow: Float = 1
     var pad5: Float = 0
 }
 
@@ -1723,6 +1724,8 @@ struct SceneState {
     var depthMap: Float = 0
     /// 0 no painted line between tiles, 1 the old fixed grout.
     var grout: Float = 0.35
+    /// 0 no contact shadow between blocks, 1 full.
+    var shadow: Float = 1
 
     /// Nominal cell rows down the screen. Cell size derives from this, so the
     /// mosaic keeps the same visual scale on any display.

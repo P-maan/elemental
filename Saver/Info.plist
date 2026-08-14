@@ -7,8 +7,8 @@
   <key>CFBundleExecutable</key>         <string>Elemental</string>
   <key>CFBundleIdentifier</key>         <string>com.prakritmaan.elemental.saver</string>
   <key>CFBundlePackageType</key>        <string>BNDL</string>
-  <key>CFBundleShortVersionString</key> <string>0.3.2</string>
-  <key>CFBundleVersion</key>            <string>5</string>
+  <key>CFBundleShortVersionString</key> <string>0.3.3</string>
+  <key>CFBundleVersion</key>            <string>6</string>
   <key>LSMinimumSystemVersion</key>     <string>14.0</string>
   <key>NSHighResolutionCapable</key>    <true/>
 

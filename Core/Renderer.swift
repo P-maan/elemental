@@ -900,6 +900,7 @@ final class ElementalRenderer {
         u.roughness = max(0, min(1, state.roughness))
         u.depthMap = max(0, min(1, state.depthMap))
         u.grout = max(0, min(1, state.grout))
+        u.shadow = max(0, min(1, state.shadow))
 
         uniformBuf.contents().copyMemory(from: &u, byteCount: MemoryLayout<Uniforms>.stride)
     }

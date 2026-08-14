@@ -218,6 +218,14 @@ struct Config: Codable, Equatable {
     /// for.
     var grout: Double = 0.35
 
+    /// How dark the contact shadow between blocks is, 0..1.
+    ///
+    /// A block lower than its neighbour sits in a trench and the light reaching
+    /// its face is cut by whatever stands over it. That has always been drawn;
+    /// it just could not be turned down, and it is the other half of how much
+    /// the wall reads as separate blocks rather than a printed grid.
+    var shadow: Double = 1
+
     /// Nominal mosaic rows down the screen.
     var gridRows: Int = 36
 
@@ -594,6 +602,7 @@ struct Config: Codable, Equatable {
         state.roughness = Float(max(0, min(1, roughness)))
         state.depthMap = Float(max(0, min(1, depthMap)))
         state.grout = Float(max(0, min(1, grout)))
+        state.shadow = Float(max(0, min(1, shadow)))
         state.gridRows = gridRows
         state.poster = Float(poster)
         state.reliefDepth = Float(reliefDepth)
@@ -705,6 +714,7 @@ extension Config {
         roughness = c.lenient(.roughness, d.roughness)
         depthMap  = c.lenient(.depthMap,  d.depthMap)
         grout     = c.lenient(.grout,     d.grout)
+        shadow    = c.lenient(.shadow,    d.shadow)
         playbackOnWake     = c.lenient(.playbackOnWake, d.playbackOnWake)
         playbackMaxSeconds = c.lenient(.playbackMaxSeconds, d.playbackMaxSeconds)
         animateOnLock      = c.lenient(.animateOnLock, d.animateOnLock)

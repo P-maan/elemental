@@ -93,7 +93,7 @@ struct Uniforms {
     // ---- a third block of four, taking the struct from 240 to 256 bytes.
     float depthMap;            // how much a block's HEIGHT colours it, 0..1
     float grout;               // strength of the painted line between tiles, 0..1
-    float pad4;
+    float shadow;              // contact shadow between blocks, 0..1
     float pad5;
 };
 
@@ -2446,8 +2446,20 @@ inline float faceExp(float rounding) { return mix(8.0f, 2.0f, saturate(rounding)
 /// half-width. sqrt2/(sqrt2-1) = 3.4142136. Ramped to zero over the first sixth
 /// of the slider so a square block keeps its square column exactly.
 inline float faceCorner(float rounding) {
-    return 3.4142136f * (1.0f - exp2(-1.0f / faceExp(rounding)))
-         * smoothstep(0.0f, 0.15f, rounding);
+    // Linear, and exact at both ends: 0 is a true square, 1 is a true circle.
+    //
+    // This used to derive the radius from the superellipse the FACE was drawn
+    // with, matching the two shapes on the diagonal. That was the right answer
+    // to the wrong question — the face's exponent only reaches 8 at rounding 0,
+    // and |x|^8+|y|^8 is a squircle whose corner still falls 8% short of a
+    // square. So the face was round while the solid under it was square, and a
+    // "square" tile came out visibly rounded with a dark gap at every four-way
+    // junction where the corners pulled away from each other.
+    //
+    // The face now uses this same radius, so there is one shape rather than two
+    // that have to be kept in agreement, and the slider is linear in the corner
+    // radius, which is the thing being asked for.
+    return saturate(rounding);
 }
 /// How far the column follows the face's own width rather than filling its cell.
 /// Rounding brings it in; so does halftone, because there the face has genuinely
@@ -2702,9 +2714,8 @@ inline float3 styleCell(float3 col, float2 cuv, float cellPx, float lum,
     // Shared with the raycast, which extrudes this same outline — see the note
     // above castRelief. Two copies of it is how the face and the solid came to
     // be different shapes in the first place.
-    float pw = faceExp(rounding);
     float2 dd = abs(cuv - 0.5f);
-    float m = powr(powr(dd.x, pw) + powr(dd.y, pw), 1.0f / pw);
+    float crf = faceCorner(rounding);
 
     // ---- SIZE, which is a separate question from shape.
     //
@@ -2717,6 +2728,13 @@ inline float3 styleCell(float3 col, float2 cuv, float cellPx, float lum,
     float full = cellFull(splay);
     float fill = mix(full, dotRadius(lum, time, phase), saturate(halftone));
 
+    // Radius-like measure of the rounded square: <= fill inside, > fill out.
+    // At crf 0 this reduces exactly to max(|dx|,|dy|) — a true square — and at
+    // crf 1 exactly to length(d), a true circle.
+    float rIn = crf * fill;
+    float2 q  = dd - (fill - rIn);
+    float m   = min(max(q.x, q.y), 0.0f) + length(max(q, 0.0f)) - rIn + fill;
+
     float aa = 0.5f / max(cellPx, 1.0f);
     float mask = 1.0f - smoothstep(fill - aa, fill + aa, m);
     if (mask <= 0.002f) return float3(0.0f);
@@ -2726,7 +2744,9 @@ inline float3 styleCell(float3 col, float2 cuv, float cellPx, float lum,
     // pillow, and the lens in presentPass uses the same curve so the highlight
     // and the refraction cannot disagree about which way the face points.
     float2 uu = (cuv - 0.5f) / max(fill, 1e-3f);
-    float rr = powr(powr(abs(uu.x), pw) + powr(abs(uu.y), pw), 1.0f / pw);
+    // Normalised against the SAME outline, so the highlight cannot sit on a
+    // different shape from the silhouette.
+    float rr = m / max(fill, 1e-3f);
     float dome = sqrt(saturate(1.0f - min(rr, 1.0f) * min(rr, 1.0f)));
     float3 n3 = normalize(float3(uu * 0.80f, dome * 0.75f + 0.30f));
 
@@ -2892,7 +2912,7 @@ inline float3 styleCell(float3 col, float2 cuv, float cellPx, float lum,
         float gr = saturate(U_grout);
         if (gr > 0.001f) {
             float w = 0.08f * (1.0f - 0.72f * depth) * gr;
-            if (m > full - w) col *= mix(mix(1.0f, 0.42f, gr), mix(1.0f, 0.66f, gr), depth);
+            if (m > fill - w) col *= mix(mix(1.0f, 0.42f, gr), mix(1.0f, 0.66f, gr), depth);
         }
     }
 
@@ -3774,7 +3794,7 @@ fragment float4 presentPass(VOut in [[stage_in]],
                 float  d = (k < 2) ? e.x : e.y;
                 occ += saturate(dh / (hmax * 0.45f)) * (1.0f - smoothstep(0.0f, 0.6f, d));
             }
-            shade *= 1.0f - saturate(occ) * 0.55f;
+            shade *= 1.0f - saturate(occ) * 0.55f * U.shadow;
             // Splay tips the front face, so a wall of blocks catches the light
             // unevenly instead of returning one flat value. This is now the
             // whole of what splay does to the FACE — the outline is never turned

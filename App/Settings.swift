@@ -456,6 +456,7 @@ final class GeneralPane: Pane {
     private var roughS: LabelledSlider!
     private var depthMapS: LabelledSlider!
     private var groutS: LabelledSlider!
+    private var shadowS: LabelledSlider!
     private var tilesCard: Card!
     private var splayS: LabelledSlider!
     private var shimmerS: LabelledSlider!
@@ -532,6 +533,9 @@ final class GeneralPane: Pane {
         groutS = slider("Grout", 0...1, #selector(changed)) {
             $0 < 0.02 ? "none" : String(format: "%.0f%%", $0 * 100)
         }
+        shadowS = slider("Shadow", 0...1, #selector(changed)) {
+            $0 < 0.02 ? "none" : String(format: "%.0f%%", $0 * 100)
+        }
 
         tilesCard = Card("Tiles", symbol: "square.grid.3x3")
         tilesCard.add(captionLabel("The shape of a cell and the finish on it. Independent of the "
@@ -541,6 +545,7 @@ final class GeneralPane: Pane {
         tilesCard.add(row("Roughness", roughS.box))
         tilesCard.add(row("Depth colour", depthMapS.box))
         tilesCard.add(row("Grout", groutS.box))
+        tilesCard.add(row("Shadow", shadowS.box))
         tilesCard.note("Corner rounding takes a cell from a square tile to a round bead, and the "
                      + "block behind it follows — a rounded tile is extruded round, not stood on a "
                      + "square post. Halftone is separate: at 0 every tile fills its cell and colour "
@@ -703,6 +708,7 @@ final class GeneralPane: Pane {
         roughS.value = c.roughness
         depthMapS.value = c.depthMap
         groutS.value = c.grout
+        shadowS.value = c.shadow
         // The desktop's finish decides it: the lock screen and saver can differ,
         // but this is one shared wall and the pane it lives on is the general one.
         UI.setHidden([glassCard], c.finish != .glass)
@@ -796,6 +802,7 @@ final class GeneralPane: Pane {
         c.roughness = roughS.value
         c.depthMap = depthMapS.value
         c.grout = groutS.value
+        c.shadow = shadowS.value
         for s in [depthS, emphS, lightS, splayS, riseS, refractS, dispersS, frostS] { s?.refresh() }
         // Cheap now, expensive later — the split that keeps the window smooth.
         updateLivePreview(c)
