@@ -528,7 +528,42 @@ struct Config: Codable, Equatable {
     /// signature, so modifying one invalidates the seal and macOS then kills
     /// the saver at load with SIGKILL (Code Signature Invalid) — which looks
     /// exactly like a grey screen.
-    static let saverDomain = "com.prakritmaan.elemental.saver"
+    static let stableBundleID = "com.prakritmaan.elemental"
+
+    /// True when this is a pre-release build running alongside the stable one.
+    ///
+    /// Decided from the bundle identifier rather than a compile-time flag, so
+    /// there is exactly one thing that makes a build "pre": the id it was built
+    /// with. A flag and an id can disagree; an id cannot disagree with itself.
+    static var isPreRelease: Bool {
+        (Bundle.main.bundleIdentifier ?? "").hasPrefix(stableBundleID + ".pre")
+    }
+
+    /// The ByHost domain the desktop publishes to and the saver reads from.
+    ///
+    /// DERIVED, because a pre-release must not talk to the stable saver. It
+    /// shares `Config.directory` deliberately — a test build that cannot
+    /// reproduce your real settings is not testing anything — but the saver
+    /// channel has to stay separate, or installing a pre-release saver would
+    /// silently hijack the settings feed of the stable one and you would be
+    /// debugging the wrong pair.
+    ///
+    /// Reads correctly from both ends of the same channel: inside the app the
+    /// id is `…elemental[.pre]` and gains the suffix; inside the saver module
+    /// `Bundle.main` IS the saver, whose id already ends in `.saver`, so it is
+    /// returned untouched. Appending blindly in both places is how you get
+    /// `…saver.saver` and a channel with nothing on either end.
+    ///
+    /// ELEMENTAL_DOMAIN overrides it, which is what lets the offscreen tool —
+    /// a bare executable with no bundle identifier at all — run `--saverhealth`
+    /// against whichever saver you mean.
+    static var saverDomain: String {
+        if let env = ProcessInfo.processInfo.environment["ELEMENTAL_DOMAIN"], !env.isEmpty {
+            return env
+        }
+        let id = Bundle.main.bundleIdentifier ?? stableBundleID
+        return id.hasSuffix(".saver") ? id : id + ".saver"
+    }
 
     /// Key the desktop's current reading is published under, in that same domain.
     static let saverWeatherKey = "weather"

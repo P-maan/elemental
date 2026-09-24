@@ -39,6 +39,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     // MARK: - Lifecycle
 
     func applicationDidFinishLaunching(_ note: Notification) {
+        // A pre-release takes the desk before it touches anything else.
+        takeOverFromStable()
+
         guard let dev = MTLCreateSystemDefaultDevice() else {
             fatal("This Mac has no Metal device.")
             return
@@ -238,6 +241,54 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             // means this app never holds an admin credential even briefly.
             NSWorkspace.shared.open(pkg)
             self.relaunchWhenReplaced()
+        }
+    }
+
+    /// Stop the stable Elemental before a pre-release starts drawing.
+    ///
+    /// The two cannot share a desk. Both own the desktop picture, both publish
+    /// weather to a saver, and both write the same config — so leaving the
+    /// stable one running does not give you two wallpapers, it gives you one
+    /// wallpaper flickering between two engines and a config being overwritten
+    /// from both sides. Whatever you then observe is not a test of either.
+    ///
+    /// Ordered FIRST in launch, before the Metal device or any surface exists,
+    /// because the damage is done the moment two renderers are both installing
+    /// desktop pictures.
+    ///
+    /// Asks politely, then insists. `terminate()` is a normal quit request the
+    /// stable app can take its time over — it has a lock-still export that may
+    /// be mid-flight — so it gets a few seconds, and only a process that has
+    /// genuinely wedged is killed. A pre-release that force-quit immediately
+    /// would be a good way to lose the very still the stable build was writing.
+    ///
+    /// Only ever aims at the stable id, never at another pre-release and never
+    /// at itself.
+    private func takeOverFromStable() {
+        guard Config.isPreRelease else { return }
+        let stable = NSRunningApplication
+            .runningApplications(withBundleIdentifier: Config.stableBundleID)
+            .filter { $0.processIdentifier != ProcessInfo.processInfo.processIdentifier }
+        guard !stable.isEmpty else { return }
+
+        NSLog("Elemental pre-release: stopping %d stable instance(s)", stable.count)
+        stable.forEach { $0.terminate() }
+
+        let deadline = Date().addingTimeInterval(6)
+        while Date() < deadline {
+            let left = NSRunningApplication
+                .runningApplications(withBundleIdentifier: Config.stableBundleID)
+                .filter { $0.processIdentifier != ProcessInfo.processInfo.processIdentifier }
+            if left.isEmpty { break }
+            RunLoop.current.run(mode: .default, before: Date().addingTimeInterval(0.15))
+        }
+        let stubborn = NSRunningApplication
+            .runningApplications(withBundleIdentifier: Config.stableBundleID)
+            .filter { $0.processIdentifier != ProcessInfo.processInfo.processIdentifier }
+        if !stubborn.isEmpty {
+            NSLog("Elemental pre-release: %d stable instance(s) ignored quit, forcing",
+                  stubborn.count)
+            stubborn.forEach { $0.forceTerminate() }
         }
     }
 
@@ -852,8 +903,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         // what is actually running.
         let shortVersion = Bundle.main
             .object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String ?? "?"
-        let header = menu.addItem(withTitle: "Elemental \(shortVersion)",
-                                  action: nil, keyEquivalent: "")
+        // Says which build you are looking at. With two of these installed the
+        // menu bar is the only place that can tell you which one is running,
+        // and a pre-release that looks identical to the stable app is how you
+        // spend an hour debugging the wrong one.
+        let header = menu.addItem(
+            withTitle: "Elemental \(shortVersion)\(Config.isPreRelease ? " — pre-release" : "")",
+            action: nil, keyEquivalent: "")
         header.isEnabled = false
         // Dimmed and small: it is a label, not a command, and it should not
         // compete with the items underneath that actually do something.

@@ -5,7 +5,10 @@
 #  Metal runtime at launch. That is what makes the screensaver work: it does no
 #  file I/O at all, so the legacyScreenSaver sandbox has nothing to deny.
 #
-#  Usage:  ./build.sh [render|app|saver|all]      (default: all)
+#  Usage:  ./build.sh [render|app|saver|all|pre]  (default: all)
+#
+#  `pre` builds a separately-identified "Elemental Pre" that installs beside
+#  the stable app and quits it on launch. See the pre-release block below.
 
 set -euo pipefail
 cd "$(dirname "$0")"
@@ -13,6 +16,46 @@ cd "$(dirname "$0")"
 export DEVELOPER_DIR=/Library/Developer/CommandLineTools
 TARGET="${1:-all}"
 BUILD="build"
+
+# ---------------------------------------------------------------- pre-release
+#
+# `./build.sh pre` builds a SECOND, separately-identified Elemental that can be
+# installed beside the stable one and tested without uninstalling anything.
+#
+# Everything that has to differ, differs:
+#   * bundle id   com.prakritmaan.elemental.pre[.saver] — so macOS treats it as
+#                 a different app, the two can both be installed, and the
+#                 pre-release saver cannot hijack the stable saver's settings
+#                 feed (the ByHost domain is derived from this id).
+#   * app name    "Elemental Pre", so the menu bar and Finder never leave you
+#                 guessing which one you are looking at.
+#
+# What deliberately does NOT differ is `Config.directory`: both read and write
+# the same ~/Library/Application Support/Elemental. A test build that cannot
+# reproduce your real settings is not testing anything. The consequence is
+# worth stating plainly — a pre-release CAN write your real config, which is
+# the price of it being a real test rather than a demo.
+#
+# On launch the pre-release quits the stable app; see `takeOverFromStable`.
+PRE_SUFFIX=""
+PRE_NAME=""
+if [[ "$TARGET" == "pre" ]]; then
+  PRE_SUFFIX=".pre"
+  PRE_NAME=" Pre"
+  TARGET="all"
+  echo "==> PRE-RELEASE build (com.prakritmaan.elemental.pre)"
+fi
+
+# Rewrite a copied Info.plist for the pre-release. A no-op for a stable build,
+# so there is one code path rather than two that have to be kept in step.
+retag_plist() {
+  local plist="$1" base_id="$2" name="$3"
+  [[ -n "$PRE_SUFFIX" ]] || return 0
+  /usr/libexec/PlistBuddy -c "Set :CFBundleIdentifier ${base_id}" "$plist"
+  for k in CFBundleName CFBundleDisplayName; do
+    /usr/libexec/PlistBuddy -c "Set :${k} ${name}" "$plist" 2>/dev/null || true
+  done
+}
 mkdir -p "$BUILD"
 
 # ---------------------------------------------------------------- shader embed
@@ -208,10 +251,13 @@ build_render() {
 }
 
 build_app() {
-  echo "==> Elemental.app"
-  local APP="$BUILD/Elemental.app"
+  echo "==> Elemental${PRE_NAME}.app"
+  local APP="$BUILD/Elemental${PRE_NAME}.app"
+  rm -rf "$APP"
   mkdir -p "$APP/Contents/MacOS" "$APP/Contents/Resources"
   cp App/Info.plist "$APP/Contents/Info.plist"
+  retag_plist "$APP/Contents/Info.plist" \
+              "com.prakritmaan.elemental${PRE_SUFFIX}" "Elemental${PRE_NAME}"
   # Stamp WHEN this binary was built.
   #
   # The updater compares a release's publish time against this rather than
@@ -241,10 +287,13 @@ build_app() {
 }
 
 build_saver() {
-  echo "==> Elemental.saver"
-  local SAV="$BUILD/Elemental.saver"
+  echo "==> Elemental${PRE_NAME}.saver"
+  local SAV="$BUILD/Elemental${PRE_NAME}.saver"
+  rm -rf "$SAV"
   mkdir -p "$SAV/Contents/MacOS" "$SAV/Contents/Resources"
   cp Saver/Info.plist "$SAV/Contents/Info.plist"
+  retag_plist "$SAV/Contents/Info.plist" \
+              "com.prakritmaan.elemental${PRE_SUFFIX}.saver" "Elemental${PRE_NAME}"
   # -Xlinker -bundle produces an MH_BUNDLE. A plain -emit-library gives an
   # MH_DYLIB, which CFBundle will not load as a plug-in — the saver then shows
   # up in System Settings and renders grey.
