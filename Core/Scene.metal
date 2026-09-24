@@ -2257,7 +2257,8 @@ constant float2 RING[8] = {
 
 fragment float4 heightPass(VOut in [[stage_in]],
                            constant Uniforms &U     [[buffer(0)]],
-                           texture2d<float>   cells [[texture(0)]])
+                           texture2d<float>   cells [[texture(0)]],
+                           texture2d<float>   aux   [[texture(1)]])
 {
     constexpr sampler ns(coord::pixel, filter::nearest, address::clamp_to_edge);
     float2 p = in.pos.xy;
@@ -2354,6 +2355,41 @@ fragment float4 heightPass(VOut in [[stage_in]],
     // frees. At emphAmt = 0 this is exactly `base`.
     float flat = base * mix(1.0f, 0.42f, U.emphAmt);
     float h    = flat + (1.0f - flat) * emph * U.emphAmt;
+
+    // ---- DEPTH FOLLOWS WHAT IS IN FRONT, NOT WHAT IS BRIGHTEST.
+    //
+    // Everything above derives height from luminance, and that gets the
+    // world backwards: the sun is the brightest thing in the sky, so it
+    // stood proudest of all, with the cloud that is physically BETWEEN you
+    // and it sitting further back. Out of a window the opposite is obvious —
+    // an overcast deck is the nearest thing there is, and the sun is behind
+    // it, which is the whole reason you cannot see the sun.
+    //
+    // `aux.r` is `seeThrough`: how much of what is behind the deck still
+    // reaches the eye at this cell. 1 is clear sky, 0 is a closed deck. So
+    // its complement is how much cloud stands in front of this cell, which
+    // is exactly the ordering the relief should use.
+    //
+    // And LOW cloud is nearer than high cloud, so it comes further forward.
+    // A sheet of cirrus at ten kilometres is barely closer than the sky; a
+    // stratus lid at three hundred metres is almost in the room.
+    float vis   = saturate(aux.sample(ns, p).r);
+    float front = 1.0f - vis;
+    float total = max(1e-3f, U.cloudLow + U.cloudMid + U.cloudHigh);
+    float lowness = (U.cloudLow * 1.0f + U.cloudMid * 0.55f + U.cloudHigh * 0.22f) / total;
+    float band  = saturate(front * mix(0.35f, 1.0f, lowness));
+
+    // Banded rather than added, so the two layers keep their OWN relief
+    // instead of the cloud flattening into one slab at the top of the range.
+    // Cloud cells occupy the near band and sky cells the far one, and each
+    // still varies inside it by the tonal height computed above.
+    //
+    // At band 0 — a clear sky — this is exactly the old mapping, so the sun
+    // and its beams remain the deepest thing on screen, which is right:
+    // with nothing in front of it, the sun IS the nearest feature.
+    float lo = 0.42f * band;
+    float hi = mix(1.0f, 0.62f, 1.0f - band);
+    h = lo + h * max(0.05f, hi - lo);
 
     // Splay unsettles the courses so the blocks are not a perfectly graded set.
     // It belongs here rather than at the point of use: the raycast has to see

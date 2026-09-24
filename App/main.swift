@@ -244,6 +244,31 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         }
     }
 
+    /// Put the current sky on the Space we just switched to.
+    ///
+    /// Uses the still that is already on disk rather than rendering a new one:
+    /// switching Spaces is something people do dozens of times an hour, and a
+    /// render per switch would be both wasteful and visible. If no still exists
+    /// yet — first run, before the first export — there is nothing to claim
+    /// with and the next export will cover it.
+    ///
+    /// Debounced, because macOS emits this notification more than once for a
+    /// single switch, and because a fast flick through several Spaces should
+    /// settle rather than fire for each one in turn.
+    private func claimCurrentSpace() {
+        guard config.showOnAllSpaces else { return }
+        spaceClaimWork?.cancel()
+        let work = DispatchWorkItem { [weak self] in
+            guard let self, let url = self.lockStill?.currentStillURL else { return }
+            for screen in NSScreen.screens {
+                try? NSWorkspace.shared.setDesktopImageURL(url, for: screen, options: [:])
+            }
+        }
+        spaceClaimWork = work
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.4, execute: work)
+    }
+    private var spaceClaimWork: DispatchWorkItem?
+
     /// Stop the stable Elemental before a pre-release starts drawing.
     ///
     /// The two cannot share a desk. Both own the desktop picture, both publish
@@ -747,6 +772,16 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             [weak self] _ in self?.surfaces.values.forEach { $0.pause() } }
         wnc.addObserver(forName: NSWorkspace.screensDidWakeNotification, object: nil, queue: .main) {
             [weak self] _ in self?.resumeVisible(); self?.refreshEverything(reason: "display wake") }
+
+        // Convert each Space as you arrive on it. See `Config.showOnAllSpaces`:
+        // the static desktop picture is stored per Space and only the frontmost
+        // one can be written, so standing on a Space is the only moment it can
+        // be fixed. Cheap — it reuses the still already on disk and does not
+        // render anything.
+        wnc.addObserver(forName: NSWorkspace.activeSpaceDidChangeNotification,
+                        object: nil, queue: .main) { [weak self] _ in
+            self?.claimCurrentSpace()
+        }
 
         let dnc = DistributedNotificationCenter.default()
         dnc.addObserver(forName: .init("com.apple.screenIsLocked"), object: nil, queue: .main) {

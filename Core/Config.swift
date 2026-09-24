@@ -586,6 +586,27 @@ struct Config: Codable, Equatable {
     /// Key the desktop's current reading is published under, in that same domain.
     static let saverWeatherKey = "weather"
 
+    /// Put the sky on every Space, not just the ones you happened to visit.
+    ///
+    /// The ANIMATED wallpaper is already on all Spaces — its window carries
+    /// `.canJoinAllSpaces`, so there is one window and every Space sees it.
+    /// This is about the STATIC desktop picture underneath, which macOS stores
+    /// PER SPACE: each Space keeps its own entry naming its own file, and a
+    /// Space you have not visited since installing still names whatever was
+    /// there before. `NSWorkspace.setDesktopImageURL` only ever writes the
+    /// Space that is in front, and nothing in the public API reaches the rest —
+    /// `AllSpacesAndDisplays` in the wallpaper store is written by System
+    /// Settings' own picker and by nothing else.
+    ///
+    /// So a Space can only be converted by being STOOD ON. That is what this
+    /// does: when you switch to a Space, the current sky is written to it
+    /// there and then, so every Space becomes correct the first time you visit
+    /// it and stays correct afterwards.
+    ///
+    /// On by default. A wallpaper that is only on some of your desks is not a
+    /// wallpaper, it is a surprise.
+    var showOnAllSpaces: Bool = true
+
     /// A settings file laid BESIDE the .saver bundle, not inside it.
     ///
     /// The delivery channel that had not been tried, and the one with the best
@@ -609,6 +630,21 @@ struct Config: Codable, Equatable {
         FileManager.default.homeDirectoryForCurrentUser
             .appendingPathComponent("Library/Screen Savers")
             .appendingPathComponent("Elemental\(preRelease ? " Pre" : "").settings.json")
+    }
+
+    /// The desktop's current reading, beside the bundle, for the same reason
+    /// the settings are — see `saverSidecarURL`.
+    ///
+    /// Settings alone are not enough. The saver mirrors the desktop's WEATHER
+    /// too, and that travels the same ByHost channel; if only the settings
+    /// arrive, the saver draws the right style for a sky it fetched itself, at
+    /// a place it guessed from the timezone. That is the reported symptom
+    /// exactly — "neither the weather nor the timing matches" — because the
+    /// fallback place moves the sun as well as the forecast.
+    static func saverWeatherSidecarURL(preRelease: Bool = isPreRelease) -> URL {
+        FileManager.default.homeDirectoryForCurrentUser
+            .appendingPathComponent("Library/Screen Savers")
+            .appendingPathComponent("Elemental\(preRelease ? " Pre" : "").weather.json")
     }
 
     /// Key the saver reports back under, in that same ByHost domain.
@@ -820,6 +856,7 @@ extension Config {
         depthMap  = c.lenient(.depthMap,  d.depthMap)
         grout     = c.lenient(.grout,     d.grout)
         shadow    = c.lenient(.shadow,    d.shadow)
+        showOnAllSpaces = c.lenient(.showOnAllSpaces, d.showOnAllSpaces)
         playbackOnWake     = c.lenient(.playbackOnWake, d.playbackOnWake)
         playbackMaxSeconds = c.lenient(.playbackMaxSeconds, d.playbackMaxSeconds)
         animateOnLock      = c.lenient(.animateOnLock, d.animateOnLock)
@@ -883,6 +920,12 @@ enum SaverWeather {
                               kCFPreferencesCurrentUser, kCFPreferencesCurrentHost)
         CFPreferencesSynchronize(Config.saverDomain as CFString,
                                  kCFPreferencesCurrentUser, kCFPreferencesCurrentHost)
+
+        // And beside the bundle, which is the channel that reaches the saver.
+        let side = Config.saverWeatherSidecarURL()
+        try? FileManager.default.createDirectory(
+            at: side.deletingLastPathComponent(), withIntermediateDirectories: true)
+        try? data.write(to: side, options: .atomic)
     }
 
     /// The raw published payload, for the health check. Nil if nothing is there.
@@ -917,6 +960,18 @@ enum SaverWeather {
     /// chose as a different one.
     static func read(lat: Double, lon: Double, place: String? = nil,
                      maxAge: TimeInterval = 3 * 3600) -> WeatherState? {
+        // Sidecar first: under the saver's sandbox the preferences below may
+        // never arrive, and a reading that does not arrive is why the saver
+        // shows a different sky from the desktop. See `saverWeatherSidecarURL`.
+        if let data = try? Data(contentsOf: Config.saverWeatherSidecarURL(
+                preRelease: (Bundle.main.bundleIdentifier ?? "").contains(".pre")
+                            || (Config.saverBundleID ?? "").contains(".pre"))),
+           let p = try? JSONDecoder().decode(Payload.self, from: data) {
+            let age = Date().timeIntervalSince1970 - p.at
+            if age <= maxAge, matches(p, lat: lat, lon: lon, place: place) {
+                return p.weather
+            }
+        }
         CFPreferencesSynchronize(Config.saverDomain as CFString,
                                  kCFPreferencesCurrentUser, kCFPreferencesCurrentHost)
         guard let json = CFPreferencesCopyValue(Config.saverWeatherKey as CFString,
@@ -926,9 +981,22 @@ enum SaverWeather {
               let data = json.data(using: .utf8),
               let p = try? JSONDecoder().decode(Payload.self, from: data) else { return nil }
         guard Date().timeIntervalSince1970 - p.at < maxAge else { return nil }
-        if let a = p.place, let b = place, a == b { return p.weather }
-        guard abs(p.lat - lat) < 0.35, abs(p.lon - lon) < 0.35 else { return nil }
+        guard matches(p, lat: lat, lon: lon, place: place) else { return nil }
         return p.weather
+    }
+
+    /// Is this published reading for the place we are drawing?
+    ///
+    /// Factored out so the sidecar and the preferences path cannot drift apart
+    /// — two copies of a rule like this is how one of them quietly gets a
+    /// different epsilon. Name first, then a WIDE coordinate fallback: the two
+    /// sides legitimately disagree by a few kilometres because the app
+    /// publishes from a live `scenePlace` that Location Services keeps
+    /// re-resolving, while the saver reads the copy last written to disk.
+    private static func matches(_ p: Payload, lat: Double, lon: Double,
+                                place: String?) -> Bool {
+        if let a = p.place, let b = place, a == b { return true }
+        return abs(p.lat - lat) < 0.35 && abs(p.lon - lon) < 0.35
     }
 }
 

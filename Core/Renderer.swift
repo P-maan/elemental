@@ -681,6 +681,9 @@ final class ElementalRenderer {
                 if a < 1 { e.setBlendColor(red: a, green: a, blue: a, alpha: a) }
                 e.setFragmentBuffer(uniformBuf, offset: 0, index: 0)
                 e.setFragmentTexture(cellTex, index: 0)
+                // Cloud occlusion per cell, so relief can follow WHAT IS IN
+                // FRONT rather than what is brightest — see heightPass.
+                e.setFragmentTexture(auxTex, index: 1)
                 e.drawPrimitives(type: .triangle, vertexStart: 0, vertexCount: 3)
                 e.endEncoding()
                 heightPrimed = true

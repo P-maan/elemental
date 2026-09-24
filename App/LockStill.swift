@@ -73,6 +73,12 @@ final class LockStillExporter {
     /// its own race, which was attempt two's other bug.
     private var currentURL: URL?
 
+    /// The still currently installed as the desktop picture, for the
+    /// Space-claiming path in the app delegate. Read from the main thread while
+    /// `currentURL` is written on `exportQueue`, so it is republished here
+    /// under the same queue rather than read across threads.
+    private(set) var currentStillURL: URL?
+
     private func makeFileURL() -> URL {
         let stamp = Int(Date().timeIntervalSince1970)
         return Config.directory.appendingPathComponent("scene-\(stamp).png")
@@ -222,6 +228,7 @@ final class LockStillExporter {
             try? NSWorkspace.shared.setDesktopImageURL(fileURL, for: screen, options: [:])
         }
         currentURL = fileURL
+        DispatchQueue.main.async { [weak self] in self?.currentStillURL = fileURL }
         // Also refresh any path the wallpaper store still references.
         //
         // NSWorkspace.setDesktopImageURL only writes the per-display scope. The
