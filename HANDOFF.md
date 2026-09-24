@@ -176,10 +176,15 @@ open -g build/Elemental.app
    defaults — the very bug being chased. Use `Bundle(for: type(of: self))`, or
    `Config.saverBundleID`, which the saver sets before reading anything.
 
-17. **Preferences do not cross the saver sandbox, in either direction.**
-   Measured: the app writes `com.prakritmaan.elemental.saver` ByHost and the
-   saver reads defaults; a status written from the saver appeared in NO domain,
-   not even a wrong one. Sandboxed processes have preference access redirected
+17. **Preferences MAY not cross the saver sandbox — NOT actually measured.**
+   CORRECTION to what commit 1bd7f04 claimed. Every "the saver wrote no
+   status" result came from runs where the saver NEVER EXECUTED: a screenshot
+   taken during `open -a ScreenSaverEngine` showed the plain desktop, no saver
+   at all (see trap 19). So the absence of a status proved nothing about the
+   sandbox. The user's own report — the saver's weather AND timing both wrong,
+   i.e. it is drawing a fallback place — is still consistent with no settings
+   arriving, and the sidecar below is a more robust channel either way. But
+   whether ByHost itself crosses is unknown. Sandboxed processes have preference access redirected
    into their container, and that container is neither readable nor writable
    from outside. The old comment claiming ByHost is "the one channel the
    sandbox permits" was an assumption, not a measurement.
@@ -195,10 +200,36 @@ open -g build/Elemental.app
    on — you end up testing the old app and believing it is new. Verify with
    `pgrep -lf` which path is actually running, or run straight out of `build/`.
 
-19. **`open -a ScreenSaverEngine` fires the didstart notification but does not
-   appear to load the module** on macOS 26/27 — four instrumented runs produced
-   no evidence of module code executing. Do not use it to test a saver; trigger
-   the saver naturally (hot corner or idle timeout).
+19. **You cannot start the screen saver from a shell on macOS 26/27.** PROVEN
+   with `screencapture` during the attempt: `open -a ScreenSaverEngine` and
+   `osascript -e 'tell application "System Events" to start current screen
+   saver'` BOTH fire the `com.apple.screensaver.didstart` notification — so
+   the app's debug log records a saver start — and the screen still shows the
+   plain desktop. No module loads. Every "the saver ran and did X" conclusion
+   drawn from those triggers is invalid. Only a hot corner or the idle timeout
+   runs it. Screenshot before believing a saver ran.
+
+20. **Also: `elemental-render` does not apply dynamic heading.** `--heading
+   dynamic` is accepted and the summary still prints `facing 180°`, because the
+   app EASES toward `headingTarget` over time and a still has no time to ease.
+   Pass `--facing <az>` explicitly (the sun's azimuth, from the summary) to see
+   what the app would face. A "the view points the wrong way" finding from a
+   still is almost certainly this.
+
+21. **The summary's `style` line is SHAPE / FINISH, not material.**
+   `--material matte` works and still prints `square / glass`, because
+   `finish` is a separate, migration-only field. Read material from
+   `--analyze` or the config, not from that line.
+
+22. **The sky and the lit-cloud pipeline — read before touching colour.** At
+   twilight the sky is blue overhead because of OZONE (Chappuis band) plus an
+   early zenith hand-over; take either away and the whole dome goes brown in
+   every direction. Lit cirrus is a light source, not a filter: four stages of
+   the cell pass assumed cloud only filters sky light, and each dragged salmon
+   cirrus toward sky-blue. They all read ONE `cirrusGlow` now. Check a sunset
+   with `--probe` from three facings (toward, away, side-on) — a real sky
+   differs between them, and identical rows mean something direction-free is
+   wrong.
 
 ## Recurring bug classes
 
