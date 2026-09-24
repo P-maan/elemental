@@ -316,7 +316,24 @@ inline float3 skyRGB(float sAlt, float yFrac, float dAzDeg,
     float upper    = saturate(viewAlt / 35.0f);
     float antiSide = saturate(-cos(dAzDeg * (M_PI_F / 180.0f)));
     float lowLit   = (1.0f - upper) * (1.0f - antiSide);
-    float below = saturate((1.5f - sAlt) / 5.5f) * (1.0f - 0.72f * lowLit);
+    // TWO HAND-OVERS, not one. The reasoning above was right and its single
+    // ramp undid it: `(1.5 - sAlt) / 5.5` gave the zenith the same slow
+    // schedule as the horizon, so at a sun 0.3 degrees down the sky
+    // overhead was only a third of the way to blue — and measured from a
+    // real window at that moment it was entirely blue, in every direction,
+    // while the engine drew the whole dome sunset-brown whichever way it
+    // faced (top row (34,22,23) facing the sun, away from it, and side on).
+    //
+    // The horizon keeps its slow hand-over, because low on the sun's side
+    // the reddened beam really is the dominant light. The upper sky gets an
+    // early one, starting while the sun is still a few degrees up, because a
+    // zenith view is lit from far above the terminator and has seen almost
+    // none of that reddening — which is exactly what Lynch et al. measure.
+    // Blended by `upper`, so there is no seam where one gives way to the
+    // other. At any real daytime altitude both are zero and nothing moves.
+    float horizonHand = saturate((1.5f - sAlt) / 5.5f);
+    float zenithHand  = saturate((5.0f - sAlt) / 6.0f);
+    float below = mix(horizonHand, zenithHand, upper) * (1.0f - 0.72f * lowLit);
     chroma = mix(chroma, float3(0.798f, 1.012f, 1.478f), below);
 
     // ---- purity restored where the colour came from RAYLEIGH
@@ -370,6 +387,43 @@ inline float3 skyRGB(float sAlt, float yFrac, float dAzDeg,
     // is green. Capping only the upper side leaves the magenta-leaning deep
     // twilight, where green legitimately falls below both, completely alone.
     chroma.g = min(chroma.g, max(chroma.r, chroma.b));
+
+    // ---- ozone: WHY THE SKY ABOVE A SUNSET IS BLUE.
+    //
+    // Measured against the engine on a real evening: facing the sunset with
+    // the sun 0.3 degrees down, every row of the rendered sky came out with R
+    // above G above B — the TOP row was (33,25,14), a dark brown — while the
+    // photograph from the same window showed plain blue overhead. Rayleigh
+    // scattering alone cannot produce that blue: at a low sun its beam has
+    // lost most of its short wavelengths before it gets anywhere near the
+    // zenith, which is exactly why the model went warm everywhere.
+    //
+    // The blue is OZONE. Its Chappuis band absorbs across the orange and red
+    // and barely touches blue, and the layer sits about 25 km up — so when
+    // the sun is low, the light that reaches the upper sky has come in almost
+    // horizontally through tens of kilometres of it. Hulburt showed in 1953
+    // that without ozone the twilight zenith would be grey-yellow; it is the
+    // single largest reason the sky stays blue above a sunset.
+    //
+    // Vertical optical depth for a typical 300 DU column, from the Chappuis
+    // cross-sections: about 0.030 at the red end, 0.035 in the green, 0.003
+    // in the blue. The slant path through a thin shell 25 km up tops out near
+    // 38 airmasses at the horizon rather than running off to infinity, which
+    // is why this is bounded.
+    //
+    // Hue only, applied BEFORE the luminance normalisation below, so the sky
+    // keeps the brightness the verified `skyBr` ramp gives it and only its
+    // colour changes. And strongest overhead, because near the sunward
+    // horizon the beam's ordinary reddening is the larger effect and is the
+    // warm band everyone expects — the ozone blue lives ABOVE it.
+    {
+        float saRad = max(sAlt, -2.0f) * (M_PI_F / 180.0f);
+        float ozM   = min(38.0f, 1.0f / max(sin(saRad) + 0.026f, 0.026f));
+        float3 ozT  = exp(-float3(0.030f, 0.035f, 0.003f) * ozM);
+        float lift  = saturate(viewAlt / 30.0f);
+        chroma = mix(chroma, chroma * ozT, lift);
+    }
+
     chroma /= max(dot(chroma, LUMW), 1e-6f);
 
     // ---- exposure
@@ -1706,7 +1760,17 @@ fragment CellOut cellPass(VOut in [[stage_in]],
         // colour. Daylight cirrus stays as faint as it was; only the lit case
         // opens up, because that is the case where cloud is the brighter of
         // the two and the eye reads it as an object rather than a veil.
-        float a = highAmt * mix(0.42f, 0.80f, saturate(glow));
+        // THE ROOT OF THE LAVENDER. `cr` arrives here as the sky's colour and
+        // moves only `a` of the way to the cloud's, so at density 0.5 and the
+        // old ceiling of 0.80 a burning streak came out 40% salmon and 60% sky
+        // blue — lavender — before any later stage had touched it. Three later
+        // fixes kept that colour faithfully and could not undo it.
+        //
+        // Lit cirrus is saturated with its own light at far lower density than
+        // it takes to occlude anything, so its claim rises with density much
+        // faster than coverage does: most of a streak is fully the colour of
+        // the light on it, and only its frayed edges show sky through.
+        float a = mix(highAmt * 0.42f, saturate(highAmt * 1.9f), saturate(glow));
         cr += (hc.r - cr) * a; cg += (hc.g - cg) * a; cb += (hc.b - cb) * a;
         w = w + (1.0f - w) * a;
     }
@@ -1894,8 +1958,23 @@ fragment CellOut cellPass(VOut in [[stage_in]],
         if (qx * qx + qy * qy < SP * SP * 2.0f) L += 150.0f * sin(M_PI_F * a2);
     }
 
+    // How much this cell is LIT CIRRUS — cloud that the low sun is turning
+    // into a light source. Defined once, here, because three later stages
+    // each treated cloud purely as a filter of the sky behind it, and each
+    // quietly repainted a burning salmon streak with the blue of that sky.
+    // All three consult this one number so they cannot disagree about when a
+    // cloud is glowing. Zero by day (nothing is reddened), zero after dark
+    // (nothing is lit), zero for any cell without cirrus.
+    float2 twH = twilightLit(sAlt, 1.0f);
+    float cirrusGlow = saturate(highAmt * twH.x * twH.y * 1.6f);
+
+    // The cloud's colour is mixed into a grey base by COVERAGE — correct for a
+    // cloud that only dims what is behind it, and why thin cirrus came out as
+    // half grey before any later stage had touched it. A glowing streak is not
+    // thin in that sense; its colour is its own light.
+    float cw = max(w, cirrusGlow);
     float R0 = L, G0 = L + 4.0f, B0 = L + 11.0f;
-    if (w > 0.0f) { R0 += (cr - R0) * w; G0 += (cg - G0) * w; B0 += (cb - B0) * w; }
+    if (cw > 0.0f) { R0 += (cr - R0) * cw; G0 += (cg - G0) * cw; B0 += (cb - B0) * cw; }
     // How far the genuinely EMISSIVE sources pushed this cell past display
     // white, measured before the clamp throws it away. Everything that has
     // added to L above is either the sky (which lives well inside the range) or
@@ -2003,6 +2082,29 @@ fragment CellOut cellPass(VOut in [[stage_in]],
     // zero: a deck is a diffuser, not a shutter, and some skylight is scattered
     // through even a closed one.
     float skyReach = 0.14f + 0.86f * seeThrough;
+
+    // ...EXCEPT where the cloud in front is itself a light source.
+    //
+    // The law above treats every cloud as a filter: skylight arrives from
+    // behind and the cloud merely lets some of it through, so a thin deck
+    // takes most of its hue from the sky. That is right for cloud in shadow
+    // and wrong for cloud the low sun is lighting. Lit cirrus at sunset is
+    // BRIGHTER than the sky behind it and is emitting its own colour — the
+    // eye reads it as salmon against blue precisely because its light, not
+    // the sky's, is what arrives from that direction.
+    //
+    // Found the moment the sky model was corrected. While the twilight sky
+    // was (wrongly) brown, painting the sky's hue over thin cirrus happened
+    // to leave it warm, and the error was invisible. With the sky properly
+    // blue, the same rule repainted every burning streak of cirrus blue —
+    // the cloud was being coloured by what it was in front of.
+    //
+    // So the sky's reach is withdrawn in proportion to how lit the cirrus is,
+    // using the same twilight model the cloud colour itself uses, so the two
+    // cannot disagree about when the cloud is glowing. Unlit cirrus — any
+    // daytime veil, any cirrus after its light has gone — is untouched.
+    skyReach *= 1.0f - 0.88f * cirrusGlow;
+
     float tf = (0.62f + max(0.0f, 1.0f - li) * 0.30f) * skyReach;
     g += (skyChroma * gl - g) * tf;
 
@@ -2077,6 +2179,17 @@ fragment CellOut cellPass(VOut in [[stage_in]],
         // coverage; it just no longer decides the matter.
         float sw = saturate(w) * (0.74f + 0.26f * min(1.0f, sat / 70.0f))
                  * max(0.25f, li);
+        // Lit cirrus claims the pixel by its LIGHT, not its coverage.
+        //
+        // Coverage is the right authority for a cloud that blocks light, and
+        // thin cirrus blocks very little — so at sunset it was admitted at
+        // roughly half weight and came out as the average of burning salmon
+        // and the blue sky behind it: lavender. Out of a window lit cirrus is
+        // the brightest thing in its part of the sky and you see its colour,
+        // not an average. The third stage that had to learn this, after the
+        // cloud tint and the sky-chroma reach, and it uses the same
+        // `cirrusGlow` so all three agree on when the cloud is glowing.
+        sw = max(sw, 0.94f * cirrusGlow);
         g += (float3(R0, G0, B0) - g) * sw;
     }
     if (U.flashAmp > 0.0f) {
