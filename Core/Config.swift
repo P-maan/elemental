@@ -533,6 +533,25 @@ struct Config: Codable, Equatable {
     /// Key the desktop's current reading is published under, in that same domain.
     static let saverWeatherKey = "weather"
 
+    /// Key the saver reports back under, in that same ByHost domain.
+    ///
+    /// REPORTING BACK IS THE POINT. When config delivery fails the saver does
+    /// not error — it renders built-in defaults, which look like a perfectly
+    /// plausible sky that simply is not yours, so the only symptom is "the
+    /// saver does not match". NSLog does not reach `log show` from inside that
+    /// sandbox, so there has never been a way to tell a saver that read your
+    /// settings from one that never saw them.
+    ///
+    /// It has to be this domain, because nothing else crosses the boundary in
+    /// both directions. Measured on this machine: the legacyScreenSaver
+    /// container is neither writable NOR readable from outside — "Operation not
+    /// permitted" either way — so the app cannot deliver a file into it and
+    /// cannot read a status file out of it. ByHost preferences are the only
+    /// channel, which is what makes this diagnostic worth having: if the status
+    /// ever appears, the channel works, and if it never does, that IS the fault.
+    static let saverStatusKey = "status"
+
+
     func save() {
         try? FileManager.default.createDirectory(at: Self.directory,
                                                  withIntermediateDirectories: true)

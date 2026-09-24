@@ -72,6 +72,30 @@ if args["saverhealth"] != nil {
         .contentModificationDate
     let h = SaverHealth.check(config: cfg, appBuildDate: built)
     print("saver health for \(cfg.scenePlace.name)")
+
+    // ---- What the saver ITSELF last read, which is the only thing that
+    // actually answers the question. Everything else here is checked from out
+    // here, where delivery always looks fine: the app can write its ByHost
+    // domain perfectly and the sandboxed saver can still see none of it, fall
+    // back to defaults, and draw a plausible sky that is not the user's.
+    let reported = CFPreferencesCopyValue(Config.saverStatusKey as CFString,
+                                          Config.saverDomain as CFString,
+                                          kCFPreferencesCurrentUser,
+                                          kCFPreferencesCurrentHost) as? String
+    if let t = reported?.replacingOccurrences(of: "; ", with: "\n") {
+        print("  --- what the saver last read for itself ---")
+        for line in t.split(separator: "\n") { print("  \(line)") }
+        // Desktop side by side, so a mismatch is visible rather than inferred.
+        print("  --- what the desktop is set to ---")
+        print(String(format: "  gridRows   %d", cfg.gridRows))
+        print("  material   \(cfg.material)")
+        print(String(format: "  roughness  %.2f  depthMap %.2f  grout %.2f  shadow %.2f",
+                     cfg.roughness, cfg.depthMap, cfg.grout, cfg.shadow))
+    } else {
+        print("  [needs you]   the saver has never recorded what it read.")
+        print("                Either it has not run since this build was")
+        print("                installed, or it cannot write its own container.")
+    }
     if h.isHealthy {
         print("  OK — installed, settings delivered, weather present and current")
     } else {

@@ -143,6 +143,30 @@ open -g build/Elemental.app
    and are all wrong in that file; bash arrays are 0-indexed and unquoted
    expansions word-split. The reverse trap (#2) still applies at the prompt.
 
+15. **The legacyScreenSaver container is a one-way mirror — do not try to use
+   it.** Measured on this machine, from an unsandboxed process:
+   `~/Library/Containers/com.apple.ScreenSaver.Engine.legacyScreenSaver/Data/…`
+   is **neither writable nor readable** — "Operation not permitted" both ways.
+   So the app cannot hand the saver a config file there, and the saver cannot
+   leave a status file there for the app to read. Two plausible-sounding fixes
+   die on this; both were tried and measured rather than assumed.
+
+   Note the trap inside the trap: `ls` on a denied path prints `total 0`, which
+   reads exactly like an empty directory. It was briefly taken as "the folder
+   exists and is empty" when it actually meant "you may not look". Test a
+   container path by WRITING and READING it, never by listing it.
+
+   **ByHost preferences are the only channel that crosses that sandbox**, in
+   either direction — which is why the saver now reports what it read back
+   through the same domain the settings arrive on. That makes the diagnostic
+   self-proving: if the status appears the channel works, and if it never
+   appears, that IS the fault. `--saverhealth` prints it beside the desktop's
+   settings.
+
+   Also: **`--saverhealth` run from the dev tree always reports "the installed
+   saver is older than this app"**, because it compares against `Bundle.main`,
+   which there is the binary you just built. Not evidence of anything.
+
 ## Recurring bug classes
 
 Most real bugs found here were one of four shapes. Look for them first:

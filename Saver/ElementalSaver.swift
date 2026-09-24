@@ -104,6 +104,13 @@ final class ElementalSaverView: ScreenSaverView {
         var cfg = Config()
         var source = "defaults"
 
+        // ByHost preferences are the ONLY channel that crosses this sandbox.
+        //
+        // Measured: the legacyScreenSaver container is neither writable nor
+        // readable from outside, so the app cannot hand us a file and we cannot
+        // leave one where it can be found. Application Support below is kept
+        // for the case where this module is run OUTSIDE the sandbox, where the
+        // same path is the real one — it can never be populated in here.
         if let defaults = ScreenSaverDefaults(forModuleWithName: Config.saverDomain),
            let json = defaults.string(forKey: "config"),
            let data = json.data(using: .utf8),
@@ -117,6 +124,20 @@ final class ElementalSaverView: ScreenSaverView {
         }
 
         lastConfigRead = Date()
+
+        // RECORD WHAT WE ACTUALLY READ, because nothing else can.
+        //
+        // This is the gap that made "the saver does not match the desktop"
+        // undiagnosable for months. When config delivery fails the saver does
+        // not error — it renders built-in defaults, which look like a perfectly
+        // plausible sky, so the only symptom is that it is not YOUR sky. NSLog
+        // does not reach `log show` from inside this sandbox, so from outside
+        // there has been no way to distinguish a saver that read your settings
+        // from one that never saw them.
+        //
+        // Written to our own Application Support, which under the sandbox is
+        // the container — readable from outside, where `--saverhealth` reads it.
+        writeStatus(source: source, cfg: cfg)
         // Captured BEFORE `saverConfig` resolves it away. `Config.resolved`
         // returns `self` when a surface mirrors the desktop, which is correct
         // for every appearance setting and loses the one fact we need here: that
@@ -146,6 +167,39 @@ final class ElementalSaverView: ScreenSaverView {
             resizeIfNeeded()
         }
         refreshAstro(cfg: resolved)
+    }
+
+    /// Report what we actually read, back through the only channel that
+    /// leaves this sandbox.
+    ///
+    /// Written to our own ByHost domain, which the app can read from outside.
+    /// That makes this diagnostic self-proving: it travels the SAME path the
+    /// settings arrive on, so if the status never appears, config delivery is
+    /// broken — which is the thing being diagnosed.
+    ///
+    /// Best-effort. If it is denied we are exactly where we were before, and it
+    /// must never be able to stop the saver drawing.
+    private func writeStatus(source: String, cfg: Config) {
+        let r = cfg.saverConfig
+        let text = [
+            "read \(ISO8601DateFormatter().string(from: Date()))",
+            "source \(source)",
+            "mirrors \(cfg.saver.mirrorsDesktop)",
+            "place \(r.effectivePlace.name)",
+            "gridRows \(r.gridRows)",
+            "material \(r.material)",
+            "rounding \(r.rounding)",
+            "roughness \(r.roughness)",
+            "depthMap \(r.depthMap)",
+            "grout \(r.grout)",
+            "shadow \(r.shadow)",
+            "poster \(r.poster)",
+        ].joined(separator: "; ")
+        CFPreferencesSetValue(Config.saverStatusKey as CFString, text as CFString,
+                              Config.saverDomain as CFString,
+                              kCFPreferencesCurrentUser, kCFPreferencesCurrentHost)
+        CFPreferencesSynchronize(Config.saverDomain as CFString,
+                                 kCFPreferencesCurrentUser, kCFPreferencesCurrentHost)
     }
 
     private var loadedConfig = Config()
