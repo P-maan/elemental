@@ -544,6 +544,45 @@ inline float3 sunTint(float sAlt, float aqiF) {
 }
 
 // Cloud face tint: warm at golden hour, cool blue-grey at night
+/// How lit a cloud layer still is, and how far the light has reddened.
+///
+/// THE SUN DOES NOT SET FOR EVERYTHING AT ONCE. It sets for you, then for the
+/// rooftops, then for the low deck, and last of all for the cirrus — which is
+/// ten kilometres up and can still see it long after the ground is in shadow.
+/// That lag is the whole of a sunset: the sky goes blue while the cloud above
+/// it is still burning, which is why the cloud carries the colour and the
+/// horizon is only the source of it.
+///
+/// `highness` is 0 for a low deck and 1 for cirrus. A layer at height h is
+/// geometrically lit until the sun is roughly sqrt(2h/R) below the horizon —
+/// about 3 degrees for 10 km — and scattering keeps it glowing past that, so
+/// the numbers here run a little deeper than the geometry alone: about 1.5
+/// degrees for the low deck and 8.5 for high cloud, which is what the eye
+/// actually sees.
+///
+/// Returns: x = how lit (1 full, 0 in shadow), y = how reddened (0 white, 1 at
+/// or below the horizon).
+inline float2 twilightLit(float sAlt, float highness) {
+    float linger = 1.5f + 7.0f * saturate(highness);
+    float lit    = saturate((sAlt + linger) / (linger + 2.0f));
+    float redden = saturate(1.0f - (sAlt + 2.0f) / 12.0f);
+    return float2(lit, redden);
+}
+
+/// The colour low sunlight has by the time it reaches a cloud.
+///
+/// Reddens as the sun drops, because the beam is crossing more and more air and
+/// losing its short wavelengths on the way — the same Rayleigh extinction that
+/// makes the sun itself red, applied to the light arriving at a cloud base
+/// rather than at the eye. Orange while the sun is up, salmon at the horizon,
+/// and magenta below it, where the only light left has come the furthest.
+inline float3 twilightColour(float sAlt) {
+    float3 c = mix(float3(255.0f, 214.0f, 170.0f),
+                   float3(255.0f, 146.0f, 138.0f),
+                   saturate(1.0f - (sAlt + 2.0f) / 12.0f));
+    return mix(c, float3(206.0f, 116.0f, 152.0f), saturate(-sAlt / 6.0f));
+}
+
 inline float3 cloudTint(float sAlt, float light, float shade) {
     // Daylight cloud is very nearly neutral, and only just on the cool side.
     //
@@ -564,8 +603,19 @@ inline float3 cloudTint(float sAlt, float light, float shade) {
                       max(0.0f,  shade + gf * 14.0f - 8.0f),
                       max(0.0f,  shade - gf * 45.0f));
     }
+    // Below the horizon the deck used to go straight to this cold, dimmed
+    // grey — a hard cliff at -1 degree. That is why every sunset died the
+    // moment the sun touched the horizon, with the deck turning blue while
+    // the real sky was at its most colourful. The cold value is still where
+    // it ENDS UP; it is now arrived at over the few degrees the light
+    // actually takes to leave, rather than in one step.
     float v = shade * 0.72f;
-    return float3(max(0.0f, v - 8.0f), max(0.0f, v + 2.0f), min(255.0f, v + 20.0f));
+    float3 cold = float3(max(0.0f, v - 8.0f), max(0.0f, v + 2.0f),
+                         min(255.0f, v + 20.0f));
+    float2 tw = twilightLit(sAlt, 0.25f);          // mid/low deck
+    if (tw.x <= 0.001f) return cold;
+    float3 warm = twilightColour(sAlt) * (0.35f + 0.55f * (shade / 235.0f));
+    return mix(cold, min(float3(255.0f), warm), tw.x * tw.y * light);
 }
 
 // The luminance ramp LUT (HR/HG/HB in roomstand.py:1572), evaluated directly.
@@ -1622,7 +1672,36 @@ fragment CellOut cellPass(VOut in [[stage_in]],
         L += highAmt * (28.0f + 34.0f * skyBrAmt) + rim * 96.0f;
         float3 hc = mix(float3(186.0f, 198.0f, 220.0f),
                         float3(236.0f, 242.0f, 252.0f), saturate(skyBrAmt + rim));
-        float a = highAmt * 0.42f;
+
+        // CIRRUS IS THE LAST THING THE SUN TOUCHES, and it was the one layer
+        // that could never be warm: the two colours above are both cool
+        // blue-whites, mixed only by brightness, so high cloud was painted the
+        // same blue-white at noon and at dusk. A sky reported as 0% low, 0%
+        // mid, 75% high — an evening of lit cirrus, the commonest beautiful
+        // sky there is — came out grey-blue with the colour pooled uselessly
+        // at the horizon.
+        //
+        // It is ten kilometres up, so it sees the sun for several degrees
+        // after the ground has lost it, and it is thin ice that scatters
+        // forward — which is why it goes salmon, then pink, then magenta,
+        // while the sky behind it is already deep blue.
+        float2 tw = twilightLit(sAlt, 1.0f);
+        float glow = tw.x * tw.y;
+        if (glow > 0.001f) {
+            hc = mix(hc, twilightColour(sAlt), saturate(glow * 0.96f));
+            // Lit cloud against a darkening sky is BRIGHTER than the sky, not
+            // merely differently coloured. Without this the tint arrives on
+            // something too dark to read it on.
+            L += highAmt * glow * 96.0f + rim * glow * 58.0f;
+        }
+        // Lit cirrus COVERS the sky it is in front of. At 0.42 the cloud only
+        // ever tinted the sky slightly, so a sunset came out as one smooth
+        // wash instead of bands of burning cloud with blue between them — the
+        // structure was there in the density and could not be seen in the
+        // colour. Daylight cirrus stays as faint as it was; only the lit case
+        // opens up, because that is the case where cloud is the brighter of
+        // the two and the eye reads it as an object rather than a veil.
+        float a = highAmt * mix(0.42f, 0.80f, saturate(glow));
         cr += (hc.r - cr) * a; cg += (hc.g - cg) * a; cb += (hc.b - cb) * a;
         w = w + (1.0f - w) * a;
     }
