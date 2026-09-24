@@ -557,16 +557,59 @@ struct Config: Codable, Equatable {
     /// ELEMENTAL_DOMAIN overrides it, which is what lets the offscreen tool —
     /// a bare executable with no bundle identifier at all — run `--saverhealth`
     /// against whichever saver you mean.
+    /// Set by the saver at load. NOT optional politeness — required.
+    ///
+    /// `Bundle.main` is the MAIN BUNDLE OF THE PROCESS, and a screen saver is a
+    /// plug-in loaded into Apple's `legacyScreenSaver`. So inside the saver
+    /// `Bundle.main` is Apple's host, not us, and deriving the domain from it
+    /// yields `com.apple.ScreenSaver.Engine.legacyScreenSaver.saver` — a domain
+    /// nobody writes and nobody reads. The saver then finds no config, falls
+    /// back to built-in defaults, and draws a plausible sky that is not yours,
+    /// which is EXACTLY the bug being chased. Introduced here by replacing a
+    /// correct hardcoded constant with a derivation, and caught only because
+    /// the status it was supposed to report never appeared in any domain.
+    ///
+    /// A plug-in's own bundle is `Bundle(for:)` on one of its classes, which is
+    /// what the saver passes in before it reads anything.
+    nonisolated(unsafe) static var saverBundleID: String?
+
     static var saverDomain: String {
         if let env = ProcessInfo.processInfo.environment["ELEMENTAL_DOMAIN"], !env.isEmpty {
             return env
         }
+        // The plug-in telling us who it is always wins over guessing.
+        if let id = saverBundleID, !id.isEmpty { return id }
         let id = Bundle.main.bundleIdentifier ?? stableBundleID
         return id.hasSuffix(".saver") ? id : id + ".saver"
     }
 
     /// Key the desktop's current reading is published under, in that same domain.
     static let saverWeatherKey = "weather"
+
+    /// A settings file laid BESIDE the .saver bundle, not inside it.
+    ///
+    /// The delivery channel that had not been tried, and the one with the best
+    /// claim to work: the saver is LOADED from ~/Library/Screen Savers, so the
+    /// sandbox must already grant it read access to that directory — a plug-in
+    /// that could not read the folder it lives in could not have started.
+    ///
+    /// Beside, never inside. Bundle resources are covered by the code
+    /// signature, so writing into Elemental.saver invalidates the seal and
+    /// macOS kills the saver at load with Code Signature Invalid, which
+    /// presents as a grey screen (see `saverDomain`). A sibling file is not
+    /// part of the bundle and is not sealed.
+    ///
+    /// This exists because ByHost demonstrably is not getting through. The app
+    /// writes its settings there and the saver reads built-in defaults — 36
+    /// rows of glass instead of the user's 62 rows of matte — which is the
+    /// whole bug. Sandboxed processes have preference access redirected into
+    /// their container, and the container is neither readable nor writable
+    /// from outside, so nothing the app writes to that domain can be seen.
+    static func saverSidecarURL(preRelease: Bool = isPreRelease) -> URL {
+        FileManager.default.homeDirectoryForCurrentUser
+            .appendingPathComponent("Library/Screen Savers")
+            .appendingPathComponent("Elemental\(preRelease ? " Pre" : "").settings.json")
+    }
 
     /// Key the saver reports back under, in that same ByHost domain.
     ///
@@ -606,6 +649,14 @@ struct Config: Codable, Equatable {
             CFPreferencesSynchronize(Self.saverDomain as CFString,
                                      kCFPreferencesCurrentUser, kCFPreferencesCurrentHost)
         }
+
+        // And beside the .saver bundle, which is the channel that actually
+        // reaches it — see `saverSidecarURL`. Written every save, so the saver
+        // never reads a stale copy.
+        let side = Self.saverSidecarURL()
+        try? FileManager.default.createDirectory(
+            at: side.deletingLastPathComponent(), withIntermediateDirectories: true)
+        try? data.write(to: side, options: .atomic)
     }
 
     /// Where to draw the sky for before the user has set anything.

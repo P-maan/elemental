@@ -167,6 +167,39 @@ open -g build/Elemental.app
    saver is older than this app"**, because it compares against `Bundle.main`,
    which there is the binary you just built. Not evidence of anything.
 
+16. **`Bundle.main` INSIDE THE SAVER IS APPLE'S HOST, NOT US.** A screen saver
+   is a plug-in loaded into `legacyScreenSaver`, and `Bundle.main` is the main
+   bundle of the *process*. Deriving anything from it in saver code yields
+   `com.apple.ScreenSaver.Engine.legacyScreenSaver…`. Introduced here by
+   replacing a correct hardcoded `saverDomain` with a derivation; it pointed
+   the saver at a domain nobody reads or writes, so it found no config and drew
+   defaults — the very bug being chased. Use `Bundle(for: type(of: self))`, or
+   `Config.saverBundleID`, which the saver sets before reading anything.
+
+17. **Preferences do not cross the saver sandbox, in either direction.**
+   Measured: the app writes `com.prakritmaan.elemental.saver` ByHost and the
+   saver reads defaults; a status written from the saver appeared in NO domain,
+   not even a wrong one. Sandboxed processes have preference access redirected
+   into their container, and that container is neither readable nor writable
+   from outside. The old comment claiming ByHost is "the one channel the
+   sandbox permits" was an assumption, not a measurement.
+
+   **What works is a sidecar file beside the bundle** —
+   `~/Library/Screen Savers/Elemental.settings.json`. The saver is LOADED from
+   that directory, so it can read it; a plug-in that could not read its own
+   folder could not have started. BESIDE, never INSIDE: bundle contents are
+   sealed by the signature and writing in gets the saver SIGKILLed.
+
+18. **`/Applications/Elemental.app` is root-owned after a .pkg install**, so
+   `rm -rf` and `cp` from a user shell fail PER FILE while the script carries
+   on — you end up testing the old app and believing it is new. Verify with
+   `pgrep -lf` which path is actually running, or run straight out of `build/`.
+
+19. **`open -a ScreenSaverEngine` fires the didstart notification but does not
+   appear to load the module** on macOS 26/27 — four instrumented runs produced
+   no evidence of module code executing. Do not use it to test a saver; trigger
+   the saver naturally (hot corner or idle timeout).
+
 ## Recurring bug classes
 
 Most real bugs found here were one of four shapes. Look for them first:

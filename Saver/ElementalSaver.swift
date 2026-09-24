@@ -77,6 +77,11 @@ final class ElementalSaverView: ScreenSaverView {
         self.layer = layer
         metalLayer = layer
 
+        // Who WE are, before anything reads a preference. Bundle.main here is
+        // Apple's legacyScreenSaver host, not this plug-in — see
+        // `Config.saverBundleID`.
+        Config.saverBundleID = Bundle(for: type(of: self)).bundleIdentifier
+
         loadConfiguration()
         // The saver resumes after long gaps more than anything else — it is
         // what comes up after a night asleep — so it wants the replay too.
@@ -111,7 +116,18 @@ final class ElementalSaverView: ScreenSaverView {
         // leave one where it can be found. Application Support below is kept
         // for the case where this module is run OUTSIDE the sandbox, where the
         // same path is the real one — it can never be populated in here.
-        if let defaults = ScreenSaverDefaults(forModuleWithName: Config.saverDomain),
+        // BESIDE OUR OWN BUNDLE FIRST. We were loaded out of this directory, so
+        // we can read it; and unlike preferences it cannot be redirected into a
+        // container we share with nobody. See `Config.saverSidecarURL`.
+        let sidecar = Bundle(for: type(of: self)).bundleURL
+            .deletingLastPathComponent()
+            .appendingPathComponent(Bundle(for: type(of: self)).bundleURL
+                .deletingPathExtension().lastPathComponent + ".settings.json")
+        if let data = try? Data(contentsOf: sidecar),
+           let decoded = try? JSONDecoder().decode(Config.self, from: data) {
+            cfg = decoded
+            source = "sidecar"
+        } else if let defaults = ScreenSaverDefaults(forModuleWithName: Config.saverDomain),
            let json = defaults.string(forKey: "config"),
            let data = json.data(using: .utf8),
            let decoded = try? JSONDecoder().decode(Config.self, from: data) {
@@ -195,11 +211,14 @@ final class ElementalSaverView: ScreenSaverView {
             "shadow \(r.shadow)",
             "poster \(r.poster)",
         ].joined(separator: "; ")
-        CFPreferencesSetValue(Config.saverStatusKey as CFString, text as CFString,
-                              Config.saverDomain as CFString,
-                              kCFPreferencesCurrentUser, kCFPreferencesCurrentHost)
-        CFPreferencesSynchronize(Config.saverDomain as CFString,
-                                 kCFPreferencesCurrentUser, kCFPreferencesCurrentHost)
+        // Through ScreenSaverDefaults, the same object the config is READ with.
+        // A raw CFPreferencesSetValue to the domain string wrote nothing at all
+        // — not even to the wrong domain — which is what a sandbox denial looks
+        // like from in here. ScreenSaverDefaults is the sanctioned path for a
+        // saver to persist its own settings, so if anything can cross, this can.
+        guard let d = ScreenSaverDefaults(forModuleWithName: Config.saverDomain) else { return }
+        d.set(text, forKey: Config.saverStatusKey)
+        d.synchronize()
     }
 
     private var loadedConfig = Config()
