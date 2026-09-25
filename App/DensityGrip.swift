@@ -50,7 +50,7 @@ import AppKit
 enum MosaicDensity {
 
     /// The range the stored setting is clamped to, unchanged from the stepper.
-    static let requestRange = 12...120
+    static let requestRange = 9...300   // the fitting ladder decides what is offered
 
     /// One achievable density.
     struct Step: Equatable {

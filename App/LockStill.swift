@@ -29,6 +29,10 @@ final class LockStillExporter {
 
     private let renderer: ElementalRenderer?
     private var timer: Timer?
+
+    /// Set by the app while the Low Power preset is in force.
+    var lowPower = false
+    private var lastPeriodicExport = Date.distantPast
     private var texture: MTLTexture?
     private var size = CGSize(width: 1512, height: 982)
 
@@ -108,7 +112,16 @@ final class LockStillExporter {
         // makes it feel alive is being recent — and one offscreen frame is
         // cheap enough that there is no reason to be stingy.
         timer = Timer.scheduledTimer(withTimeInterval: 60, repeats: true) { [weak self] _ in
-            self?.export(config: configProvider(), astro: astroProvider())
+            guard let self else { return }
+            // In Low Power Mode, every ten minutes instead of every one. This
+            // periodic still only keeps the STATIC picture current on Spaces
+            // not in front — the lock screen is exported afresh at the moment
+            // of locking regardless — and a sky moves very little in ten
+            // minutes. Each export is a full-resolution render and encode, so
+            // it is the largest periodic cost the app has.
+            if self.lowPower, Date().timeIntervalSince(self.lastPeriodicExport) < 600 { return }
+            self.lastPeriodicExport = Date()
+            self.export(config: configProvider(), astro: astroProvider())
         }
         export(config: configProvider(), astro: astroProvider())
     }
@@ -240,7 +253,7 @@ final class LockStillExporter {
         // What we can do is make the path it already points at hold a current
         // image. That is the difference between a lock screen showing a picture
         // from days ago and one showing now.
-        mirrorToReferencedPaths(image: img)
+        mirrorToReferencedPaths(from: fileURL)
         sweepOldStills(keeping: fileURL)
         // Both files are deliberately left on disk.
         //
@@ -284,12 +297,19 @@ final class LockStillExporter {
 
     /// Write the same frame to every path the store still names, so no scope is
     /// left pointing at a stale or missing file.
-    private func mirrorToReferencedPaths(image: CGImage) {
-        for url in referencedPaths() where url != currentURL {
-            guard let dest = CGImageDestinationCreateWithURL(
-                    url as CFURL, UTType.png.identifier as CFString, 1, nil) else { continue }
-            CGImageDestinationAddImage(dest, image, nil)
-            CGImageDestinationFinalize(dest)
+    /// Bring every path the wallpaper store references up to date.
+    ///
+    /// ENCODE ONCE, COPY BYTES. This used to run a full PNG encode of the same
+    /// 4112x2658 frame for EACH referenced path — nine of them on the
+    /// development machine, every minute — which is what put four-per-cent
+    /// spikes into an app whose steady state measured 0.2%. The picture is
+    /// identical for every path, so the bytes are too: the file just written is
+    /// read once and laid down everywhere else, which costs a disk copy instead
+    /// of a compression pass per Space.
+    private func mirrorToReferencedPaths(from source: URL) {
+        guard let bytes = try? Data(contentsOf: source) else { return }
+        for url in referencedPaths() where url != source {
+            try? bytes.write(to: url, options: .atomic)
         }
     }
 

@@ -557,8 +557,21 @@ final class SceneSimulation {
     /// Computed from the real display every time, never from a table: a built-in
     /// panel and an external monitor have different answers, and the grid has
     /// to fit the one it is actually on.
+    ///
+    /// 20%, not the 12% this shipped with first. 12% was verified against the
+    /// panel's NATIVE resolution (3456x2234, from system_profiler) — but the
+    /// machine runs a scaled "more space" mode, and the surface actually
+    /// rendered is 4112x2658. 4112 is 16 x 257 with 257 prime, which is about as
+    /// hostile to square tiling as a width can be: at 12% the FINEST grid that
+    /// fitted was 52 rows, and every density the user had been running was gone.
+    /// 20% restores the fine end (72, 79, 95, 121 ... 266 rows) while still
+    /// refusing the crops that prompted this — 62 rows there leaves 37% of a
+    /// column hanging off the edge, and stays banned.
+    ///
+    /// Always measure against `NSScreen.frame * backingScaleFactor`, never the
+    /// panel's native size: they differ whenever a scaled mode is in use.
     static func cleanPitches(pixelWidth: Float, pixelHeight: Float,
-                             tolerance: Float = 0.12) -> [Int] {
+                             tolerance: Float = 0.20) -> [Int] {
         let lo = 8, hi = max(lo, Int(pixelHeight / 8))
         var out: [Int] = []
         for p in lo...hi {

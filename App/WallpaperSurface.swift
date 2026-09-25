@@ -316,7 +316,14 @@ final class WallpaperSurface: NSObject, CAMetalDisplayLinkDelegate {
         renderer.astroProvider = p
     }
 
-    func applyFrameRate(lowPower: Bool = false) {
+    /// `nil` means KEEP the current power state. The default used to be
+    /// `false`, so every caller that did not think to pass it — `apply(config:)`
+    /// among them, which runs on every settings change — silently switched Low
+    /// Power off again. The app's own power handler turned it on and then
+    /// re-applied the config, which turned it straight back off: the preset
+    /// never held for longer than one call.
+    func applyFrameRate(lowPower: Bool? = nil) {
+        let lowPower = lowPower ?? lowPowerMode
         lowPowerMode = lowPower
         let ceiling = Float(lowPower ? max(15, config.maxFPS / 2) : config.maxFPS)
 
@@ -385,6 +392,31 @@ final class WallpaperSurface: NSObject, CAMetalDisplayLinkDelegate {
         // is the half of this that has to stay fast.
         let moving = w.precipRate > 0.02 || w.isThundering || w.wind > 30
         let hi = moving ? ceiling : min(ceiling, preferred + 4)
+
+        // LOW POWER: A BUDGET OF ABOUT ONE PER CENT OF A CORE.
+        //
+        // The old low-power path could not have met any budget. It set the
+        // ceiling to max(15, maxFPS/2) — HIGHER than the six a dry sky already
+        // runs at — so for the commonest case there is, Low Power Mode changed
+        // nothing at all. Measured: 2.9% of a core in normal running.
+        //
+        // Cost here is close to linear in frames, because each frame is one
+        // simulation step and one command-buffer encode. So the budget is met
+        // by frame rate first, and the rest of the saving comes from the
+        // cheaper `lowPowerVariant` making each of those frames lighter.
+        //
+        // Two frames a second, whatever the weather. That is the honest price:
+        // rain becomes a sequence of stills and a lightning flash can fall
+        // between frames. It is what Low Power Mode is for — the user has told
+        // macOS the battery matters more than the motion — and the sky itself,
+        // which changes over minutes, looks the same at two as at thirty.
+        if lowPower {
+            link?.preferredFrameRateRange = CAFrameRateRange(minimum: 1, maximum: 3,
+                                                             preferred: 2)
+            renderer.state.lowFX = true
+            return
+        }
+
         link?.preferredFrameRateRange = CAFrameRateRange(minimum: preferred,
                                                          maximum: hi,
                                                          preferred: preferred)

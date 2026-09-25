@@ -588,8 +588,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             let id = CGDirectDisplayID(num.uint32Value)
             seen.insert(id)
             if let existing = surfaces[id] {
-                existing.apply(config: config, screen: screen)
-            } else if let s = WallpaperSurface(screen: screen, config: config, device: device) {
+                existing.apply(config: drawingConfig, screen: screen)
+            } else if let s = WallpaperSurface(screen: screen, config: drawingConfig, device: device) {
                 s.setAstroProvider { [weak self] date in
                     self?.astro(at: date) ?? AstroState()
                 }
@@ -717,7 +717,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         for screen in NSScreen.screens {
             guard let num = screen.deviceDescription[
                     NSDeviceDescriptionKey("NSScreenNumber")] as? NSNumber else { continue }
-            surfaces[CGDirectDisplayID(num.uint32Value)]?.apply(config: config, screen: screen)
+            surfaces[CGDirectDisplayID(num.uint32Value)]?.apply(config: drawingConfig, screen: screen)
         }
         refreshAstro()
         // A different city means different weather — and anything still falling
@@ -890,9 +890,38 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         for s in surfaces.values where s.isVisible || config.renderWhenOccluded { s.resume() }
     }
 
+    /// Whether the Low Power preset is in force right now.
+    private var lowPowerActive: Bool {
+        // ELEMENTAL_FORCE_LOWPOWER=1 forces the preset on, so its CPU budget can
+        // be measured without flipping the system's own power mode (which needs
+        // an administrator password to do from a shell).
+        if ProcessInfo.processInfo.environment["ELEMENTAL_FORCE_LOWPOWER"] == "1" { return true }
+        return config.lowPowerOnBattery && ProcessInfo.processInfo.isLowPowerModeEnabled
+    }
+
+    /// The config the SURFACES draw with: the user's own, or its Low Power
+    /// variant. `config` itself is never touched, so it is always what gets
+    /// saved and always what comes back. See `Config.lowPowerVariant`.
+    private var drawingConfig: Config {
+        lowPowerActive ? config.lowPowerVariant() : config
+    }
+
+    /// Called on launch and whenever macOS enters or leaves Low Power Mode.
+    ///
+    /// This used to cut the frame rate and nothing else, while the checkbox
+    /// governing it read "Reduce detail and frame rate" — detail was never
+    /// reduced. It now re-applies the whole drawing config, so the preset
+    /// arrives the moment Low Power Mode does and leaves with it.
     private func updatePowerState() {
-        let low = config.lowPowerOnBattery && ProcessInfo.processInfo.isLowPowerModeEnabled
+        let low = lowPowerActive
+        lockStill?.lowPower = low
         surfaces.values.forEach { $0.applyFrameRate(lowPower: low) }
+        for screen in NSScreen.screens {
+            guard let num = screen.deviceDescription[
+                    NSDeviceDescriptionKey("NSScreenNumber")] as? NSNumber else { continue }
+            surfaces[CGDirectDisplayID(num.uint32Value)]?.apply(config: drawingConfig, screen: screen)
+        }
+        NSLog("Elemental: Low Power preset %@", low ? "ON" : "off")
     }
 
     /// Push the motion settings to the desktop renderers.

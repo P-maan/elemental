@@ -1076,7 +1076,9 @@ final class SurfacePane: Pane {
         st.mirrorsDesktop = (role != .desktop) && (mirrorCheck?.state == .on)
         st.shape = pickedShape
         st.finish = pickedFinish
-        st.gridRows = max(12, min(120, rowsField.integerValue))
+        // Up to 300: the fitting ladder reaches 266 rows on a 4112-wide panel,
+        // and a 120 cap here silently deleted the whole fine end of it.
+        st.gridRows = max(9, min(300, rowsField.integerValue))
         st.headingMode = HeadingMode(rawValue: Int32(headingPop.indexOfSelectedItem)) ?? .custom
         st.facingAz = facingSlider.doubleValue.rounded()
         let i = placePop.indexOfSelectedItem

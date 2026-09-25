@@ -695,6 +695,25 @@ struct Config: Codable, Equatable {
         try? data.write(to: side, options: .atomic)
     }
 
+    /// What is drawn while macOS is in Low Power Mode: THE SAME WALL.
+    ///
+    /// This first shipped cutting relief, roughness, refraction, dispersion,
+    /// shimmer and grid density. Flattening the relief is what did the damage —
+    /// with no blocks standing proud, all that is left between tiles is the
+    /// grout, and the wall turns into a hard grid of black lines. The user's
+    /// verdict was that it looked terrible and should look the same, and that is
+    /// right: Low Power Mode is the user telling macOS the battery matters more
+    /// than the MOTION, not that they want a different picture.
+    ///
+    /// So appearance is untouched and the whole saving comes from how OFTEN the
+    /// wall is drawn — see `applyFrameRate(lowPower:)`, which drops to two frames
+    /// a second. CPU cost is close to linear in frames, so that is where the
+    /// budget is met anyway; the visual cuts bought GPU time, not CPU time.
+    ///
+    /// Kept as a function rather than inlined so there is one obvious place to
+    /// add a saving later — on the condition that it cannot be seen.
+    func lowPowerVariant() -> Config { self }
+
     /// Where to draw the sky for before the user has set anything.
     ///
     /// Longitude is estimated from the system timezone's UTC offset, which is
