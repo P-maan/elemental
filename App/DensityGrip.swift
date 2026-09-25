@@ -62,32 +62,50 @@ enum MosaicDensity {
         var cellPixels: Double
     }
 
-    /// The row count `SceneSimulation.resize` will settle on for a request.
+    /// The row count the engine will actually draw for a request.
     ///
-    /// A mirror of that function, deliberately: it lives in Core and is not
-    /// callable without building a whole simulation, and the only thing needed
-    /// here is the arithmetic. Kept in the same order and with the same
-    /// `max(6,…)` floor so the two cannot disagree.
-    static func actualRows(requested: Int, pixelHeight: Double) -> Int {
-        let h = Float(max(1, pixelHeight))
-        let sp0 = max(6, (h / Float(max(1, requested))).rounded())
-        let r = max(1, Int((h / sp0).rounded()))
-        let sp = h / Float(r)
-        return max(1, Int((h / sp).rounded()))
+    /// CALLS THE ENGINE. This used to be a hand-copied mirror of the grid
+    /// arithmetic, carrying a comment promising the two "cannot disagree" — and
+    /// they did. When the engine moved to whole-pixel cells the mirror kept the
+    /// old fractional formula, so Settings computed rows and cell sizes the
+    /// engine no longer produced, and offered densities that crop the grid. Its
+    /// reason for existing ("not callable without building a whole simulation")
+    /// was never true: `gridGeometry` is a static function.
+    static func actualRows(requested: Int, pixelWidth: Double, pixelHeight: Double) -> Int {
+        SceneSimulation.gridGeometry(pixelWidth: Float(pixelWidth),
+                                     pixelHeight: Float(pixelHeight),
+                                     gridRows: requested).rows
     }
 
-    /// Every distinct density this display can produce, ascending, each with the
-    /// request that yields it.
-    static func ladder(pixelHeight: Double) -> [Step] {
+    /// Every density THIS DISPLAY can show without a cropped edge, ascending.
+    ///
+    /// Built from the clean pitches directly rather than by trying every
+    /// request and keeping what comes out, so the grip cannot land on — or click
+    /// past — a size that would leave half a cell hanging off the screen. On a
+    /// 3456x2234 panel that is eight sizes; an external monitor gets its own.
+    static func ladder(pixelWidth: Double, pixelHeight: Double) -> [Step] {
+        let pitches = SceneSimulation.cleanPitches(pixelWidth: Float(pixelWidth),
+                                                   pixelHeight: Float(pixelHeight))
         var seen = Set<Int>()
         var out: [Step] = []
-        for q in requestRange {
-            let r = actualRows(requested: q, pixelHeight: pixelHeight)
-            guard !seen.contains(r) else { continue }
-            seen.insert(r)
-            out.append(Step(requested: q, rows: r, cellPixels: pixelHeight / Double(r)))
+        for p in pitches {
+            let q = max(1, Int((pixelHeight / Double(p)).rounded()))
+            let g = SceneSimulation.gridGeometry(pixelWidth: Float(pixelWidth),
+                                                 pixelHeight: Float(pixelHeight),
+                                                 gridRows: q)
+            // The request that yields this pitch, and what it really draws.
+            guard Int(g.pitch.rounded()) == p, !seen.contains(g.rows) else { continue }
+            seen.insert(g.rows)
+            out.append(Step(requested: q, rows: g.rows, cellPixels: Double(g.pitch)))
         }
         return out.sorted { $0.rows < $1.rows }
+    }
+
+    /// The main display, in pixels across. Needed now because whether a grid
+    /// FITS depends on both dimensions, not just the height.
+    static var displayPixelWidth: Double {
+        guard let s = NSScreen.main, s.frame.width > 1 else { return 2880 }
+        return Double(s.frame.width * s.backingScaleFactor)
     }
 
     /// The main display, in pixels down. The same number `WallpaperSurface`
@@ -134,8 +152,9 @@ final class DensityGripView: NSView {
     override var isFlipped: Bool { true }
     override var acceptsFirstResponder: Bool { true }
 
-    init(pixelHeight: Double = MosaicDensity.displayPixelHeight) {
-        steps = MosaicDensity.ladder(pixelHeight: pixelHeight)
+    init(pixelWidth: Double = MosaicDensity.displayPixelWidth,
+         pixelHeight: Double = MosaicDensity.displayPixelHeight) {
+        steps = MosaicDensity.ladder(pixelWidth: pixelWidth, pixelHeight: pixelHeight)
         let p = Self.pad
         super.init(frame: NSRect(x: 0, y: 0,
                                  width: Self.tilePoints.width + 2 * p,
@@ -181,6 +200,7 @@ final class DensityGripView: NSView {
     /// user turning anything.
     func setRequested(_ q: Int) {
         let want = MosaicDensity.actualRows(requested: q,
+                                            pixelWidth: MosaicDensity.displayPixelWidth,
                                             pixelHeight: MosaicDensity.displayPixelHeight)
         index = nearestIndex(rows: Double(want))
         scrollAccum = 0
@@ -400,7 +420,8 @@ enum DensitySelfTest {
         guard let out = outDir else { return }
         try? FileManager.default.createDirectory(at: out, withIntermediateDirectories: true)
         let config = Config()
-        let ladder = MosaicDensity.ladder(pixelHeight: MosaicDensity.displayPixelHeight)
+        let ladder = MosaicDensity.ladder(pixelWidth: MosaicDensity.displayPixelWidth,
+                                          pixelHeight: MosaicDensity.displayPixelHeight)
         print("== density self-test -> \(out.path)")
         print("-- display \(Int(MosaicDensity.displayPixelHeight))px tall, "
             + "\(ladder.count) achievable densities, "
