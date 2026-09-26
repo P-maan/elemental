@@ -237,7 +237,8 @@ final class WallpaperSurface: NSObject, CAMetalDisplayLinkDelegate {
         renderer.meteorShower = s
     }
 
-    func updateWeather(_ w: WeatherState) {
+    func updateWeather(_ w: WeatherState, snap: Bool = false) {
+        if snap { renderer.snapNextWeather() }
         renderer.state.weather = w
         // A new reading can change what the scene needs to be drawn AT.
         applyFrameRate(lowPower: lowPowerMode)
@@ -387,9 +388,8 @@ final class WallpaperSurface: NSObject, CAMetalDisplayLinkDelegate {
         //
         // So when the scene is quiet the floor is raised to the preferred rate
         // and the ceiling kept just above it, which pins a steady slow cadence.
-        // When there is genuine motion — hydrometeors, lightning, a gale — the
-        // ceiling opens all the way to the user's maxFPS so it can climb, which
-        // is the half of this that has to stay fast.
+        // When there is genuine motion — hydrometeors, lightning, a gale — it
+        // runs at the user's maxFPS, pinned just as firmly; see below.
         let moving = w.precipRate > 0.02 || w.isThundering || w.wind > 30
         let hi = moving ? ceiling : min(ceiling, preferred + 4)
 
@@ -419,17 +419,36 @@ final class WallpaperSurface: NSObject, CAMetalDisplayLinkDelegate {
         // 0.37ms of that ~2ms; the rest is macOS presenting it (display link,
         // frame pacing, GPU submission in the kernel), from one command buffer
         // of three passes. It only shrinks by presenting less often.
+        // RAIN IS THE EXCEPTION, in both modes, and for the same reason it
+        // always was: a streak is only legible as MOTION. At five frames a
+        // second it falls in visible jumps — the user's words were "falling in
+        // frames" — so while anything is coming down Low Power gives it a
+        // steady twenty (switchable, `lowPowerSmoothRain`), and drops straight
+        // back to its own rate when it stops. Twenty divides 60 and 120, so the
+        // beat stays even on every panel.
+        let falling = w.precipRate > 0.02
         if lowPower {
-            let f = Float(max(4, min(30, config.lowPowerFPS)))
+            var f = Float(max(4, min(30, config.lowPowerFPS)))
+            if falling && config.lowPowerSmoothRain { f = max(f, min(20, Float(config.maxFPS))) }
             link?.preferredFrameRateRange = CAFrameRateRange(minimum: f, maximum: f,
                                                              preferred: f)
             renderer.state.lowFX = false
             return
         }
 
-        link?.preferredFrameRateRange = CAFrameRateRange(minimum: preferred,
-                                                         maximum: hi,
-                                                         preferred: preferred)
+        // Motion gets the ceiling, PINNED. This used to hand CoreAnimation a
+        // range — preferred 16-30, maximum the ceiling — and a range is exactly
+        // what lets the display link alternate between rates, which on falling
+        // rain reads as stutter however high the average is. A fixed rate is
+        // the only way to get an even beat, and rain is where it shows most.
+        if moving {
+            link?.preferredFrameRateRange = CAFrameRateRange(minimum: ceiling, maximum: ceiling,
+                                                             preferred: ceiling)
+        } else {
+            link?.preferredFrameRateRange = CAFrameRateRange(minimum: preferred,
+                                                             maximum: hi,
+                                                             preferred: preferred)
+        }
         renderer.state.lowFX = false
     }
 
@@ -484,6 +503,8 @@ final class WallpaperSurface: NSObject, CAMetalDisplayLinkDelegate {
     }
 
     var isPaused: Bool { paused }
+    /// The engine's own account of its water and rain, for `/v1/status`.
+    var engineDebug: String { renderer.waterDebug }
 
     /// Read the headroom the display is granting RIGHT NOW and hand it to the
     /// renderer, which passes it to the shader as `edrHead`.

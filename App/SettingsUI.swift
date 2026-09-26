@@ -1092,6 +1092,10 @@ struct PowerPage: View {
                     options: [(4, "4 fps — least power"), (5, "5 fps — about 1% CPU"),
                               (6, "6 fps"), (8, "8 fps"), (10, "10 fps"), (15, "15 fps — smoothest")])
             RowDivider()
+            ToggleRow(title: "Smooth rain in Low Power",
+                      subtitle: "While rain or snow is falling, draw at a steady 20 fps so it falls smoothly. About 4% of a core while it lasts; back to the rate above when it stops.",
+                      isOn: store.binding(\.lowPowerSmoothRain))
+            RowDivider()
             MenuRow(title: "Frame rate ceiling",
                     subtitle: "A calm sky asks for far less; rain, lightning and shimmer climb toward this.",
                     selection: store.binding(\.maxFPS),
@@ -1143,6 +1147,29 @@ struct HomePage: View {
                   heading: store.binding(\.headingMode),
                   facing: store.binding(\.facingAz),
                   place: store.binding(\.scenePlaceName))
+
+        WeatherPreviewCard(store: store)
+    }
+}
+
+/// Try weather that is not happening, on the real desktop, for ninety seconds.
+struct WeatherPreviewCard: View {
+    @ObservedObject var store: SettingsStore
+    var body: some View {
+        let current = store.app?.preview
+        SectionTitle("Preview weather",
+                     info: "Shows what each kind of weather does to your wallpaper, Dock and widgets, "
+                         + "for ninety seconds, then hands back the real sky. Nothing is saved. "
+                         + "Click the same tile again to stop early.")
+        TileCard(options: WeatherPreview.allCases.map {
+                     TileOption(id: $0.rawValue, title: $0.title, symbol: $0.symbol)
+                 },
+                 isOn: { $0 == current?.rawValue },
+                 tap: { id in
+                     guard let p = WeatherPreview(rawValue: id) else { return }
+                     if current == p { store.app?.endPreview() } else { store.app?.startPreview(p) }
+                     store.objectWillChange.send()
+                 })
     }
 }
 
@@ -1667,6 +1694,7 @@ final class SettingsWindowController: NSObject, NSWindowDelegate {
         store.onCommit = { [weak self] c in self?.storeCommitted(c) }
         appKitPanes.forEach { $0.owner = self }
         delegate.automation.onStateChange = { [weak self] in self?.store.objectWillChange.send() }
+        delegate.onPreviewChange = { [weak self] in self?.store.objectWillChange.send() }
         build()
     }
 

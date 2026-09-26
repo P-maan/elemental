@@ -191,6 +191,13 @@ inline float deckField(float x, float y, float W, float H, float facingAz,
     return deckFBM(q + 1.1f * w) * smoothstep(2.0f, 16.0f, alt);
 }
 
+/// The wind ACROSS the screen, km/h, positive toward the right — the same
+/// definition as `SceneSimulation.crossWind`. Wind is reported as where it
+/// comes FROM, and the sky's azimuth increases to the right.
+inline float crossWindKmh(float wind, float windDir, float facingAz) {
+    return wind * sin((windDir + 180.0f - facingAz) * 0.01745329f);
+}
+
 // Sky ambient brightness 0->1 (roomstand.py:2237)
 inline float skyBr(float sAlt) {
     if (sAlt <= -18.0f) return 0.04f;
@@ -1303,7 +1310,12 @@ fragment CellOut cellPass(VOut in [[stage_in]],
     }
 
     // humidity haze
-    if (humidF > 0.2f) L += humidF * 18.0f * sin(x * 0.008f + y * 0.01f + sec * 0.05f);
+    // Carried by the wind, and not a lattice: soft noise drifting across.
+    if (humidF > 0.2f) {
+        float cw = crossWindKmh(U.wind, U.windDir, U.facingAz);
+        float hz = deckFBM(float2(x * 0.0021f - sec * (0.004f + 0.0011f * cw), y * 0.0034f) + 41.0f);
+        L += humidF * 36.0f * hz;
+    }
 
     float cr = 0.0f, cg = 0.0f, cb = 0.0f, w = 0.0f;
 
@@ -1354,10 +1366,11 @@ fragment CellOut cellPass(VOut in [[stage_in]],
     float highAmt = 0.0f;
     if (U.cloudHigh > 0.02f) {
         float veil = saturate(1.4f - yFrac * 1.3f);
-        float fib = 0.5f
-                  + 0.30f * sin(cyp * 0.0102f + cxp * 0.0016f + sec * 0.010f)
-                  + 0.22f * sin(cyp * 0.0223f - cxp * 0.0011f + sec * 0.016f + 1.7f)
-                  + 0.14f * sin(cyp * 0.0407f + cxp * 0.0024f - sec * 0.007f + 4.1f);
+        // Fibres: high, thin, drawn out a long way along the wind that made
+        // them, and carried by it. Was three sines — a lattice, and fixed in
+        // direction whatever the wind was doing.
+        float fib = 0.5f + 1.2f * deckField(cxp, cyp, W, H, U.facingAz, 8.0f, 2.6f, 4.5f,
+                                            U.windDir, max(U.wind, 12.0f), sec + 900.0f);
         highAmt = saturate(fib * U.cloudHigh * veil * 1.25f - 0.18f);
     }
 
@@ -2011,7 +2024,12 @@ fragment CellOut cellPass(VOut in [[stage_in]],
     // fog
     if (fog) {
         float fogD = max(0.3f, 1.0f - U.vis / 5000.0f);
-        L += fogD * (40.0f * sin(y * 0.02f + sec * 0.15f) + 46.0f);
+        // Banks of fog drifting with the wind — wide, low, soft — rather than
+        // horizontal stripes rolling vertically on a fixed clock.
+        float cw = crossWindKmh(U.wind, U.windDir, U.facingAz);
+        float bank = deckFBM(float2(x * 0.0016f - sec * (0.002f + 0.0009f * cw),
+                                    y * 0.0048f + sec * 0.004f) + 13.0f);
+        L += fogD * (46.0f + 80.0f * bank);
         float fw = fogD * 0.7f;
         if (fw > w) { w = fw; cr = 170.0f; cg = 175.0f; cb = 185.0f; }
     }

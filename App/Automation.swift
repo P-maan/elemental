@@ -34,6 +34,7 @@
 //    GET   /v1/schema            every documented key, its type and range
 //    GET   /v1/grid              the row counts that fit each display
 //    POST  /v1/lowpower          {"mode": "on" | "off" | "auto" | "toggle"}
+//    POST  /v1/preview           {"weather": "rain" | "snow" | … | "off", "seconds": 90}
 //    POST  /v1/reload            rebuild the scene
 //    POST  /v1/settings          open the settings window
 //
@@ -94,6 +95,7 @@ enum AutomationSchema {
         Key(name: "liveWeather", type: "bool", detail: "Follow the real weather, or draw a clear calm day."),
         Key(name: "lowPower", type: "automatic | on | off", detail: "The Low Power preset."),
         Key(name: "lowPowerFPS", type: "int 4…30", detail: "Steady frame rate while Low Power is in force. Default 5 (about 1% CPU)."),
+        Key(name: "lowPowerSmoothRain", type: "bool", detail: "Steady 20 fps in Low Power while rain or snow is falling. Default true."),
         Key(name: "syncLockScreen", type: "bool", detail: "Show the scene on the lock screen."),
         Key(name: "renderWhenOccluded", type: "bool", detail: "Keep drawing behind fullscreen apps."),
         Key(name: "playbackOnWake", type: "bool", detail: "Replay missed hours after sleep."),
@@ -283,6 +285,7 @@ final class AutomationServer {
             return (200, ["name": "Elemental", "api": 1,
                           "endpoints": ["GET /v1/status", "GET /v1/config", "PATCH /v1/config",
                                         "GET /v1/schema", "GET /v1/grid", "POST /v1/lowpower",
+                                        "POST /v1/preview",
                                         "POST /v1/reload", "POST /v1/settings"]])
 
         case ("GET", "/v1/status"):
@@ -315,6 +318,22 @@ final class AutomationServer {
             }
             return (200, ["ok": true, "lowPower": app.currentConfig.lowPower.title.lowercased(),
                           "active": app.isLowPowerActive])
+
+        case ("POST", "/v1/preview"):
+            let obj = (try? JSONSerialization.jsonObject(with: r.body)) as? [String: Any]
+            let name = ((obj?["weather"] as? String) ?? r.query["weather"] ?? "").lowercased()
+            if name == "off" || name == "none" || name == "live" {
+                app.endPreview()
+                return (200, ["ok": true, "preview": NSNull()])
+            }
+            guard let p = WeatherPreview(rawValue: name) else {
+                return (400, ["error": "weather must be one of "
+                              + WeatherPreview.allCases.map(\.rawValue).joined(separator: ", ")
+                              + ", or off"])
+            }
+            let secs = max(5, min(600, (obj?["seconds"] as? Double) ?? 90))
+            app.startPreview(p, seconds: secs)
+            return (200, ["ok": true, "preview": p.rawValue, "seconds": secs])
 
         case ("POST", "/v1/reload"):
             app.reloadScene()
@@ -460,6 +479,9 @@ enum AutomationURL {
             app.updateConfig { $0 = merged }
         case "lowpower":
             AutomationServer.setLowPower(parts.first?.lowercased() ?? "toggle", app)
+        case "preview":
+            let name = parts.first?.lowercased() ?? "rain"
+            if let p = WeatherPreview(rawValue: name) { app.startPreview(p) } else { app.endPreview() }
         case "reload":
             app.reloadScene()
         case "settings", "":
@@ -467,5 +489,78 @@ enum AutomationURL {
         default:
             break
         }
+    }
+}
+
+// MARK: - Weather preview
+//
+// A way to SEE weather that is not happening. The engine only draws what the
+// sky is doing, so on a dry day there is no way to find out what rain does to
+// the dock and the widgets short of waiting for some — which is also how every
+// bug in that code went unnoticed. A preview swaps the live reading for a
+// preset for a while and then hands the real sky back. Nothing is saved.
+
+enum WeatherPreview: String, CaseIterable {
+    case drizzle, rain, downpour, storm, snow, fog
+
+    var title: String {
+        switch self {
+        case .drizzle: "Drizzle"
+        case .rain: "Rain"
+        case .downpour: "Downpour"
+        case .storm: "Storm"
+        case .snow: "Snow"
+        case .fog: "Fog"
+        }
+    }
+
+    var symbol: String {
+        switch self {
+        case .drizzle: "cloud.drizzle"
+        case .rain: "cloud.rain"
+        case .downpour: "cloud.heavyrain"
+        case .storm: "cloud.bolt.rain"
+        case .snow: "cloud.snow"
+        case .fog: "cloud.fog"
+        }
+    }
+
+    /// Readings a real station could report for this weather — measurements,
+    /// not labels, because the engine keys off measurements.
+    /// Built from a clean reading, NOT on top of the live one: the live one
+    /// carries radar, nowcast and satellite evidence for the real sky, and the
+    /// engine trusts radar over the model — so a preview of rain over a dry
+    /// radar picture came out as 6% drizzle with whole columns left dry.
+    /// `base` contributes only where the sky is.
+    func state(base: WeatherState) -> WeatherState {
+        var w = WeatherState()
+        w.uv = min(base.uv, 2)
+        w.cover = 100; w.cloudLow = 95; w.cloudMid = 40; w.cloudHigh = 0
+        w.humidity = 92; w.visibility = 8000; w.snow = 0; w.rain = 0
+        w.showers = 0; w.cape = 0; w.windDir = 250
+        switch self {
+        case .drizzle:
+            w.code = 53; w.rain = 0.4; w.temperature = 12; w.wind = 8
+        case .rain:
+            w.code = 63; w.rain = 3.5; w.temperature = 13; w.wind = 12
+        case .downpour:
+            w.code = 65; w.rain = 11; w.temperature = 16; w.wind = 18; w.visibility = 3000
+        case .storm:
+            w.code = 95; w.rain = 9; w.showers = 9; w.cape = 1800; w.liftedIndex = -5
+            w.temperature = 22; w.wind = 28; w.gusts = 55; w.visibility = 4000
+        case .snow:
+            w.code = 73; w.snow = 1.6; w.temperature = -3; w.wind = 9; w.humidity = 88
+            w.freezingLevel = 0; w.visibility = 2500
+        case .fog:
+            w.code = 45; w.visibility = 150; w.humidity = 100; w.temperature = 9
+            w.wind = 2; w.cloudMid = 0
+        }
+        w.precipitation = w.rain + w.snow * 0.7
+        w.gusts = max(w.gusts, w.wind)
+        w.kind = SceneKind.from(code: w.code)
+        let t = Double(w.temperature), rh = max(1.0, Double(w.humidity))
+        let g = (17.27 * t) / (237.3 + t) + log(rh / 100)
+        w.dewPoint = Float((237.3 * g) / (17.27 - g))
+        return w
     }
 }

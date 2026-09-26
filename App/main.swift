@@ -119,7 +119,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         // wind. Without it the renderer draws a permanently clear sky.
         weather.onUpdate = { [weak self] w in
             guard let self else { return }
-            self.surfaces.values.forEach { $0.updateWeather(w) }
+            self.lastRealWeather = w
+            // A preview owns the surfaces until it ends; the real reading is
+            // kept and handed back then.
+            if self.preview == nil { self.surfaces.values.forEach { $0.updateWeather(w) } }
             self.writeStatus(w)
             // Hand the same reading to the screen saver.
             //
@@ -921,11 +924,45 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
 
     var isLowPowerActive: Bool { lowPowerActive }
 
+    // MARK: Weather preview — see Automation.swift
+
+    private var lastRealWeather: WeatherState?
+    private(set) var preview: WeatherPreview?
+    private(set) var previewEnds: Date?
+    private var previewTimer: Timer?
+    /// Called on the main queue whenever a preview starts or ends.
+    var onPreviewChange: (() -> Void)?
+
+    func startPreview(_ p: WeatherPreview, seconds: TimeInterval = 90) {
+        preview = p
+        previewEnds = Date().addingTimeInterval(seconds)
+        let w = p.state(base: lastRealWeather ?? WeatherState())
+        surfaces.values.forEach { $0.updateWeather(w, snap: true) }
+        previewTimer?.invalidate()
+        previewTimer = Timer.scheduledTimer(withTimeInterval: seconds, repeats: false) { [weak self] _ in
+            self?.endPreview()
+        }
+        NSLog("Elemental: previewing %@ for %.0fs", p.rawValue, seconds)
+        onPreviewChange?()
+    }
+
+    func endPreview() {
+        guard preview != nil else { return }
+        preview = nil
+        previewEnds = nil
+        previewTimer?.invalidate()
+        previewTimer = nil
+        let w = config.liveWeather ? (lastRealWeather ?? WeatherState()) : WeatherState()
+        surfaces.values.forEach { $0.updateWeather(w, snap: true) }
+        onPreviewChange?()
+    }
+
     /// Per display: frames drawn per second right now, and whether it is paused.
     var surfaceStats: [[String: Any]] {
         surfaces.map { id, s in
             ["displayID": Int(id), "fps": (s.measuredFPS * 10).rounded() / 10,
-             "paused": s.isPaused, "visible": s.isVisible]
+             "paused": s.isPaused, "visible": s.isVisible,
+             "engine": s.engineDebug.split(separator: "\n").map(String.init)]
         }
     }
 

@@ -516,6 +516,10 @@ final class ElementalRenderer {
     /// Set by `locationChanged()`, consumed by the next reading. See above.
     private var snapNextReading = false
 
+    /// Adopt the next weather written outright instead of easing toward it —
+    /// for a weather preview, which is useless if it takes minutes to arrive.
+    func snapNextWeather() { snapNextReading = true }
+
     /// Whatever meteor shower is running, pushed by the host.
     ///
     /// Set alongside astro, from `Astro.activeShower`, because it is the same

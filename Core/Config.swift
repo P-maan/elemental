@@ -380,6 +380,9 @@ struct Config: Codable, Equatable {
     /// Frames a second while the preset is in force. Steady, never a range —
     /// see `WallpaperSurface.applyFrameRate`.
     var lowPowerFPS: Int = 5
+    /// Let falling rain and snow have a steady 20 fps even in Low Power. Rain
+    /// is only legible as motion; at five frames a second it falls in jumps.
+    var lowPowerSmoothRain: Bool = true
 
     /// The address the automation endpoint listens on, 127.0.0.1 only.
     var automationPort: Int = 7417
@@ -876,6 +879,7 @@ extension Config {
         lowPowerOnBattery  = c.lenient(.lowPowerOnBattery, d.lowPowerOnBattery)
         lowPower           = c.lenient(.lowPower, lowPowerOnBattery ? .automatic : .off)
         lowPowerFPS        = max(4, min(30, c.lenient(.lowPowerFPS, d.lowPowerFPS)))
+        lowPowerSmoothRain = c.lenient(.lowPowerSmoothRain, d.lowPowerSmoothRain)
         automationPort     = c.lenient(.automationPort, d.automationPort)
         automationEnabled  = c.lenient(.automationEnabled, d.automationEnabled)
         lock               = c.lenient(.lock, d.lock)

@@ -32,6 +32,11 @@ struct GlassDrop {
     var vx: Float = 0
     /// Seconds left as airborne spray. Zero for ordinary drops.
     var splashLife: Float = 0
+    /// The surface whose top edge this drop is running along, or -1. Water
+    /// running down a pane that meets something stuck to it does not vanish:
+    /// it gathers on the edge, runs along it and falls off the end.
+    var ride: Int = -1
+    var rideDir: Float = 0
 }
 struct GlassSpot { var x, y, r, a: Float }
 struct GlassVortex { var x, y, r, t, life, dir: Float }
@@ -254,8 +259,30 @@ final class SceneSimulation {
     // down — a dendrite at 0.8 m/s in any breeze at all does not fall, it
     // drifts. `hops` counts rebounds, so a hailstone bounces once off the
     // bottom edge and then behaves.
+    /// `stop` is the row a streak LANDED on — the top edge of the dock or a
+    /// widget — and `resume` the row below it where the rain picks up again;
+    /// between the two it is hidden. Infinity while it is falling free.
     private var streaks: [(c: Float, y: Float, len: Float, v: Float,
-                           slope: Float, wob: Float, ph: Float, hops: Float)] = []
+                           slope: Float, wob: Float, ph: Float, hops: Float,
+                           stop: Float, resume: Float)] = []
+
+    /// Whether a point (pixels) is sheltered: under a piece of furniture, down
+    /// to a little below it. Rain is not born there.
+    /// Whether a point (pixels) lies inside any piece of furniture's outline.
+    private func insideFurniture(_ x: Float, _ y: Float) -> Bool {
+        for s in surfaces where s.kind != .menuBar
+            && x >= s.left && x <= s.right && y >= s.top && y <= s.bottom { return true }
+        return false
+    }
+
+    private func shelterTop(atX x: Float, below y: Float) -> Float? {
+        var best: Float? = nil
+        for s in surfaces where s.kind != .menuBar && x >= s.left && x <= s.right
+            && y > s.top && y < s.bottom + s.h * 0.6 + SP * 2 {
+            if best == nil || s.top > best! { best = s.top }
+        }
+        return best
+    }
 
     /// How much precipitation is arriving at each COLUMN right now, 0..1.
     ///
@@ -366,6 +393,22 @@ final class SceneSimulation {
     /// only runs colder than the air once the sun is off it.
     private var sunAlt: Float = 0
     private var facingAz: Float = 180
+
+    /// The wind ACROSS the screen, km/h, positive blowing toward the right.
+    ///
+    /// One definition for every element, because they used to disagree. The sky
+    /// maps azimuth increasing to the right (`astroXY`), and wind is reported as
+    /// the direction it comes FROM, so it carries things toward windDir + 180:
+    /// a westerly seen facing south moves everything LEFT. The rain's slant had
+    /// that the wrong way round, and the water on the glass ignored direction
+    /// altogether and always ran right. Everything that the wind moves — rain,
+    /// snow, spray, drips, water on the glass, the cloud edge, where showers
+    /// fall — reads this.
+    static func crossWind(_ w: WeatherState, facingAz: Float) -> Float {
+        let rel = (w.windDir + 180 - facingAz) * .pi / 180
+        return w.wind * sin(rel)
+    }
+    private var crossWind: Float { Self.crossWind(lastWeather, facingAz: facingAz) }
     /// The measured picture the furniture responds to. Recomputed once a frame.
     private(set) var surfaceWeather = SurfaceWeather()
     private var boltActive = false
@@ -773,11 +816,15 @@ final class SceneSimulation {
         let depth = H * (0.10 + covF * (0.35 + 1.10 * covF * covF))
                      * lowness * (1 + 0.22 * arc)
         let spd = 0.003 + min(0.02, wind * 0.0004)
+        // Carried the way the wind blows across the screen. A dead calm keeps
+        // the old slow drift so the edge never stands still.
+        let cw = Self.crossWind(w, facingAz: facingAz)
+        let windSign: Float = abs(cw) < 1 ? 1 : (cw > 0 ? 1 : -1)
         for c in 0..<cols {
             let cx = Float(c) * SP
             let n = 0.5
-                  + 0.28 * sin(cx * 0.012 + sec * spd)
-                  + 0.18 * sin(cx * 0.027 - sec * spd * 1.4 + 2.1)
+                  + 0.28 * sin(cx * 0.012 - sec * spd * windSign)
+                  + 0.18 * sin(cx * 0.027 - sec * spd * 1.4 * windSign + 2.1)
                   + 0.12 * sin(cx * 0.051 + sec * spd * 0.7 + 4.0)
             let prof = n + (covF - 0.55) * 1.6
             // Soft knee instead of min(1, prof). A hard clamp meant that under
@@ -871,6 +918,9 @@ final class SceneSimulation {
         // term is there so a shower in dead calm still opens and closes rather
         // than standing over the house forever.
         let drift = sec * (0.012 + min(0.09, w.wind * 0.006))
+        // Showers travel WITH the wind, all of their scales the same way.
+        let cws = Self.crossWind(w, facingAz: facingAz)
+        let showerSign: Float = abs(cws) < 1 ? 1 : (cws > 0 ? 1 : -1)
 
         // How much of the structure survives. At `patchiness` 0 the field is
         // flat — uniform is what frontal rain IS, not a failure to be
@@ -887,16 +937,16 @@ final class SceneSimulation {
             // side of the window to the other would never actually stop, and
             // stopping is most of what makes a shower a shower.
             let n = 0.50
-                  + 0.30 * sin(a * 0.6 + drift * 0.55 + 0.7)
-                  + 0.22 * sin(a * 2.3 - drift * 0.90 + 2.4)
-                  + 0.14 * sin(a * 6.1 + drift * 1.60 + 5.1)
+                  + 0.30 * sin(a * 0.6 - drift * 0.55 * showerSign + 0.7)
+                  + 0.22 * sin(a * 2.3 - drift * 0.90 * showerSign + 2.4)
+                  + 0.14 * sin(a * 6.1 - drift * 1.60 * showerSign + 5.1)
             var v = max(0, min(1, (n - gate) / span))
             v = 1 - shape * (1 - v)
             if band > 0.01 {
                 // A squall line is a LINE, not a blotch: narrow crests, high
                 // contrast, moving fast. The rain arrives as a wall and leaves
                 // as one, which is why a squall is over in minutes.
-                let s = sin(a * 1.4 + drift * 2.6 + 1.1)
+                let s = sin(a * 1.4 - drift * 2.6 * showerSign + 1.1)
                 let crest = s > 0 ? s * s * s : 0
                 v = max(v * (1 - band * 0.8), crest * min(1, 0.45 + band))
             }
@@ -1006,11 +1056,8 @@ final class SceneSimulation {
         // horizontal cells per vertical cell — the ratio of the wind's push to
         // the fall speed — so fast rain in light wind is near vertical and slow
         // snow in a gale goes almost sideways.
-        let relWind = ((weather.windDir - facingAz + 180 + 360)
-                        .truncatingRemainder(dividingBy: 360)) - 180
-        let driftSign: Float = weather.wind > 8
-            ? (relWind > 0 ? 1 : -1) * min(1, abs(relWind) / 90) : 0
-        let push = driftSign * (weather.wind / 22)
+        let cross = Self.crossWind(weather, facingAz: facingAz)
+        let push = abs(cross) > 3 ? cross / 22 : 0
         let slope = max(-2.5, min(2.5, push / max(baseSpeed, 0.05)))
         // Wander. `flutter` is the ratio of the wind to the fall speed, and the
         // wind's steady push is already in `slope` — what is left is TUMBLE,
@@ -1059,6 +1106,8 @@ final class SceneSimulation {
             // whenever it is actually raining — the scene drew no rain at all.
             let deckRow = edgeArr[col] / SP
             let y0 = deckRow * max(0, 1 - deckRow / Float(rows))
+            // Nothing is born inside a shelter: under a widget it is dry.
+            if shelterTop(atX: (Float(col) + 0.5) * SP, below: y0 * SP) != nil { continue }
 
             streaks.append((c: Float(col), y: y0,
                             len: lenBase * (0.75 + rnd() * 0.5),
@@ -1066,7 +1115,7 @@ final class SceneSimulation {
                             slope: slope * (0.85 + rnd() * 0.3),
                             wob: wobble * (0.4 + rnd() * 1.2),
                             ph: rnd() * 6.2832,
-                            hops: 0))
+                            hops: 0, stop: .infinity, resume: .infinity))
         }
 
         let f = dt * 60           // reference integrates per frame at 60fps
@@ -1081,9 +1130,48 @@ final class SceneSimulation {
             // terminal velocity, so it alone gets gravity.
             if streaks[i].v < 0 { streaks[i].v += 0.16 * f }
             let dy = streaks[i].v * f
+            let prevY = streaks[i].y
             streaks[i].y += dy
             // The head travels along the slope, so the whole streak leans.
             streaks[i].c += streaks[i].slope * dy
+
+            // LANDING. Rain used to fall straight through the dock and every
+            // widget as if they were not there — the one thing that made the
+            // furniture look untouched by weather however much the physics
+            // behind it did. Now a streak whose head crosses a top edge stops
+            // there: the head is pinned to the edge, the tail drains into it,
+            // and it throws a splash where it hit. Since nothing is born inside
+            // a shelter either, every piece of furniture casts a rain shadow
+            // below it, slanted by the same wind that slants the rain.
+            // Free, or already out from under the last thing it landed on.
+            if (streaks[i].stop.isInfinite || prevY - streaks[i].len > streaks[i].resume)
+                && streaks[i].v > 0 {
+                let hx = (streaks[i].c + 0.5) * SP
+                for (k, sf) in surfaces.enumerated()
+                    where sf.kind != .menuBar && hx >= sf.left && hx <= sf.right {
+                    let topRow = sf.top / SP
+                    if prevY < topRow && streaks[i].y >= topRow {
+                        streaks[i].stop = topRow
+                        // A SHORT shadow, then the rain picks up again. The
+                        // widget is stuck to the glass: it shelters the strip
+                        // just under it, not everything down to the Dock — a
+                        // full-height shadow under a row of widgets left whole
+                        // corners of the screen without rain. Uneven per streak,
+                        // so the shadow's lower edge is ragged, not ruled.
+                        streaks[i].resume = (sf.bottom + sf.h * (0.25 + rnd() * 0.8) + SP * 1.5) / SP
+                        if marks(sf.kind), films.count == surfaces.count,
+                           Furniture.options.furniture > 0.001,
+                           drops.count < Self.maxDrops + 28, rnd() < 0.7 {
+                            let v = max(40, min(520, lastWeather.fallSpeed * 42))
+                            let r = SP * (0.30 + rnd() * 0.26) * (form == .hail ? 1.5 : 1)
+                            splash(at: GlassDrop(x: hx, y: sf.top, r: r, v: v,
+                                                 rCrit: SP * 0.5, falling: true),
+                                   on: k)
+                        }
+                        break
+                    }
+                }
+            }
 
             if bounces && streaks[i].hops < 1
                 && streaks[i].v > 0 && streaks[i].y >= floorRow {
@@ -1125,6 +1213,9 @@ final class SceneSimulation {
             let wobbly = s.wob > 0.08
             while k < s.len {
                 let ry = s.y - k
+                // Below the edge it landed on, the streak is inside the
+                // furniture — hidden by it — so none of it is drawn.
+                if ry > s.stop && ry < s.resume { k += step; continue }
                 let row = ry * fn
                 // The wander is a function of WHERE the point is, not of how
                 // old it is, so a fluttering crystal traces one fixed wavy path
@@ -1373,7 +1464,9 @@ final class SceneSimulation {
                                       * s.material.rebound)
         let n = min(7, 1 + Int(impact * (form == .hail ? 6 : 4)))
         for _ in 0..<n {
-            let sideways = (rnd() * 2 - 1) * d.v * (0.45 + bounce * 0.5)
+            // The wind carries spray off the lip: at 30 km/h across the screen
+            // it is pushed a couple of cells downwind before it lands.
+            let sideways = (rnd() * 2 - 1) * d.v * (0.45 + bounce * 0.5) + crossWind * 5
             // How high it goes. Gravity here is 900 px/s², so the old
             // coefficients threw a fragment about twenty pixels — barely one
             // cell — and every splash in the scene was hidden behind the lip
@@ -2055,7 +2148,13 @@ final class SceneSimulation {
                   rnd() < supply * dt * 3.5 * m.shed / (0.65 + m.beadiness * 0.55)
             else { continue }
             let r0 = SP * (0.30 + rnd() * 0.35) * (0.80 + m.beadiness * 0.45)
-            drops.append(GlassDrop(x: s.left + rnd() * s.w,
+            // Wind drives the water on a lip toward its downwind end, so the
+            // drips gather there rather than spreading evenly.
+            let lean = max(-0.8, min(0.8, crossWind / 35))
+            var along = rnd()
+            if lean > 0 { along = 1 - pow(1 - along, 1 + lean * 2.5) }
+            else if lean < 0 { along = pow(along, 1 - lean * 2.5) }
+            drops.append(GlassDrop(x: s.left + along * s.w,
                                    y: s.bottom + r0,
                                    r: r0,
                                    v: 12,
@@ -2280,7 +2379,9 @@ final class SceneSimulation {
         let gravity: Float = 900              // px/s^2
         // A squall throws the water in at an angle rather than dropping it, so
         // a run down the pane leans hard instead of going straight.
-        let windPush = w.wind / 90 * (gustFront ? 3.2 : 1)
+        // Signed: it used to be the wind's SPEED only, so every run on the
+        // glass leaned right whichever way the wind blew.
+        let windPush = Self.crossWind(w, facingAz: facingAz) / 90 * (gustFront ? 3.2 : 1)
         let evaporation = w.evaporationRate
         var i = drops.count - 1
         while i >= 0 {
@@ -2332,6 +2433,37 @@ final class SceneSimulation {
                 // the rain has stopped.
                 d.r = max(d.r * (1 - dt * 0.10) - dt * SP * 0.03 * evaporation, SP * 0.02)
             }
+            // ---- running along an edge
+            //
+            // Held on the top edge of the widget it met, moving toward the
+            // nearer end (or downwind, when there is wind to speak of), shedding
+            // a wet track as it goes. Past the end it drops off the corner and
+            // carries on down the glass beside the widget — which is what makes
+            // the water look like it met something rather than passed behind a
+            // sticker.
+            if d.ride >= 0 {
+                if d.ride < surfaces.count {
+                    let sf = surfaces[d.ride]
+                    d.y = sf.top - d.r * 0.8
+                    d.x += d.rideDir * (30 + 80 * min(1, d.r / (SP * 0.5))) * dt
+                    d.r = max(d.r * (1 - dt * 0.04), SP * 0.06)
+                    let cx = Int(d.x / SP), cy = Int(d.y / SP)
+                    if cx >= 0, cx < cols, cy >= 0, cy < rows {
+                        trailCells[cy * cols + cx] = min(1, trailCells[cy * cols + cx] + dt * 1.6)
+                    }
+                    if d.x < sf.left - d.r * 0.5 || d.x > sf.right + d.r * 0.5 {
+                        d.x = d.rideDir < 0 ? sf.left - d.r * 1.1 : sf.right + d.r * 1.1
+                        d.ride = -1
+                        d.falling = true
+                        d.v = 25
+                    }
+                } else {
+                    d.ride = -1
+                }
+                drops[i] = d
+                i -= 1
+                continue
+            }
             drops[i] = d
 
             // ---- landing on furniture
@@ -2347,18 +2479,47 @@ final class SceneSimulation {
             // them crosses the lip again on the way back down — without a size
             // floor each impact seeds a fresh generation of ever-smaller impacts
             // and the population runs away.
-            if d.falling && d.splashLife == 0 && d.v > 4 && d.r > SP * 0.10 {
-                var landed = false
+            //
+            // A drop RUNNING down the glass is slow and held by it, so it does
+            // not splash: it catches on the edge and runs along it (above). Only
+            // a fast arrival throws spray. Anything too small to run — spray
+            // fragments coming back down — is simply absorbed by the edge.
+            if d.falling && d.splashLife == 0 && d.v > 4 {
+                var handled = false
                 let prevY = d.y - d.v * dt
-                for k in 0..<surfaces.count where surfaces[k].spans(d.x) && marks(surfaces[k].kind) {
-                    if prevY <= surfaces[k].top && d.y + d.r >= surfaces[k].top {
-                        splash(at: d, on: k)
-                        landed = true
-                        break
+                for k in 0..<surfaces.count
+                    where surfaces[k].kind != .menuBar && surfaces[k].spans(d.x) {
+                    guard prevY <= surfaces[k].top && d.y + d.r >= surfaces[k].top else { continue }
+                    let sf = surfaces[k]
+                    if d.r > SP * 0.12 && marks(sf.kind) {
+                        if d.v > 320 && d.r > SP * 0.20 { splash(at: d, on: k) }
+                        var nd = d
+                        nd.ride = k
+                        // Toward the nearer end, so an edge sheds from BOTH
+                        // corners. Wind moves where the split falls rather than
+                        // sending everything one way — a breeze sent every drop
+                        // off the same corner and piled the water on one side.
+                        let split = sf.left + sf.w * (0.5 - max(-0.35, min(0.35, windPush * 0.8)))
+                        nd.rideDir = d.x < split ? -1 : 1
+                        nd.v = 0
+                        nd.y = sf.top - nd.r * 0.8
+                        drops[i] = nd
+                    } else {
+                        drops.remove(at: i)
                     }
+                    handled = true
+                    break
                 }
-                if landed { drops.remove(at: i); i -= 1; continue }
+                if handled { i -= 1; continue }
             }
+
+            // ---- nothing behind the furniture
+            //
+            // A widget is stuck to the glass. Beads, spray and condensation that
+            // end up inside its outline are under it — and a translucent widget
+            // showed them through itself, which is why the effects looked pasted
+            // on top of the widgets instead of meeting them.
+            if insideFurniture(d.x, d.y) { drops.remove(at: i); i -= 1; continue }
 
             // ---- the wet track
             //
@@ -2383,7 +2544,8 @@ final class SceneSimulation {
                     let yy = prevY + (d.y - prevY) * f
                     let xx = d.x - windPush * d.v * dt * 0.25 * (1 - f)
                     let cx = Int(xx / SP), cy = Int(yy / SP)
-                    guard cx >= 0, cx < cols, cy >= 0, cy < rows else { continue }
+                    guard cx >= 0, cx < cols, cy >= 0, cy < rows,
+                          !insideFurniture(xx, yy) else { continue }
                     let idx = cy * cols + cx
                     trailCells[idx] = min(1, trailCells[idx] + each)
                 }
@@ -3120,6 +3282,19 @@ final class SceneSimulation {
                   kind: mature ? 1 : 2,
                   strength: (mature ? 0.85 : 0.45) * intensity,
                   bead: mature)
+        }
+
+        // Nothing on the glass inside a piece of furniture's outline: the
+        // widget is stuck there, so water is around it, never under it. A
+        // translucent widget otherwise shows the film through itself. The top
+        // edge row stays — that is where water rides.
+        for sf in surfaces where sf.kind != .menuBar {
+            let c0 = max(0, Int((sf.left / SP).rounded(.up)))
+            let c1 = min(cols - 1, Int((sf.right / SP).rounded(.down)) - 1)
+            let r0 = max(0, Int((sf.top / SP).rounded(.up)))
+            let r1 = min(rows - 1, Int((sf.bottom / SP).rounded(.down)) - 1)
+            guard c0 <= c1, r0 <= r1 else { continue }
+            for cy in r0...r1 { for cx in c0...c1 { glassCells[cy * cols + cx] = .zero } }
         }
     }
 }
