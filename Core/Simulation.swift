@@ -1223,6 +1223,10 @@ final class SceneSimulation {
                 let wob = wobbly ? s.wob * sin(s.ph + ry * 0.55) : 0
                 let col = (s.c - s.slope * k + wob) * fn + (fn - 1) * 0.5
                 k += step
+                // Never inside a widget's outline, whichever way it got there —
+                // a streak slanting in from the side showed through a
+                // translucent widget's edge.
+                if insideFurniture((col + 0.5) / fn * SP, ry * SP) { continue }
                 let fy = Int(row), fx = Int(col.rounded())
                 guard fy >= 0, fy < fh, fx >= 0, fx < fw else { continue }
                 let idx = fy * fw + fx
@@ -3037,8 +3041,13 @@ final class SceneSimulation {
                 // flat, patchy scatter with bare gaps in it, which is what sleet
                 // on a ledge actually looks like.
                 let loose = (form == .sleet)
-                let mid = (Float(c0) + Float(c1) + 1) * 0.5
                 let half = span * 0.5 * f.snowSpan
+                // The wind carries lying snow along the lip and banks it at the
+                // downwind end — a drift, not a symmetric dome. The crown moves
+                // off centre with the wind across the screen.
+                let lean = max(-0.8, min(0.8, crossWind / 35))
+                let mid = (Float(c0) + Float(c1) + 1) * 0.5 + lean * (span * 0.5 - half) * 0.5
+                    + lean * half * 0.25
                 // How rough the top of the drift is. Open dendrites pile into an
                 // uneven crown; rimed graupel and wet aggregates settle nearly
                 // level, and pellets are level by definition.
