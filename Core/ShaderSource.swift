@@ -122,6 +122,80 @@ inline float cellPhase(uint idx) {
     return float(h & 0xFFFFFFu) / float(0xFFFFFF) * 6.28318f;
 }
 
+// ---- Cloud texture that does not repeat.
+//
+// Every cloud layer's structure used to be a sum of two or three sine waves.
+// A sum of sines is PERIODIC: however the frequencies are chosen it tiles into
+// a lattice, and on a closed overcast — where that texture is the whole frame —
+// it read as a camouflage print of identical blobs, the same size from the top
+// of the screen to the bottom. The user's verdict was that it looks nothing
+// like the sky outside, and three things were wrong, not one:
+//
+//   * REPETITION. Value noise summed over octaves (fBm) with a domain warp has
+//     no period at all.
+//   * NO PERSPECTIVE. A cloud base is a horizontal plane seen from under it.
+//     Overhead its features are large; toward the horizon the same features are
+//     further away, so they shrink and flatten until they merge into the smooth
+//     grey band a real overcast has along the horizon. So the texture is
+//     sampled on that plane, not on the screen.
+//   * NO DIRECTION. Low cloud organises along the wind — rolls and streets —
+//     and drifts with it. The plane is stretched along the wind and moved by it.
+// Hoskins' hash12, in its full three-component form. A two-component shortcut
+// of it correlates along the diagonals of the integer lattice — it drew regular
+// diagonal stripes across the sky — which is exactly the repetition this exists
+// to remove.
+inline float deckHash(float2 p) {
+    float3 p3 = fract(float3(p.x, p.y, p.x) * 0.1031f);
+    p3 += dot(p3, p3.yzx + 33.33f);
+    return fract((p3.x + p3.y) * p3.z);
+}
+
+inline float deckNoise(float2 p) {
+    float2 i = floor(p), f = fract(p);
+    f = f * f * (3.0f - 2.0f * f);
+    float a = deckHash(i), b = deckHash(i + float2(1.0f, 0.0f));
+    float c = deckHash(i + float2(0.0f, 1.0f)), d = deckHash(i + float2(1.0f, 1.0f));
+    return mix(mix(a, b, f.x), mix(c, d, f.x), f.y);
+}
+
+/// Four octaves, rotated between octaves so no grid axis survives. About -0.5
+/// to 0.5, mean zero.
+inline float deckFBM(float2 p) {
+    const float2x2 rot = float2x2(float2(0.80f, 0.60f), float2(-0.60f, 0.80f));
+    float s = 0.0f, a = 0.5f, n = 0.0f;
+    for (int i = 0; i < 4; ++i) {
+        s += a * (deckNoise(p) - 0.5f);
+        n += a;
+        p = rot * p * 2.03f + float2(17.1f, 9.2f);
+        a *= 0.5f;
+    }
+    return s / n * 1.6f;
+}
+
+/// Cloud structure at a screen position, as seen on a horizontal layer `base`
+/// high. `scale` is the feature size on that layer, `stretch` how much longer
+/// features are along the wind than across it. Returns about -0.5 to 0.5, fading
+/// to 0 toward the horizon where the features become smaller than a cell.
+inline float deckField(float x, float y, float W, float H, float facingAz,
+                       float base, float scale, float stretch,
+                       float windDir, float wind, float sec) {
+    const float DEG = 0.01745329f;
+    // The frame's own sky mapping: 85 degrees of altitude down the height, 190
+    // of azimuth across the width.
+    float alt = (1.0f - y / max(H, 1.0f)) * 85.0f;
+    float az  = (facingAz + (x / max(W, 1.0f) - 0.5f) * 190.0f) * DEG;
+    float d   = base / tan(max(alt, 2.5f) * DEG);
+    float2 p  = d * float2(sin(az), cos(az));
+    // Carried downwind: the pattern moves TOWARD windDir + 180.
+    float wd  = (windDir + 180.0f) * DEG;
+    float2 dir = float2(sin(wd), cos(wd));
+    p -= dir * sec * 0.00015f * max(wind, 3.0f) * base;
+    float2 q = float2(dot(p, dir) / stretch, dot(p, float2(dir.y, -dir.x))) / scale;
+    // Domain warp: bends the octaves into billows instead of round blobs.
+    float2 w = float2(deckFBM(q * 0.5f + 3.1f), deckFBM(q * 0.5f + 7.7f));
+    return deckFBM(q + 1.1f * w) * smoothstep(2.0f, 16.0f, alt);
+}
+
 // Sky ambient brightness 0->1 (roomstand.py:2237)
 inline float skyBr(float sAlt) {
     if (sAlt <= -18.0f) return 0.04f;
@@ -1302,8 +1376,9 @@ fragment CellOut cellPass(VOut in [[stage_in]],
         // faster than y, which stands the bands on end: that is the vertical
         // striping across the sky, and it is why it shows on a cloudy day and
         // not a clear one.
-        midN = 0.5f + 0.32f * sin(cyp * 0.0121f - cxp * 0.0048f + sec * 0.020f)
-                    + 0.20f * sin(cyp * 0.0244f + cxp * 0.0032f + sec * 0.013f + 2.6f);
+        // Sheets higher up and longer along the wind than the low deck.
+        midN = 0.5f + 1.1f * deckField(cxp, cyp, W, H, U.facingAz, 3.0f, 1.3f, 2.4f,
+                                       U.windDir, U.wind, sec + 400.0f);
         midAmt = saturate(midN * U.cloudMid * band * 1.35f - 0.22f);
     }
 
@@ -1323,6 +1398,7 @@ fragment CellOut cellPass(VOut in [[stage_in]],
     // same distance and adjacent transitions overlap into a soft fringe. It is
     // also allowed to continue BELOW eY, which is what removes the cut.
     float lowAmt = 0.0f, lowD2 = 0.0f, lowK = 0.0f, lowThick = 0.0f, lowDen = 1.0f;
+    float lowF = 0.0f;   // the deck's structure, shared by density and shading
     float eY = edgeArr[ix];
     float lowFeather = max(H * 0.07f, SPv.y * 3.0f);
     if (eY > 0.0f) {
@@ -1361,10 +1437,11 @@ fragment CellOut cellPass(VOut in [[stage_in]],
         // Three octaves, drifting, with the vertical scale about half the
         // horizontal: cloud is far wider than it is tall, and getting that ratio
         // wrong is most of what makes procedural cloud read as smoke.
-        float ddx = cxp * 0.0043f, ddy = cyp * 0.0091f;
-        float den = 0.30f * sin(ddx * 1.00f + ddy * 0.83f + sec * 0.013f)
-                  + 0.20f * sin(ddx * 2.10f - ddy * 1.55f + sec * 0.021f + 2.1f)
-                  + 0.13f * sin(ddx * 4.30f + ddy * 3.10f - sec * 0.009f + 4.7f);
+        //
+        // On the cloud base, in perspective, along the wind — see deckField.
+        lowF = deckField(cxp, cyp, W, H, U.facingAz, 1.0f, 0.55f, 1.7f,
+                               U.windDir, U.wind, sec);
+        float den = 1.25f * lowF;
         // Recentred on 1 so it VARIES the deck rather than thinning it. A mottle
         // whose mean is below one is a cover reduction wearing a texture's
         // clothes — the same mistake already fixed twice in the shading terms.
@@ -1820,8 +1897,9 @@ fragment CellOut cellPass(VOut in [[stage_in]],
         // three channels cross their steps at different radii. Overcast IS flat,
         // but it is not featureless at this scale, and the little that is there
         // is what breaks the contours up.
-        float lowN = 0.5f + 0.30f * sin(cxp * 0.0061f + cyp * 0.0113f + sec * 0.011f)
-                          + 0.20f * sin(cxp * 0.0134f - cyp * 0.0072f - sec * 0.008f + 2.3f);
+        // The same field as the density above, so the thick parts are the dark
+        // parts — a sine lattice here was the camouflage print on a closed sky.
+        float lowN = 0.5f + 1.3f * lowF;
         // THE SAME DOUBLE-COUNT AGAIN, and this one was worth 25% of the whole
         // frame. `(0.75 + 0.55 * light)` is inherited verbatim from
         // roomstand.py:2643, where it was correct: there the deck was a STRIP
