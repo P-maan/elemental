@@ -93,6 +93,7 @@ enum AutomationSchema {
         Key(name: "scenePlaceName", type: "string", detail: "Which saved place the sky is drawn over."),
         Key(name: "liveWeather", type: "bool", detail: "Follow the real weather, or draw a clear calm day."),
         Key(name: "lowPower", type: "automatic | on | off", detail: "The Low Power preset."),
+        Key(name: "lowPowerFPS", type: "int 4…30", detail: "Steady frame rate while Low Power is in force. Default 5 (about 1% CPU)."),
         Key(name: "syncLockScreen", type: "bool", detail: "Show the scene on the lock screen."),
         Key(name: "renderWhenOccluded", type: "bool", detail: "Keep drawing behind fullscreen apps."),
         Key(name: "playbackOnWake", type: "bool", detail: "Replay missed hours after sleep."),

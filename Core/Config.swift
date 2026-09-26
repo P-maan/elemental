@@ -375,8 +375,11 @@ struct Config: Codable, Equatable {
     /// When the Low Power preset is in force. Automatic follows macOS Low Power
     /// Mode; On and Off are the menu-bar toggle and the Settings control
     /// overriding it. The preset draws the same picture at a steady, lower
-    /// frame rate — see `WallpaperSurface.applyFrameRate`.
+    /// frame rate (`lowPowerFPS`) — see `WallpaperSurface.applyFrameRate`.
     var lowPower: LowPowerPreference = .automatic
+    /// Frames a second while the preset is in force. Steady, never a range —
+    /// see `WallpaperSurface.applyFrameRate`.
+    var lowPowerFPS: Int = 5
 
     /// The address the automation endpoint listens on, 127.0.0.1 only.
     var automationPort: Int = 7417
@@ -737,7 +740,7 @@ struct Config: Codable, Equatable {
     ///
     /// So appearance is untouched and the whole saving comes from how OFTEN the
     /// wall is drawn — see `applyFrameRate(lowPower:)`, which holds a steady
-    /// fifteen frames a second.
+    /// `lowPowerFPS`, five by default — about one per cent of a core.
     ///
     /// Kept as a function rather than inlined so there is one obvious place to
     /// add a saving later — on the condition that it cannot be seen.
@@ -872,6 +875,7 @@ extension Config {
         renderWhenOccluded = c.lenient(.renderWhenOccluded, d.renderWhenOccluded)
         lowPowerOnBattery  = c.lenient(.lowPowerOnBattery, d.lowPowerOnBattery)
         lowPower           = c.lenient(.lowPower, lowPowerOnBattery ? .automatic : .off)
+        lowPowerFPS        = max(4, min(30, c.lenient(.lowPowerFPS, d.lowPowerFPS)))
         automationPort     = c.lenient(.automationPort, d.automationPort)
         automationEnabled  = c.lenient(.automationEnabled, d.automationEnabled)
         lock               = c.lenient(.lock, d.lock)

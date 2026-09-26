@@ -405,15 +405,24 @@ final class WallpaperSurface: NSObject, CAMetalDisplayLinkDelegate {
         // shimmer on sits around one per cent of a core; the CPU cost of a frame
         // is small next to the fixed cost of being alive.
         //
-        // So: fifteen frames a second, fixed, whatever the weather, with the
-        // range pinned so CoreAnimation cannot hand back an irregular cadence —
-        // regularity is what reads as smooth, far more than speed. Fifteen
-        // divides 60 and 120, so a ProMotion panel holds an even beat, and it
-        // halves the GPU work of the default thirty, which is where a wallpaper's
-        // battery actually goes.
+        // So: a FIXED rate, five by default (`lowPowerFPS`), with the range
+        // pinned so CoreAnimation cannot hand back an irregular cadence —
+        // regularity is what reads as smooth, far more than speed. The mosaic
+        // changes tile by tile and the shimmer drifts over five to twelve
+        // seconds, so a steady five still reads as motion; the stutter was two
+        // frames a second on a 1-to-3 range, gaps of half a second and uneven.
+        //
+        // Why five: the budget is about one per cent of a core, and the cost
+        // is linear in frames with no floor to speak of — measured on battery,
+        // display on: 4fps 0.8%, 8fps 1.7%, 12fps 2.5%, 30fps 4.4%, about
+        // 0.21% per frame a second. Profiled, Elemental's own frame work is
+        // 0.37ms of that ~2ms; the rest is macOS presenting it (display link,
+        // frame pacing, GPU submission in the kernel), from one command buffer
+        // of three passes. It only shrinks by presenting less often.
         if lowPower {
-            link?.preferredFrameRateRange = CAFrameRateRange(minimum: 15, maximum: 15,
-                                                             preferred: 15)
+            let f = Float(max(4, min(30, config.lowPowerFPS)))
+            link?.preferredFrameRateRange = CAFrameRateRange(minimum: f, maximum: f,
+                                                             preferred: f)
             renderer.state.lowFX = false
             return
         }

@@ -1053,8 +1053,8 @@ struct PowerPage: View {
     var body: some View {
         let c = store.config
         TileCard(title: "Low Power",
-                 info: "Low Power draws exactly the same picture at a steady fifteen frames a second "
-                     + "instead of up to thirty. Automatic turns it on whenever macOS Low Power Mode "
+                 info: "Low Power draws exactly the same picture at a steady, lower frame rate — "
+                     + "five a second by default (about 1% of a core), instead of up to thirty. Automatic turns it on whenever macOS Low Power Mode "
                      + "is on. The menu-bar icon has the same toggle; hold Option there to hand it "
                      + "back to Automatic.",
                  options: [TileOption(id: "auto", title: "Automatic", symbol: "wand.and.stars"),
@@ -1086,6 +1086,12 @@ struct PowerPage: View {
 
         SectionTitle("Drawing")
         RowsCard {
+            MenuRow(title: "Frame rate in Low Power",
+                    subtitle: "Always steady. Each frame a second costs about 0.2% of a core.",
+                    selection: store.binding(\.lowPowerFPS),
+                    options: [(4, "4 fps — least power"), (5, "5 fps — about 1% CPU"),
+                              (6, "6 fps"), (8, "8 fps"), (10, "10 fps"), (15, "15 fps — smoothest")])
+            RowDivider()
             MenuRow(title: "Frame rate ceiling",
                     subtitle: "A calm sky asks for far less; rain, lightning and shimmer climb toward this.",
                     selection: store.binding(\.maxFPS),
