@@ -51,6 +51,14 @@ enum AppIconStyle: Int, Codable, CaseIterable {
     }
 }
 
+/// When the Low Power preset is in force.
+enum LowPowerPreference: Int, Codable, CaseIterable {
+    case automatic = 0, on = 1, off = 2
+    var title: String {
+        switch self { case .automatic: "Automatic"; case .on: "On"; case .off: "Off" }
+    }
+}
+
 struct Config: Codable, Equatable {
 
     /// Where the sky is drawn for. Nil until the user has granted location or
@@ -360,8 +368,20 @@ struct Config: Codable, Equatable {
     /// on if you want to satisfy yourself the resume is genuinely instant.
     var renderWhenOccluded: Bool = false
 
-    /// Drop the detail passes and halve the frame rate on battery.
+    /// Superseded by `lowPower`; read once to migrate an older config, where
+    /// false meant "never use the preset".
     var lowPowerOnBattery: Bool = true
+
+    /// When the Low Power preset is in force. Automatic follows macOS Low Power
+    /// Mode; On and Off are the menu-bar toggle and the Settings control
+    /// overriding it. The preset draws the same picture at a steady, lower
+    /// frame rate — see `WallpaperSurface.applyFrameRate`.
+    var lowPower: LowPowerPreference = .automatic
+
+    /// The address the automation endpoint listens on, 127.0.0.1 only.
+    var automationPort: Int = 7417
+    /// Whether the local HTTP endpoint runs at all. The URL scheme is always on.
+    var automationEnabled: Bool = true
 
     // `matchPixelGrid` used to live here: a switch between snapping the cell
     // pitch to the display's pixel height and not bothering. It is gone, and
@@ -389,6 +409,13 @@ struct Config: Codable, Equatable {
         var headingMode: HeadingMode = .custom
         var facingAz: Double = 180
         var scenePlaceName: String?
+        // What the tile is MADE of. `shape` and `finish` above are kept for
+        // older configs and the style picker, but the renderer reads only these
+        // three — a surface style that set shape and finish alone changed
+        // nothing on screen, so picking "Dot" for the lock screen drew squares.
+        var material: MosaicMaterial = .glass
+        var rounding: Double = 0
+        var halftone: Double = 0
 
     // A per-surface `hasAskedForLocation` used to sit here. It was never read by
     // anything: location is asked for once by the app, not once per surface, and
@@ -408,6 +435,9 @@ struct Config: Codable, Equatable {
         c.finish = style.finish
         c.gridRows = style.gridRows
         c.poster = style.poster
+        c.material = style.material
+        c.rounding = style.rounding
+        c.halftone = style.halftone
         c.headingMode = style.headingMode
         c.facingAz = style.facingAz
         c.scenePlaceName = style.scenePlaceName ?? scenePlaceName
@@ -706,9 +736,8 @@ struct Config: Codable, Equatable {
     /// than the MOTION, not that they want a different picture.
     ///
     /// So appearance is untouched and the whole saving comes from how OFTEN the
-    /// wall is drawn — see `applyFrameRate(lowPower:)`, which drops to two frames
-    /// a second. CPU cost is close to linear in frames, so that is where the
-    /// budget is met anyway; the visual cuts bought GPU time, not CPU time.
+    /// wall is drawn — see `applyFrameRate(lowPower:)`, which holds a steady
+    /// fifteen frames a second.
     ///
     /// Kept as a function rather than inlined so there is one obvious place to
     /// add a saving later — on the condition that it cannot be seen.
@@ -842,6 +871,9 @@ extension Config {
         paneWaterAmount    = c.lenient(.paneWaterAmount, d.paneWaterAmount)
         renderWhenOccluded = c.lenient(.renderWhenOccluded, d.renderWhenOccluded)
         lowPowerOnBattery  = c.lenient(.lowPowerOnBattery, d.lowPowerOnBattery)
+        lowPower           = c.lenient(.lowPower, lowPowerOnBattery ? .automatic : .off)
+        automationPort     = c.lenient(.automationPort, d.automationPort)
+        automationEnabled  = c.lenient(.automationEnabled, d.automationEnabled)
         lock               = c.lenient(.lock, d.lock)
         saver              = c.lenient(.saver, d.saver)
         appIcon            = c.lenient(.appIcon, d.appIcon)
@@ -896,6 +928,18 @@ extension Config.SurfaceStyle {
         headingMode     = c.lenient(.headingMode, d.headingMode)
         facingAz        = c.lenient(.facingAz, d.facingAz)
         scenePlaceName  = try? c.decodeIfPresent(String.self, forKey: .scenePlaceName)
+        // Derived from the old pair when absent, the same migration the main
+        // config does, so an existing lock-screen style draws what it always
+        // claimed to.
+        if let m: MosaicMaterial = try? c.decodeIfPresent(MosaicMaterial.self, forKey: .material) {
+            material = m
+            rounding = c.lenient(.rounding, d.rounding)
+            halftone = c.lenient(.halftone, d.halftone)
+        } else {
+            material = (finish == .flat) ? .matte : .glass
+            rounding = (shape == .dot) ? 1 : 0
+            halftone = (shape == .dot) ? 1 : 0
+        }
     }
 }
 

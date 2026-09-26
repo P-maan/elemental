@@ -866,7 +866,7 @@ if args["analyze"] != nil {
     }
 
     // ---- sample a block of interior tiles, avoiding the frame edges where the
-    // relief ramp deliberately flattens the lean.
+    // relief taper deliberately flattens the lean.
     let nx = max(1, min(24, width / sp - 4)), ny = max(1, min(24, height / sp - 4))
     let x0 = max(1, (width / sp - nx) / 2), y0 = max(1, (height / sp - ny) / 2)
     var tiles: [[Float]] = []

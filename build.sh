@@ -55,6 +55,10 @@ retag_plist() {
   for k in CFBundleName CFBundleDisplayName; do
     /usr/libexec/PlistBuddy -c "Set :${k} ${name}" "$plist" 2>/dev/null || true
   done
+  # The pre-release answers its own scheme, so elemental:// always means the
+  # stable app and a script aimed at the Pre has to say so.
+  /usr/libexec/PlistBuddy -c "Set :CFBundleURLTypes:0:CFBundleURLSchemes:0 elemental-pre" \
+    "$plist" 2>/dev/null || true
 }
 mkdir -p "$BUILD"
 

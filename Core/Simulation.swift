@@ -537,53 +537,56 @@ final class SceneSimulation {
         return max(12, min(160, Int((pixelHeight / cell).rounded())))
     }
 
-    /// Cell sizes that tile THIS display without a visible part-cell at the
-    /// edge, ascending.
+    /// Row counts that tile THIS display exactly, ascending.
     ///
-    /// AN EXACT FIT IS USUALLY IMPOSSIBLE, which is why this is a tolerance and
-    /// not a divisibility test. A square cell tiles both axes exactly only if
-    /// its pitch divides both dimensions, and real panels are hostile to that:
-    /// a 3456x2234 MacBook Pro has a greatest common divisor of 2, so the only
-    /// exact fits are one- and two-pixel cells. Asked literally, "only allow a
-    /// grid that fits" would allow nothing.
+    /// EXACT, NOT NEARLY. Every cell is `height / rows` tall and
+    /// `width / cols` wide, so `cols` cells span the width and `rows` cells span
+    /// the height with nothing left over: no part-cell at any edge, no offset,
+    /// the outermost ranks flush against all four sides. That is what the shader
+    /// has always drawn — it derives the pitch per axis from the display size —
+    /// and this is now the one place that agrees with it.
     ///
-    /// What the eye objects to is not a remainder but a HALF CELL. A remainder
-    /// of two pixels is a sliver nobody can see; a remainder of nearly a whole
-    /// cell is a column that is almost all there, which also reads as intended.
-    /// It is the middle — 40, 50, 60% of a cell hanging off the edge — that
-    /// makes the grid look cropped and squeezed. So a pitch fits if, on BOTH
-    /// axes, its remainder is within 12% of a cell of either extreme.
+    /// What varies from one row count to the next is only how SQUARE the cells
+    /// come out, because `cols` has to be a whole number: 62 rows on a
+    /// 4112x2658 surface wants 95.9 columns, gets 96, and each cell is 0.1%
+    /// wider than it is tall. A row count is allowed if that error is within
+    /// 0.3% — a fifth of a pixel across a 60-pixel tile, below anything the eye
+    /// can find. Most counts qualify; the ones that do not are coarse grids
+    /// where a whole column is a big fraction of the width, and those are
+    /// dropped rather than drawn visibly oblong.
     ///
-    /// Computed from the real display every time, never from a table: a built-in
-    /// panel and an external monitor have different answers, and the grid has
-    /// to fit the one it is actually on.
-    ///
-    /// 20%, not the 12% this shipped with first. 12% was verified against the
-    /// panel's NATIVE resolution (3456x2234, from system_profiler) — but the
-    /// machine runs a scaled "more space" mode, and the surface actually
-    /// rendered is 4112x2658. 4112 is 16 x 257 with 257 prime, which is about as
-    /// hostile to square tiling as a width can be: at 12% the FINEST grid that
-    /// fitted was 52 rows, and every density the user had been running was gone.
-    /// 20% restores the fine end (72, 79, 95, 121 ... 266 rows) while still
-    /// refusing the crops that prompted this — 62 rows there leaves 37% of a
-    /// column hanging off the edge, and stays banned.
+    /// THE WHOLE-PIXEL PITCH THIS REPLACES never reached the screen. It was
+    /// computed here and thrown away by the shader, which stretched the rounded-
+    /// up grid back over the display — so the "clean pitch" tolerance was only
+    /// ever choosing counts, and the stretch it was supposed to prevent happened
+    /// anyway. Fractional pitch is safe because every edge in the tile is now
+    /// antialiased against the cell's own size, grout included; the uneven
+    /// grout that once argued for whole pixels came from one hard-edged test.
     ///
     /// Always measure against `NSScreen.frame * backingScaleFactor`, never the
     /// panel's native size: they differ whenever a scaled mode is in use.
-    static func cleanPitches(pixelWidth: Float, pixelHeight: Float,
-                             tolerance: Float = 0.20) -> [Int] {
-        let lo = 8, hi = max(lo, Int(pixelHeight / 8))
-        var out: [Int] = []
-        for p in lo...hi {
-            let pf = Float(p)
-            var worst: Float = 0
-            for d in [pixelWidth, pixelHeight] {
-                let r = d.truncatingRemainder(dividingBy: pf)
-                worst = max(worst, min(r, pf - r) / pf)
-            }
-            if worst <= tolerance { out.append(p) }
+    static let squareTolerance: Float = 0.003
+    static let rowRange = 9...300
+
+    static func fittingRows(pixelWidth: Float, pixelHeight: Float) -> [Int] {
+        guard pixelWidth > 0, pixelHeight > 0 else { return [] }
+        // Never finer than 8 pixels a cell: below that the tile stops having an
+        // inside for the finish to happen in.
+        let hi = min(rowRange.upperBound, max(rowRange.lowerBound, Int(pixelHeight / 8)))
+        return (rowRange.lowerBound...hi).filter {
+            squareness(rows: $0, pixelWidth: pixelWidth, pixelHeight: pixelHeight) <= squareTolerance
         }
-        return out
+    }
+
+    /// Columns for a row count: the whole number that keeps cells squarest.
+    static func columns(rows: Int, pixelWidth: Float, pixelHeight: Float) -> Int {
+        max(1, Int((pixelWidth * Float(rows) / pixelHeight).rounded()))
+    }
+
+    /// How far from square a cell is at this row count, as a fraction.
+    static func squareness(rows: Int, pixelWidth: Float, pixelHeight: Float) -> Float {
+        let c = columns(rows: rows, pixelWidth: pixelWidth, pixelHeight: pixelHeight)
+        return abs((pixelWidth / Float(c)) / (pixelHeight / Float(rows)) - 1)
     }
 
     static func gridGeometry(pixelWidth: Float, pixelHeight: Float,
@@ -592,41 +595,19 @@ final class SceneSimulation {
         // 0 means "choose for me".
         let want = gridRows > 0 ? gridRows : autoRows(pixelHeight: pixelHeight, scale: scale)
 
-        // THE PITCH STAYS A WHOLE NUMBER OF PIXELS. It used to be rounded here
-        // and then immediately un-rounded by re-deriving it as height/rows so
-        // the rows filled the frame exactly — which put every tile boundary on
-        // a fractional pixel. Measured on the user's own display: 2658/62 =
-        // 42.87, so tiles alternated between 42 and 43 pixels wide and the
-        // grout came out visibly uneven, one line thin and the next thick,
-        // across the whole wall. A mosaic is judged on the regularity of its
-        // grid more than on anything happening inside a tile, so an exact fit
-        // to the frame is worth far less than tiles that are all the same size.
-        // ONLY A SIZE THAT FITS THIS DISPLAY. The requested row count is a
-        // preference; the pitch actually used is the nearest one that tiles the
-        // panel cleanly — see `cleanPitches`. Snapped here, in the one function
-        // every surface derives its grid from, so no path can draw a cropped
-        // grid: not the wallpaper, not the saver, not the lock still, not the
-        // furniture detector's idea of where the grout is.
+        // ONLY A SIZE THAT FITS THIS DISPLAY. The request is a preference; the
+        // count drawn is the nearest one that tiles exactly — see
+        // `fittingRows`. Snapped here, in the one function every surface derives
+        // its grid from, so the wallpaper, the saver, the lock still and the
+        // furniture detector all agree on where the grout is.
         //
-        // Nearest in RATIO rather than in pixels, because a 6px step matters
-        // far more to a 20px cell than to a 70px one.
-        let p0 = pixelHeight / Float(max(1, want))
-        let clean = cleanPitches(pixelWidth: pixelWidth, pixelHeight: pixelHeight)
-        let sp: Float
-        if let best = clean.min(by: { abs(log(Float($0) / p0)) < abs(log(Float($1) / p0)) }) {
-            sp = Float(best)
-        } else {
-            // A display with no clean size at all in range — not one we have met,
-            // but it must still draw something rather than nothing.
-            sp = max(6, p0.rounded())
-        }
-
-        // Rounded UP so the grid still covers the frame. With an integer pitch
-        // the last row and column can overhang by up to one cell; overhanging
-        // the screen edge is invisible, whereas rounding down would leave an
-        // unpainted strip along the bottom or the right.
-        return (max(1, Int((pixelWidth  / sp).rounded(.up))),
-                max(1, Int((pixelHeight / sp).rounded(.up))), sp)
+        // Nearest in RATIO rather than in rows, because one row matters far
+        // more to a 12-row grid than to a 200-row one.
+        let fit = fittingRows(pixelWidth: pixelWidth, pixelHeight: pixelHeight)
+        let rows = fit.min(by: { abs(log(Float($0) / Float(want))) < abs(log(Float($1) / Float(want))) })
+            ?? max(1, want)
+        let cols = columns(rows: rows, pixelWidth: pixelWidth, pixelHeight: pixelHeight)
+        return (cols, rows, pixelHeight / Float(rows))
     }
 
     func resize(pixelWidth: Float, pixelHeight: Float, gridRows: Int) {

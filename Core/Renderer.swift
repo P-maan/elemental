@@ -396,12 +396,14 @@ final class ElementalRenderer {
             pixelFormat: .rgba32Float, width: sim.cols, height: sim.rows, mipmapped: false)
         g.usage = [.shaderRead]
         g.storageMode = .shared
+        g.allowGPUOptimizedContents = false   // see `uploadIfChanged`
         glassTex = device.makeTexture(descriptor: g)
 
         let st = MTLTextureDescriptor.texture2DDescriptor(
             pixelFormat: .r32Float, width: sim.cols, height: sim.rows, mipmapped: false)
         st.usage = [.shaderRead]
         st.storageMode = .shared
+        st.allowGPUOptimizedContents = false   // see `uploadIfChanged`
         streakTex = device.makeTexture(descriptor: st)
 
         let sf = MTLTextureDescriptor.texture2DDescriptor(
@@ -410,7 +412,11 @@ final class ElementalRenderer {
             height: sim.rows * SceneSimulation.streakSub, mipmapped: false)
         sf.usage = [.shaderRead]
         sf.storageMode = .shared
+        sf.allowGPUOptimizedContents = false   // see `uploadIfChanged`
         streakFineTex = device.makeTexture(descriptor: sf)
+        // Fresh textures hold nothing defined: upload on the next frame even
+        // if the fields are zero.
+        streakFineEmpty = false; streakCellsEmpty = false; glassEmpty = false
 
         let opt: MTLResourceOptions = .storageModeShared
         colIndexBuf = device.makeBuffer(length: MemoryLayout<SIMD2<Int32>>.stride * max(1, sim.cols), options: opt)
@@ -908,30 +914,47 @@ final class ElementalRenderer {
         uniformBuf.contents().copyMemory(from: &u, byteCount: MemoryLayout<Uniforms>.stride)
     }
 
+    // ---- Per-frame uploads: only what changed, and never compressed.
+    //
+    // These three textures were rewritten from the CPU on every frame — about a
+    // megabyte, most of it the fine streak field — and on Apple GPUs a texture
+    // is losslessly compressed by default, so each `replace` also ran the
+    // driver's compressor on the CPU (`processCompressedRegion2D` near the top
+    // of a profile of an idle wall). On a dry day all three are zero, frame
+    // after frame. So: `allowGPUOptimizedContents = false` makes an upload a
+    // plain copy, and a field that was empty last frame and is empty again is
+    // not uploaded at all. Scanning a zero field is far cheaper than copying it.
+    private var streakFineEmpty = false
+    private var streakCellsEmpty = false
+    private var glassEmpty = false
+
+    private func uploadIfChanged<T>(_ arr: [T], to tex: MTLTexture, width: Int, height: Int,
+                                    wasEmpty: inout Bool, isZero: (T) -> Bool) {
+        let empty = !arr.contains { !isZero($0) }
+        defer { wasEmpty = empty }
+        if empty && wasEmpty { return }
+        arr.withUnsafeBufferPointer { p in
+            tex.replace(region: MTLRegionMake2D(0, 0, width, height),
+                        mipmapLevel: 0, withBytes: p.baseAddress!,
+                        bytesPerRow: width * MemoryLayout<T>.stride)
+        }
+    }
+
     private func uploadStreakCells() {
         if let ft = streakFineTex, !sim.streakFine.isEmpty {
             let N = SceneSimulation.streakSub
-            sim.streakFine.withUnsafeBufferPointer { p in
-                ft.replace(region: MTLRegionMake2D(0, 0, sim.cols * N, sim.rows * N),
-                           mipmapLevel: 0, withBytes: p.baseAddress!,
-                           bytesPerRow: sim.cols * N * MemoryLayout<Float>.size)
-            }
+            uploadIfChanged(sim.streakFine, to: ft, width: sim.cols * N, height: sim.rows * N,
+                            wasEmpty: &streakFineEmpty) { $0 == 0 }
         }
         guard let tex = streakTex, !sim.streakCells.isEmpty else { return }
-        sim.streakCells.withUnsafeBufferPointer { p in
-            tex.replace(region: MTLRegionMake2D(0, 0, sim.cols, sim.rows),
-                        mipmapLevel: 0, withBytes: p.baseAddress!,
-                        bytesPerRow: sim.cols * MemoryLayout<Float>.stride)
-        }
+        uploadIfChanged(sim.streakCells, to: tex, width: sim.cols, height: sim.rows,
+                        wasEmpty: &streakCellsEmpty) { $0 == 0 }
     }
 
     private func uploadGlassCells() {
         guard let tex = glassTex, !sim.glassCells.isEmpty else { return }
-        sim.glassCells.withUnsafeBufferPointer { p in
-            tex.replace(region: MTLRegionMake2D(0, 0, sim.cols, sim.rows),
-                        mipmapLevel: 0, withBytes: p.baseAddress!,
-                        bytesPerRow: sim.cols * MemoryLayout<SIMD4<Float>>.stride)
-        }
+        uploadIfChanged(sim.glassCells, to: tex, width: sim.cols, height: sim.rows,
+                        wasEmpty: &glassEmpty) { $0 == .zero }
     }
 
     private func uploadBuffers() {

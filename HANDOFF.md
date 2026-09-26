@@ -230,6 +230,24 @@ open -g build/Elemental.app
    with `--probe` from three facings (toward, away, side-on) — a real sky
    differs between them, and identical rows mean something direction-free is
    wrong.
+23. **No `@State` in SwiftUI code.** In the current SDK it is a compiler macro
+   whose plugin ships with Xcode, not with the Command Line Tools `build.sh`
+   pins — compile fails with "plugin for module 'SwiftUIMacros' not found".
+   View-local state goes in a small `ObservableObject` held by `@StateObject`
+   (see `Flag`/`TextBox` in SettingsUI.swift).
+24. **A hosted SwiftUI view sizes the WINDOW.** `NSHostingView` publishes its
+   content's sizes to the window; the settings host is `.minSize` only, and any
+   wrapping `Text` needs a fixed width, or its minimum is measured at zero width
+   (a character a line) and the window grows to twice the screen.
+25. **The shader draws cells at `pixW/cols` × `pixH/rows`, not at `cellSP`.**
+   The grid always fills the display exactly, so a row count is only allowed if
+   those two come out square within 0.3% (`SceneSimulation.fittingRows`). An
+   integer "clean pitch" computed in Swift never reached the screen. Hard pixel
+   tests on cell edges show as uneven lines at fractional pitch — antialias them
+   against `cellPx`, as the outline and the grout now are.
+26. **Edge ranks and the relief.** Parallax is tapered to zero at the frame edge
+   along a sine (RELIEF_TAPER in Scene.metal). Never hold the edge flat and ramp
+   back in over a cell or two: that squeezed the 2nd and 3rd ranks to half width.
 
 ## Recurring bug classes
 

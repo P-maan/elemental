@@ -148,6 +148,27 @@ enum ElementsSelfTest {
             writePNG(render(cv), to: req.out.appendingPathComponent("window-general.png"))
         }
 
+        // ---- 2b. every SwiftUI page. The runloop is pumped between pages so
+        // the previews — rendered off the main thread and handed back on it —
+        // have landed before the picture is taken.
+        func pump(_ t: TimeInterval) { RunLoop.main.run(until: Date().addingTimeInterval(t)) }
+        let routes: [(String, () -> Void)] =
+            SettingsPage.allCases.map { p in (p.rawValue, { controller.store.go(p) }) }
+            + [("look-relief", { controller.store.open(.relief) }),
+               ("look-surface", { controller.store.open(.surface) }),
+               ("look-glass", { controller.store.open(.glass) })]
+        for (name, go) in routes {
+            go()
+            pump(0.2)
+            window.contentView?.layoutSubtreeIfNeeded()
+            pump(2.0)
+            window.contentView?.layoutSubtreeIfNeeded()
+            if let cv = window.contentView {
+                print("   \(name): window \(window.frame.size), fitting \(cv.fittingSize), min \(window.contentMinSize)")
+                writePNG(render(cv), to: req.out.appendingPathComponent("window-\(name).png"))
+            }
+        }
+
         // ---- 3. each pane on its own, at the window's real width
         for pane in panes {
             let host = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 704, height: 760),

@@ -79,26 +79,12 @@ enum MosaicDensity {
 
     /// Every density THIS DISPLAY can show without a cropped edge, ascending.
     ///
-    /// Built from the clean pitches directly rather than by trying every
-    /// request and keeping what comes out, so the grip cannot land on — or click
-    /// past — a size that would leave half a cell hanging off the screen. On a
-    /// 3456x2234 panel that is eight sizes; an external monitor gets its own.
+    /// Straight from `fittingRows`, so the grip cannot land on — or click past —
+    /// a count the engine would snap away from. An external monitor gets its own.
     static func ladder(pixelWidth: Double, pixelHeight: Double) -> [Step] {
-        let pitches = SceneSimulation.cleanPitches(pixelWidth: Float(pixelWidth),
-                                                   pixelHeight: Float(pixelHeight))
-        var seen = Set<Int>()
-        var out: [Step] = []
-        for p in pitches {
-            let q = max(1, Int((pixelHeight / Double(p)).rounded()))
-            let g = SceneSimulation.gridGeometry(pixelWidth: Float(pixelWidth),
-                                                 pixelHeight: Float(pixelHeight),
-                                                 gridRows: q)
-            // The request that yields this pitch, and what it really draws.
-            guard Int(g.pitch.rounded()) == p, !seen.contains(g.rows) else { continue }
-            seen.insert(g.rows)
-            out.append(Step(requested: q, rows: g.rows, cellPixels: Double(g.pitch)))
-        }
-        return out.sorted { $0.rows < $1.rows }
+        SceneSimulation.fittingRows(pixelWidth: Float(pixelWidth),
+                                    pixelHeight: Float(pixelHeight))
+            .map { Step(requested: $0, rows: $0, cellPixels: pixelHeight / Double($0)) }
     }
 
     /// The main display, in pixels across. Needed now because whether a grid
@@ -427,15 +413,12 @@ enum DensitySelfTest {
             + "\(ladder.count) achievable densities, "
             + "\(ladder.first?.rows ?? 0)…\(ladder.last?.rows ?? 0) rows")
 
-        let pane = SurfacePane(role: .desktop, title: "Home Screen", symbol: "menubar.dock.rectangle",
-                               blurb: "")
         let host = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 704, height: 900),
                             styleMask: [.titled, .resizable], backing: .buffered, defer: false)
-        host.contentViewController = pane
-        pane.syncSafely(config)
+        let g = DensityGripView()
+        host.contentView?.addSubview(g)
+        g.setRequested(config.gridRows)
         host.contentView?.layoutSubtreeIfNeeded()
-
-        let g = pane.grip!
         g.show(PreviewSpec.desktop(config, pixels: ScenePreview.large))
 
         func shot(_ name: String) {

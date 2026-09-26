@@ -9,7 +9,7 @@ import AppKit
 import Metal
 import CoreLocation
 
-final class AppDelegate: NSObject, NSApplicationDelegate {
+final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
 
     private var config: Config
     /// Set when config.json exists but could not be read, so the config above
@@ -28,6 +28,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private var device: MTLDevice!
     private var statusItem: NSStatusItem?
     private var settings: SettingsWindowController?
+    /// The local HTTP endpoint. See Automation.swift.
+    private(set) lazy var automation = AutomationServer(app: self)
     private var astroTimer: Timer?
     private var locationTimer: Timer?
     private var furnitureTimer: Timer?
@@ -54,6 +56,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         // a no-op for the default, which the bundle already carries.
         AppIcons.apply(config.appIcon)
         rebuildSurfaces()
+        applyAutomationSetting()
 
         // Write settings once at launch. This seeds the copy inside the screen
         // saver's bundle, so a freshly installed saver matches the desktop
@@ -177,7 +180,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         }
     }
 
-    @objc private func checkForUpdates() { runUpdateCheck(userAsked: true) }
+    @objc func checkForUpdates() { runUpdateCheck(userAsked: true) }
 
     private func runUpdateCheck(userAsked: Bool) {
         guard userAsked || config.automaticUpdates else { return }
@@ -572,6 +575,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
     func applicationWillTerminate(_ note: Notification) {
         surfaces.values.forEach { $0.close() }
+        automation.stop()
         lockStill?.stop()
         locationTimer?.invalidate()
     }
@@ -730,6 +734,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         }
         updatePowerState()
         applyPlaybackSetting()
+        applyAutomationSetting()
         resumeVisible()
         scheduleSettle()
     }
@@ -896,7 +901,64 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         // be measured without flipping the system's own power mode (which needs
         // an administrator password to do from a shell).
         if ProcessInfo.processInfo.environment["ELEMENTAL_FORCE_LOWPOWER"] == "1" { return true }
-        return config.lowPowerOnBattery && ProcessInfo.processInfo.isLowPowerModeEnabled
+        switch config.lowPower {
+        case .on:        return true
+        case .off:       return false
+        case .automatic: return ProcessInfo.processInfo.isLowPowerModeEnabled
+        }
+    }
+
+    /// Change the config from outside the settings window — the menu-bar
+    /// toggle, the automation endpoint, a URL — and keep the window in step if
+    /// it is open. Same path a settings control takes, debounce and all.
+    func updateConfig(_ mutate: (inout Config) -> Void) {
+        var c = config
+        mutate(&c)
+        guard c != config else { return }
+        applyConfig(c)
+        settings?.refreshIfVisible(config: c)
+    }
+
+    var isLowPowerActive: Bool { lowPowerActive }
+
+    /// Per display: frames drawn per second right now, and whether it is paused.
+    var surfaceStats: [[String: Any]] {
+        surfaces.map { id, s in
+            ["displayID": Int(id), "fps": (s.measuredFPS * 10).rounded() / 10,
+             "paused": s.isPaused, "visible": s.isVisible]
+        }
+    }
+
+    /// The menu-bar toggle. Flips what is on screen NOW: if the preset is in
+    /// force, for whatever reason, it goes off, and vice versa. Holding Option
+    /// turns the item into "Follow macOS", which hands it back to Automatic.
+    @objc func toggleLowPower() {
+        let wasOn = lowPowerActive
+        updateConfig { $0.lowPower = wasOn ? .off : .on }
+    }
+
+    @objc func followSystemLowPower() {
+        updateConfig { $0.lowPower = .automatic }
+    }
+
+    private var lowPowerItem: NSMenuItem?
+    private var lowPowerAutoItem: NSMenuItem?
+
+    func menuNeedsUpdate(_ menu: NSMenu) {
+        guard let item = lowPowerItem else { return }
+        item.state = lowPowerActive ? .on : .off
+        let title = NSMutableAttributedString(string: "Low Power Mode",
+                                              attributes: [.font: NSFont.menuFont(ofSize: 0)])
+        let note: String
+        switch config.lowPower {
+        case .automatic: note = "  Auto"
+        case .on, .off:  note = "  Manual"
+        }
+        title.append(NSAttributedString(string: note, attributes: [
+            .font: NSFont.menuFont(ofSize: 11),
+            .foregroundColor: NSColor.secondaryLabelColor]))
+        item.attributedTitle = title
+        lowPowerAutoItem?.state = config.lowPower == .automatic ? .on : .off
     }
 
     /// The config the SURFACES draw with: the user's own, or its Low Power
@@ -982,6 +1044,17 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             attributes: [.font: NSFont.systemFont(ofSize: 11, weight: .semibold),
                          .foregroundColor: NSColor.secondaryLabelColor])
         menu.addItem(.separator())
+        let lp = menu.addItem(withTitle: "Low Power Mode", action: #selector(toggleLowPower),
+                              keyEquivalent: "")
+        lp.target = self
+        lowPowerItem = lp
+        let lpAuto = menu.addItem(withTitle: "Low Power Mode: Follow macOS",
+                                  action: #selector(followSystemLowPower), keyEquivalent: "")
+        lpAuto.target = self
+        lpAuto.isAlternate = true
+        lpAuto.keyEquivalentModifierMask = .option
+        lowPowerAutoItem = lpAuto
+        menu.addItem(.separator())
         menu.addItem(withTitle: "Settings…", action: #selector(showSettings), keyEquivalent: ",")
             .target = self
         menu.addItem(withTitle: "Reload Scene", action: #selector(reload), keyEquivalent: "r")
@@ -991,6 +1064,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         menu.addItem(.separator())
         menu.addItem(withTitle: "Quit Elemental", action: #selector(quit), keyEquivalent: "q")
             .target = self
+        menu.delegate = self
         item.menu = menu
         statusItem = item
     }
@@ -1002,6 +1076,17 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     }
 
     @objc private func reload() { rebuildSurfaces() }
+    func reloadScene() { rebuildSurfaces() }
+
+    /// elemental:// links. See Automation.swift.
+    func application(_ application: NSApplication, open urls: [URL]) {
+        urls.forEach { AutomationURL.handle($0, app: self) }
+    }
+
+    private func applyAutomationSetting() {
+        if config.automationEnabled { automation.start(port: config.automationPort) }
+        else { automation.stop() }
+    }
     @objc private func quit() { NSApp.terminate(nil) }
 
     private func fatal(_ msg: String) {

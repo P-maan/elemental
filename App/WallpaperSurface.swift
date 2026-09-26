@@ -393,34 +393,35 @@ final class WallpaperSurface: NSObject, CAMetalDisplayLinkDelegate {
         let moving = w.precipRate > 0.02 || w.isThundering || w.wind > 30
         let hi = moving ? ceiling : min(ceiling, preferred + 4)
 
-        // LOW POWER: A BUDGET OF ABOUT ONE PER CENT OF A CORE.
+        // LOW POWER: THE SAME PICTURE, DRAWN LESS OFTEN, AT A STEADY BEAT.
         //
-        // The old low-power path could not have met any budget. It set the
-        // ceiling to max(15, maxFPS/2) — HIGHER than the six a dry sky already
-        // runs at — so for the commonest case there is, Low Power Mode changed
-        // nothing at all. Measured: 2.9% of a core in normal running.
+        // This first ran at two frames a second with the detail passes cut, and
+        // both were wrong. Two frames a second turns every drift, shimmer and
+        // falling streak into a slideshow — the "frames dropping" the user saw —
+        // and `lowFX` skipped the detail passes, so the moon, the sun's disc and
+        // rain lost their fine structure: a different picture, which the preset
+        // must not be. It also bought almost nothing where it was meant to.
+        // Measured on battery, the whole app at thirty frames a second with the
+        // shimmer on sits around one per cent of a core; the CPU cost of a frame
+        // is small next to the fixed cost of being alive.
         //
-        // Cost here is close to linear in frames, because each frame is one
-        // simulation step and one command-buffer encode. So the budget is met
-        // by frame rate first, and the rest of the saving comes from the
-        // cheaper `lowPowerVariant` making each of those frames lighter.
-        //
-        // Two frames a second, whatever the weather. That is the honest price:
-        // rain becomes a sequence of stills and a lightning flash can fall
-        // between frames. It is what Low Power Mode is for — the user has told
-        // macOS the battery matters more than the motion — and the sky itself,
-        // which changes over minutes, looks the same at two as at thirty.
+        // So: fifteen frames a second, fixed, whatever the weather, with the
+        // range pinned so CoreAnimation cannot hand back an irregular cadence —
+        // regularity is what reads as smooth, far more than speed. Fifteen
+        // divides 60 and 120, so a ProMotion panel holds an even beat, and it
+        // halves the GPU work of the default thirty, which is where a wallpaper's
+        // battery actually goes.
         if lowPower {
-            link?.preferredFrameRateRange = CAFrameRateRange(minimum: 1, maximum: 3,
-                                                             preferred: 2)
-            renderer.state.lowFX = true
+            link?.preferredFrameRateRange = CAFrameRateRange(minimum: 15, maximum: 15,
+                                                             preferred: 15)
+            renderer.state.lowFX = false
             return
         }
 
         link?.preferredFrameRateRange = CAFrameRateRange(minimum: preferred,
                                                          maximum: hi,
                                                          preferred: preferred)
-        renderer.state.lowFX = lowPower
+        renderer.state.lowFX = false
     }
 
     // MARK: - Running
@@ -456,7 +457,24 @@ final class WallpaperSurface: NSObject, CAMetalDisplayLinkDelegate {
     func metalDisplayLink(_ link: CAMetalDisplayLink, needsUpdate update: CAMetalDisplayLink.Update) {
         refreshHeadroom()
         renderer.render(to: update.drawable.texture, presenting: update.drawable)
+        frameStamps.append(CACurrentMediaTime())
+        if frameStamps.count > 64 { frameStamps.removeFirst(frameStamps.count - 64) }
     }
+
+    /// Frames actually drawn per second over the last few seconds — what the
+    /// display link delivered, not what was asked for. Reported by the
+    /// automation endpoint, so "is Low Power really at 15" is a question with
+    /// an answer. Zero while paused (covered, display asleep).
+    private var frameStamps: [CFTimeInterval] = []
+    var measuredFPS: Double {
+        let now = CACurrentMediaTime()
+        let recent = frameStamps.filter { now - $0 < 4 }
+        guard recent.count > 1, let first = recent.first, let last = recent.last,
+              last > first, now - last < 1 else { return 0 }
+        return Double(recent.count - 1) / (last - first)
+    }
+
+    var isPaused: Bool { paused }
 
     /// Read the headroom the display is granting RIGHT NOW and hand it to the
     /// renderer, which passes it to the shader as `edrHead`.

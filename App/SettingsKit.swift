@@ -32,6 +32,31 @@
 
 import AppKit
 
+// MARK: - Colour
+
+/// The settings window's surfaces, shared by the SwiftUI pages and the AppKit
+/// cards hosted inside them so the two cannot drift apart. Dynamic colours, so
+/// they re-resolve when the appearance flips.
+enum Palette {
+    private static func grey(light: CGFloat, dark: CGFloat) -> NSColor {
+        NSColor(name: nil) { a in
+            let d = a.bestMatch(from: [.darkAqua, .aqua]) == .darkAqua
+            return NSColor(white: d ? dark : light, alpha: 1)
+        }
+    }
+    /// Behind everything: the sidebar and the window edge.
+    static let sidebar  = grey(light: 0.915, dark: 0.118)
+    /// The rounded content panel.
+    static let panel    = grey(light: 0.962, dark: 0.071)
+    /// A group of rows.
+    static let card     = grey(light: 1.000, dark: 0.118)
+    /// A selected tile, a hovered row.
+    static let raised   = grey(light: 0.880, dark: 0.235)
+    /// The navigation pill and other floating controls.
+    static let pill     = grey(light: 0.985, dark: 0.165)
+    static let hairline = grey(light: 0.890, dark: 0.175)
+}
+
 // MARK: - Metrics and type
 
 enum UI {
@@ -151,11 +176,10 @@ final class Card: NSBox {
         super.init(frame: .zero)
         translatesAutoresizingMaskIntoConstraints = false
         boxType = .custom
-        borderType = .lineBorder
-        borderWidth = 1
-        cornerRadius = UI.corner
-        fillColor = .controlBackgroundColor
-        borderColor = .separatorColor
+        borderType = .noBorder
+        borderWidth = 0
+        cornerRadius = 16
+        fillColor = Palette.card
         titlePosition = .noTitle
         contentViewMargins = .zero
 

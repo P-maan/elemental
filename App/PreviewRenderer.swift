@@ -118,9 +118,7 @@ struct PreviewSpec: Hashable {
     static func surface(_ c: Config, _ st: Config.SurfaceStyle, pixels: CGSize) -> PreviewSpec {
         var s = desktop(c, pixels: pixels)
         s.shape = st.shape; s.finish = st.finish; s.gridRows = st.gridRows
-        s.material = (st.finish == .flat) ? .matte : .glass
-        s.rounding = (st.shape == .dot) ? 1 : 0
-        s.halftone = (st.shape == .dot) ? 1 : 0
+        s.material = st.material; s.rounding = st.rounding; s.halftone = st.halftone
         s.facingAz = Int(st.facingAz.rounded())
         s.dynamic = st.headingMode == .dynamic
         if let n = st.scenePlaceName, let p = c.allPlaces.first(where: { $0.name == n }) {

@@ -19,6 +19,17 @@
        reached from the menu-bar item, or by launching the app again. -->
   <key>LSUIElement</key>                  <true/>
 
+  <!-- elemental://set?gridRows=72, elemental://lowpower/on … — see
+       App/Automation.swift. The pre-release build renames it elemental-pre. -->
+  <key>CFBundleURLTypes</key>
+  <array>
+    <dict>
+      <key>CFBundleURLName</key>           <string>com.prakritmaan.elemental</string>
+      <key>CFBundleURLSchemes</key>
+      <array><string>elemental</string></array>
+    </dict>
+  </array>
+
   <key>NSHighResolutionCapable</key>      <true/>
   <key>NSSupportsAutomaticGraphicsSwitching</key> <true/>
 

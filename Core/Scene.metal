@@ -2366,37 +2366,25 @@ constant int   RELIEF_STEPS = 6;
 
 // ---- Edge fit.
 //
-// The mosaic is built to tile the display exactly: whole cells, flush against
-// all four boundaries, no remainder anywhere (see the pitch note in PASS B).
-// Parallax breaks that on its own. The lean is linear in the distance from the
-// frame centre, so mapping a pixel to the block it actually sees is very nearly
-// a ZOOM about that centre — magnifying by 1/(1 - z/D) — and a zoom pushes the
-// outermost row and column off the edge of the frame. At eight rows that is
-// most of a cell gone on every side: the outer ranks came out as slivers of a
-// face, or as flank, which is exactly the fit the grid work was for.
+// RELIEF_TAPER. The mosaic tiles the display exactly: whole cells, flush
+// against all four boundaries. Parallax breaks that on its own — a lean linear
+// in the distance from the centre is a ZOOM about that centre, and a zoom pushes
+// the outermost ranks off the frame.
 //
-// So the lean is damped to zero across the outermost cells and ramped back in
-// behind them, per axis. Inside the flush band the ray is straight, so a pixel
-// sees the block that is under it and the boundary at one cell in lands exactly
-// one cell in — the edge rank is whole and flush again by construction, at any
-// size and any row count.
+// This used to be answered by holding the outermost rank dead flat and ramping
+// the lean back in over the next 1.6 cells. That kept the edge whole and made
+// the ranks BEHIND it pay: the whole lean arrived across about a cell and a
+// half, so the mapping from screen to grid ran steeply there, and the second
+// and third ranks in from the left, right and top came out visibly squeezed —
+// on the user's own display, by more than half a cell for a tall block.
 //
-// Damped rather than compensated by a counter-zoom, because a counter-zoom is
-// only exact for one height: every block leans by its OWN height, so the edge
-// would still be ragged wherever the outer cells happen to be tall (the moon at
-// the frame edge, a lightning cell). Damping is exact for every height at once.
-//
-// Extending the height field a cell beyond the frame was the other candidate.
-// It gives the outer blocks something to lean against, but it does not put them
-// back inside the frame — the zoom still crops them — so it fixes the flank and
-// not the fit. This does both: with no lean there is no flank to see.
-//
-// The ramp is wider than the band so the recovery is gradual; the derivative of
-// the mapping stays positive everywhere (it is 1 - z*d(lean)/dg, and d(lean)/dg
-// never exceeds 1/D, which is at most 0.4 at the coarsest usable grid), so the
-// warp can never fold.
-constant float RELIEF_EDGE  = 1.00f;   // cells held perfectly flush at each edge
-constant float RELIEF_RAMP  = 1.60f;   // cells over which the lean comes back
+// Now the lean follows a sine across each axis instead: ctr*sin(pi*x)/pi, with
+// x from -1 at one edge to +1 at the other. It is the linear lean at the centre
+// (same slope, so the middle of the wall is unchanged), falls to exactly zero at
+// both edges (so the outer rank is still whole and flush, for any height), and
+// its slope never exceeds the centre's anywhere — the most a block is stretched
+// near an edge is the same few percent a tall block is magnified in the middle,
+// spread across the whole half-frame instead of piled into one rank.
 
 /// Stable per-cell noise in -0.5..0.5. Used for splay; must not vary with time
 /// or the whole wall shimmers.
@@ -2708,14 +2696,12 @@ inline Relief castRelief(texture2d<float> heights, texture2d<float> cells,
     // The ray from the camera to this pixel's point on the back wall. At height
     // z it is at g - lean*z, so marching DOWN from the top of the block layer
     // walks outward from the frame centre. u = hmax - z is the march parameter.
+    // Tapered to zero at the frame edges along a sine — see the RELIEF_TAPER
+    // note. Per axis, so a cell on the left edge still leans vertically and one
+    // along the top still leans sideways.
     float2 ctr  = float2(cols, rows) * 0.5f;
-    float2 lean = (g - ctr) / max(max(cols, rows) * RELIEF_CAMD, 1.0f);
-    // Hold the frame's outermost ranks flush — see the RELIEF_EDGE note. Per
-    // axis, so a cell on the left edge still leans vertically and one along the
-    // top still leans sideways; only the component that would push a block out
-    // of the frame is the one that is taken away.
-    float2 dEdge = min(g, float2(cols, rows) - g);
-    lean *= smoothstep(float2(RELIEF_EDGE), float2(RELIEF_EDGE + RELIEF_RAMP), dEdge);
+    float2 x    = (g - ctr) / max(ctr, float2(0.5f));
+    float2 lean = ctr * sin(M_PI_F * x) / (M_PI_F * max(max(cols, rows) * RELIEF_CAMD, 1.0f));
     r.lean = lean;
 
     float2 p   = g - lean * hmax;          // where the ray enters the layer
@@ -3135,7 +3121,13 @@ inline float3 styleCell(float3 col, float2 cuv, float cellPx, float lum,
         float gr = saturate(U_grout);
         if (gr > 0.001f) {
             float w = 0.08f * (1.0f - 0.72f * depth) * gr;
-            if (m > fill - w) col *= mix(mix(1.0f, 0.42f, gr), mix(1.0f, 0.66f, gr), depth);
+            // Antialiased over the same pixel as the outline. A hard `m > fill-w`
+            // test snapped each line to whole pixels, so with a fractional cell
+            // pitch (the grid tiles the display exactly, 50.8px cells and all)
+            // lines alternated between 4 and 5 pixels and the lattice read as
+            // uneven. With coverage it is the same line in every cell.
+            float k = mix(mix(1.0f, 0.42f, gr), mix(1.0f, 0.66f, gr), depth);
+            col *= mix(1.0f, k, smoothstep(fill - w - aa, fill - w + aa, m));
         }
     }
 
