@@ -57,6 +57,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         AppIcons.apply(config.appIcon)
         rebuildSurfaces()
         applyAutomationSetting()
+        restoreFurniture()
+        furnitureSaveTimer = Timer.scheduledTimer(withTimeInterval: 60, repeats: true) { [weak self] _ in
+            self?.saveFurniture()
+        }
 
         // Write settings once at launch. This seeds the copy inside the screen
         // saver's bundle, so a freshly installed saver matches the desktop
@@ -577,6 +581,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     }
 
     func applicationWillTerminate(_ note: Notification) {
+        saveFurniture()
         surfaces.values.forEach { $0.close() }
         automation.stop()
         lockStill?.stop()
@@ -773,7 +778,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
 
         let wnc = NSWorkspace.shared.notificationCenter
         wnc.addObserver(forName: NSWorkspace.willSleepNotification, object: nil, queue: .main) {
-            [weak self] _ in self?.surfaces.values.forEach { $0.pause() } }
+            [weak self] _ in self?.saveFurniture(); self?.surfaces.values.forEach { $0.pause() } }
         wnc.addObserver(forName: NSWorkspace.didWakeNotification, object: nil, queue: .main) {
             [weak self] _ in self?.resumeVisible(); self?.refreshEverything(reason: "wake") }
         wnc.addObserver(forName: NSWorkspace.screensDidSleepNotification, object: nil, queue: .main) {
@@ -923,6 +928,46 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     }
 
     var isLowPowerActive: Bool { lowPowerActive }
+
+    // MARK: Remembering snow and ice on the furniture
+    //
+    // After a heavy fall the snow on the Dock and widgets stays put — through a
+    // restart, a sleep, an update. Saved every minute and on sleep and quit,
+    // keyed by display; restored at launch and aged for the time away. See
+    // `SceneSimulation.FurnitureSnapshot`.
+
+    private var furnitureSaveTimer: Timer?
+    private var furnitureURL: URL { Config.directory.appendingPathComponent("furniture.json") }
+
+    private func saveFurniture() {
+        // A preview's snow is not real; never remember it.
+        guard preview == nil else { return }
+        var out: [String: SceneSimulation.FurnitureSnapshot] = [:]
+        for s in surfaces.values {
+            if let snap = s.furnitureSnapshot(), !snap.items.isEmpty { out[s.displayKey] = snap }
+        }
+        if out.isEmpty {
+            try? FileManager.default.removeItem(at: furnitureURL)
+            return
+        }
+        let enc = JSONEncoder()
+        enc.dateEncodingStrategy = .iso8601
+        if let d = try? enc.encode(out) { try? d.write(to: furnitureURL, options: .atomic) }
+    }
+
+    private func restoreFurniture() {
+        let dec = JSONDecoder()
+        dec.dateDecodingStrategy = .iso8601
+        guard let d = try? Data(contentsOf: furnitureURL),
+              let saved = try? dec.decode([String: SceneSimulation.FurnitureSnapshot].self, from: d),
+              !saved.isEmpty else { return }
+        for s in surfaces.values {
+            // Display IDs can change across a reboot; fall back to whichever
+            // snapshot there is rather than losing the snow.
+            if let snap = saved[s.displayKey] ?? saved.values.first { s.restoreFurniture(snap) }
+        }
+        NSLog("Elemental: restored lying snow and ice on %d display(s)", saved.count)
+    }
 
     // MARK: Weather preview — see Automation.swift
 

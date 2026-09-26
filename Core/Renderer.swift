@@ -543,6 +543,11 @@ final class ElementalRenderer {
 
     var debugCounts: String { sim.debugCounts }
 
+    /// What is lying on the furniture, to save and hand back — see
+    /// `SceneSimulation.FurnitureSnapshot`.
+    func furnitureSnapshot() -> SceneSimulation.FurnitureSnapshot? { sim.furnitureSnapshot() }
+    func restoreFurniture(_ s: SceneSimulation.FurnitureSnapshot) { sim.restoreFurniture(s) }
+
     // MARK: - Wake playback
     //
     // Coming back from sleep, a closed lid, or a long stretch behind a

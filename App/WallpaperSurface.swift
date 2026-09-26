@@ -505,6 +505,9 @@ final class WallpaperSurface: NSObject, CAMetalDisplayLinkDelegate {
     var isPaused: Bool { paused }
     /// The engine's own account of its water and rain, for `/v1/status`.
     var engineDebug: String { renderer.waterDebug }
+    var displayKey: String { String(displayID) }
+    func furnitureSnapshot() -> SceneSimulation.FurnitureSnapshot? { renderer.furnitureSnapshot() }
+    func restoreFurniture(_ s: SceneSimulation.FurnitureSnapshot) { renderer.restoreFurniture(s) }
 
     /// Read the headroom the display is granting RIGHT NOW and hand it to the
     /// renderer, which passes it to the shader as `edrHead`.

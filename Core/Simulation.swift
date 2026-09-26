@@ -204,7 +204,7 @@ struct SurfaceWeather {
 /// One value per surface rather than per KIND, so two widgets each keep their
 /// own state — a widget under the top of the screen catches more than one
 /// tucked behind the dock, and averaging them would lose that.
-struct SurfaceFilm {
+struct SurfaceFilm: Codable {
     /// Liquid film on the upward-facing edge, 0..1.
     var wet: Float = 0
     /// Water gathered along the lip: the fat meniscus that beads and runs.
@@ -434,6 +434,113 @@ final class SceneSimulation {
     /// the pane, so the effect tracks the forecast rather than being constant.
     private(set) var rainIntensity: Float = 0
 
+    // MARK: How fast lying snow and ice go
+    //
+    // THESE WERE A HUNDRED TIMES TOO FAST. Measured with the render tool's
+    // --dryfor thaw: three minutes of snow at -3C, then a 6C overcast
+    // afternoon, and a full cap (3.4 cells) was gone inside SIXTY SECONDS.
+    // Sublimation alone — below freezing, in the dry — took a thick cap off in
+    // about two hours. Real snow on a ledge at 6C lasts hours, and dry cold
+    // takes days; the whole point of snow on the furniture is that after a
+    // heavy fall it STAYS.
+    //
+    // Degree-hour melt, which is how snowmelt is actually modelled: a rate per
+    // degree above zero, plus sunshine (UV as its proxy), plus wind (warm air
+    // mixed down onto the snow), plus rain falling on it, which melts snow far
+    // faster than air of the same temperature. Tuned so a 3.4-cell cap lasts
+    // about two hours at 6C overcast and forty minutes on a hot sunny day.
+
+    /// Cells of depth lost per second: (melt, sublimation).
+    static func snowLoss(temp t: Float, uv: Float, wind: Float,
+                         evap: Float, raining: Bool) -> (Float, Float) {
+        let warm = max(0, t)
+        var melt = warm * 0.000055 * (1 + min(1.5, wind / 30))
+                 + max(0, uv - 1) * 0.00005 * (t > -2 ? 1 : 0)
+        if raining && t > 0 { melt *= 2.2 }
+        let sublime = 0.000012 * (0.3 + evap * 2)
+        return (melt, sublime)
+    }
+
+    /// Glaze lost per second.
+    static func glazeThaw(temp t: Float, uv: Float) -> Float {
+        max(0, t) * 0.00004 + max(0, uv - 2) * 0.00003
+    }
+
+    // MARK: Remembering what is lying on the furniture
+    //
+    // Snow that has settled stays through a restart, a sleep or an update. The
+    // host saves this every minute and on sleep and quit; on launch it hands
+    // it back, the pieces are matched to the furniture by kind and position,
+    // and the time away is aged at the weather that was last seen.
+
+    struct FurnitureMemory: Codable {
+        var kind: Int32
+        /// Centre, as a fraction of the screen, so it survives a change of
+        /// grid or resolution.
+        var cx: Float, cy: Float
+        var snow: Float, snowSpan: Float, glaze: Float, frost: Float, grime: Float
+    }
+
+    struct FurnitureSnapshot: Codable {
+        var saved: Date
+        var temperature: Float
+        var uv: Float
+        var wind: Float
+        var items: [FurnitureMemory]
+    }
+
+    func furnitureSnapshot(now: Date = Date()) -> FurnitureSnapshot? {
+        guard films.count == surfaces.count, W > 0, H > 0 else { return nil }
+        let items: [FurnitureMemory] = surfaces.indices.compactMap { i in
+            let f = films[i], s = surfaces[i]
+            guard f.snow > 0.01 || f.glaze > 0.01 || f.frost > 0.01 || f.grime > 0.01 else { return nil }
+            return FurnitureMemory(kind: s.kind.rawValue,
+                                   cx: (s.left + s.w / 2) / W, cy: (s.top + s.h / 2) / H,
+                                   snow: f.snow, snowSpan: f.snowSpan, glaze: f.glaze,
+                                   frost: f.frost, grime: f.grime)
+        }
+        return FurnitureSnapshot(saved: now, temperature: lastWeather.temperature,
+                                 uv: lastWeather.uv, wind: lastWeather.wind, items: items)
+    }
+
+    /// Held until the furniture exists to put it on.
+    private var pendingMemory: FurnitureSnapshot?
+
+    func restoreFurniture(_ snap: FurnitureSnapshot, now: Date = Date()) {
+        pendingMemory = snap
+        applyPendingMemory(now: now)
+    }
+
+    private func applyPendingMemory(now: Date = Date()) {
+        guard let snap = pendingMemory, films.count == surfaces.count,
+              !surfaces.isEmpty, W > 0, H > 0 else { return }
+        pendingMemory = nil
+        // The time away, aged at the last weather seen. Night has no sun, so
+        // the sunshine term is dropped for anything longer than a few hours.
+        let away = Float(max(0, min(14 * 86400, now.timeIntervalSince(snap.saved))))
+        let uv = away > 4 * 3600 ? 0 : snap.uv
+        let (melt, sublime) = Self.snowLoss(temp: snap.temperature, uv: uv, wind: snap.wind,
+                                            evap: 0.2, raining: false)
+        for m in snap.items {
+            // Nearest piece of the same kind within a tenth of the screen.
+            var best = -1, bestD: Float = 0.1
+            for (i, s) in surfaces.enumerated() where s.kind.rawValue == m.kind {
+                let dx = (s.left + s.w / 2) / W - m.cx, dy = (s.top + s.h / 2) / H - m.cy
+                let d = (dx * dx + dy * dy).squareRoot()
+                if d < bestD { bestD = d; best = i }
+            }
+            guard best >= 0 else { continue }
+            var f = films[best]
+            let snow = max(0, m.snow - away * (melt + sublime))
+            f.snow = max(f.snow, snow)
+            f.snowSpan = snow > 0.01 ? max(f.snowSpan, m.snowSpan * min(1, snow / max(m.snow, 0.01)).squareRoot()) : f.snowSpan
+            f.glaze = max(f.glaze, max(0, m.glaze - away * (Self.glazeThaw(temp: snap.temperature, uv: uv) + 0.00002)))
+            f.frost = max(f.frost, snap.temperature < 0 && away < 6 * 3600 ? m.frost : 0)
+            f.grime = max(f.grime, m.grime)
+            films[best] = f
+        }
+    }
+
     /// Things on screen for water to land on. Set by the host; empty means the
     /// pane is unobstructed.
     ///
@@ -444,6 +551,7 @@ final class SceneSimulation {
         didSet {
             guard films.count != surfaces.count else { return }
             films = [SurfaceFilm](repeating: SurfaceFilm(), count: surfaces.count)
+            applyPendingMemory()
         }
     }
 
@@ -2049,11 +2157,17 @@ final class SceneSimulation {
             // eats the margins first, which is why a snow cap narrows before it
             // thins. Sublimation is much slower and happens even below zero.
             if f.snow > 0 && form != .snow {
-                let melt = max(0, t) * 0.008 + max(0, w.uv - 1) * 0.0015
-                let sublime = 0.0008 * (0.3 + evap)
+                let (melt, sublime) = Self.snowLoss(temp: t, uv: w.uv, wind: w.wind,
+                                                    evap: evap, raining: w.rain > 0.1)
                 f.snow = max(0, f.snow - dt * (melt + sublime))
                 // What melts becomes water on the lip.
-                if melt > 0 { f.wet = min(1, f.wet + dt * melt * 1.6) }
+                // While it melts the lip under it stays wet and the meltwater
+                // runs off and drips from the underside — a thaw you can see,
+                // not snow quietly shrinking on a dry ledge.
+                if melt > 0.00005 {
+                    f.wet = min(1, max(f.wet, 0.30 + min(0.45, melt * 1800)))
+                    f.runoff = min(1, f.runoff + dt * min(0.2, melt * 400))
+                }
                 // The margins go first. An end of the cap has warm air on three
                 // sides where the middle has it on one, so it retreats inward
                 // roughly twice as fast as the crown thins — which is why a
@@ -2068,14 +2182,14 @@ final class SceneSimulation {
                 // is still three centimetres deep in the middle, which a flat
                 // rate let it do.
                 let mass = max(0.5, f.snow)
-                f.snowSpan = max(0, f.snowSpan - dt * (melt * 2.4 + sublime * 1.6) / mass)
+                f.snowSpan = max(0, f.snowSpan - dt * (melt * 0.8 + sublime * 0.6) / mass)
                 if f.snowSpan <= 0.001 { f.snow = 0 }
             }
             if f.snow <= 0.001 { f.snowSpan = 0 }
             // Ice: only above zero, and slowly — a glaze survives a long thaw.
             if f.glaze > 0 && form != .freezingRain {
-                let thaw = max(0, t) * 0.006 + max(0, w.uv - 2) * 0.001
-                f.glaze = max(0, f.glaze - dt * (thaw + 0.0004))
+                let thaw = Self.glazeThaw(temp: t, uv: w.uv)
+                f.glaze = max(0, f.glaze - dt * (thaw + 0.00002))
                 if thaw > 0 { f.wet = min(1, f.wet + dt * thaw * 1.2) }
             }
             // Frost sublimates fast in sun and vanishes the moment it thaws.
@@ -2318,6 +2432,13 @@ final class SceneSimulation {
         // never called — the call sites were lost in an earlier edit, which is
         // why water accumulated forever with no decay path at all.
         ageTrails(dt: dt, evaporation: w.evaporationRate)
+        // The water standing along the bottom edge evaporates too. Nothing
+        // took it away before: measured, a pool left by a shower was still
+        // there after three hours of dry afternoon. Same physical rate as the
+        // film — about twenty minutes to go in dry air, over an hour in humid.
+        if !wet && poolDepth > 0 {
+            poolDepth = max(0, poolDepth - dt * (0.00012 + w.evaporationRate * 0.0022))
+        }
         breakUpTrails(dt: dt, wet: wet)
 
         shedDrips(dt: dt)

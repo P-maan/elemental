@@ -789,12 +789,29 @@ if dryFrames > 0 {
     clear.code = 0; clear.kind = .sun
     clear.rain = 0; clear.showers = 0; clear.snow = 0; clear.precipitation = 0
     clear.cover = 10
+    // --thawtemp / --thawuv: what the air does AFTER, so melt and drying can be
+    // measured — without them the thaw inherits the storm's temperature, and a
+    // snow test that stays at -3 can only ever show sublimation.
+    if let t = args["thawtemp"].flatMap(Double.init) { clear.temperature = Float(t) }
+    if let u = args["thawuv"].flatMap(Double.init) { clear.uv = Float(u) }
+    clear.humidity = Float(num("thawhumid", Double(clear.humidity)))
     renderer.state.weather = clear
     if args["debug"] != nil {
         print("  rain off  " + renderer.debugCounts)
     }
+    // --dryreport N: print the furniture state every N frames of the thaw.
+    let every = int("dryreport", 0)
     for i in 0..<dryFrames {
         renderer.render(to: tex, waitForCompletion: i == dryFrames - 1)
+        if every > 0 && (i + 1) % every == 0 {
+            let lines = renderer.waterDebug.split(separator: "\n")
+            var film = ""
+            if let l = lines.first, let r = l.range(of: "film mean=") {
+                film = String(l[r.lowerBound...].prefix(18))
+            }
+            let f = lines.filter { $0.contains("[0 ") }.first.map(String.init) ?? ""
+            print(String(format: "  t=%5.0fs ", Float(i + 1) / 60) + film + " |" + f)
+        }
     }
 }
 
