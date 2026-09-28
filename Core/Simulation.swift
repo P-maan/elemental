@@ -1033,8 +1033,14 @@ final class SceneSimulation {
         // How much of the structure survives. At `patchiness` 0 the field is
         // flat — uniform is what frontal rain IS, not a failure to be
         // interesting — and by 0.7 the gaps run all the way down to dry.
-        let shape = min(1, patch * 1.45)
-        let gate = patch * 0.72
+        // Softer than it was (1.45 and 0.72). At those values a showery
+        // reading gated whole stretches of the frame completely dry, and the
+        // longest scale is wider than the frame — so light showers ended up
+        // falling in one corner of the screen and nowhere else, which the user
+        // took, fairly, for a bug. Showers now show as heavier and lighter
+        // bands across the whole view.
+        let shape = min(1, patch * 1.0)
+        let gate = patch * 0.40
         let span = max(0.18, 1 - gate)
         let inv = 6.2832 / Float(max(1, cols))
 
@@ -1083,7 +1089,7 @@ final class SceneSimulation {
         // biases where the rain falls rather than dictating it, and with no radar
         // at all the field is exactly what it was.
         let prof = w.radarProfile
-        guard prof.count >= 4 else { return }
+        guard prof.count >= 4 else { floorPrecipField(); return }
         for c in 0..<cols {
             // Centre of the frame maps to the centre of the radar window, and
             // the frame spans a modest slice of it — a window looks at a piece
@@ -1099,6 +1105,13 @@ final class SceneSimulation {
             let here = min(1, echo / 0.22)
             precipField[c] = max(0, min(1, precipField[c] * (0.35 + 0.65 * here)))
         }
+        floorPrecipField()
+    }
+
+    /// If it is raining where you are, it is raining across the view. The
+    /// field shapes WHERE it falls harder; it may not leave a column dry.
+    private func floorPrecipField() {
+        for c in 0..<precipField.count { precipField[c] = max(precipField[c], 0.25) }
     }
 
     private func updateStreaks(dt: Float, kind: SceneKind,

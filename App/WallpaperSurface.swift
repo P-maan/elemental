@@ -351,7 +351,7 @@ final class WallpaperSurface: NSObject, CAMetalDisplayLinkDelegate {
         // low refresh rate instead of waking to 120 for one wallpaper.
         let w = renderer.state.weather
         var need: Float = 6                        // drift, colour, breathing
-        if w.precipRate > 0.02 {
+        if w.isPrecipitating {
             // Enough that a streak reads as a line rather than a dotted one,
             // rising with how hard it is coming down.
             need = max(need, 16 + min(14, w.precipRate * 3))
@@ -390,7 +390,7 @@ final class WallpaperSurface: NSObject, CAMetalDisplayLinkDelegate {
         // and the ceiling kept just above it, which pins a steady slow cadence.
         // When there is genuine motion — hydrometeors, lightning, a gale — it
         // runs at the user's maxFPS, pinned just as firmly; see below.
-        let moving = w.precipRate > 0.02 || w.isThundering || w.wind > 30
+        let moving = w.isPrecipitating || w.isThundering || w.wind > 30
         let hi = moving ? ceiling : min(ceiling, preferred + 4)
 
         // LOW POWER: THE SAME PICTURE, DRAWN LESS OFTEN, AT A STEADY BEAT.
@@ -426,7 +426,7 @@ final class WallpaperSurface: NSObject, CAMetalDisplayLinkDelegate {
         // steady twenty (switchable, `lowPowerSmoothRain`), and drops straight
         // back to its own rate when it stops. Twenty divides 60 and 120, so the
         // beat stays even on every panel.
-        let falling = w.precipRate > 0.02
+        let falling = w.isPrecipitating
         if lowPower {
             var f = Float(max(4, min(30, config.lowPowerFPS)))
             if falling && config.lowPowerSmoothRain { f = max(f, min(20, Float(config.maxFPS))) }

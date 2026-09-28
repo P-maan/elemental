@@ -140,7 +140,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
             SaverWeather.publish(w, lat: p.latitude, lon: p.longitude, place: p.name)
             // Push it to the lock screen too, rather than leaving the still an
             // update behind.
-            self.lockStill?.exportNow(config: self.config.lockConfig, astro: self.lockAstro())
+            // A request: honoured only if due and the sky has visibly changed.
+            self.lockStill?.request(config: self.config.lockConfig, astro: self.lockAstro())
         }
         startWeather()
 

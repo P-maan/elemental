@@ -32,7 +32,43 @@ final class LockStillExporter {
 
     /// Set by the app while the Low Power preset is in force.
     var lowPower = false
-    private var lastPeriodicExport = Date.distantPast
+
+    // ---- HOW OFTEN. macOS flagged this exporter for excessive disk writes
+    // four times in three days — 2.1 GB in under three minutes at one point,
+    // 137 GB over eighteen hours in 0.3.3. Every export writes a new
+    // full-screen PNG AND copies it to every path the wallpaper store names,
+    // and exports were being requested far more often than the picture
+    // changed: every weather reading, every settings change (a restart of the
+    // exporter exported at once), plus the minute timer. It also renders a
+    // full-resolution frame on the main thread each time, which is the stall
+    // behind the app "getting stuck".
+    //
+    // Now: a lock exports at once, always — that is the moment that matters.
+    // Everything else is a REQUEST, honoured at most every five minutes
+    // (fifteen in Low Power), and only if the scene has meaningfully changed
+    // since the last still. A burst of requests collapses into one export.
+    private var lastExport = Date.distantPast
+    private var lastSignature: Signature?
+    private var deferred: DispatchWorkItem?
+    private var minInterval: TimeInterval { lowPower ? 900 : 300 }
+
+    /// What the still depends on, coarsely. Two requests with the same
+    /// signature would produce a picture nobody could tell apart.
+    private struct Signature: Equatable {
+        var config: Config
+        var code: Int, cover: Int, precip: Int, vis: Int, snowDepth: Int
+        var sunAlt: Int, moonAlt: Int
+        init(_ c: Config, _ w: WeatherState, _ a: AstroState) {
+            config = c
+            code = w.code
+            cover = Int(w.cover / 10)
+            precip = Int((w.precipAmount * 2).rounded())
+            vis = Int(log2(max(100, w.visibility)))
+            snowDepth = Int(w.snowDepth)
+            sunAlt = Int((a.sunAlt / 2).rounded())
+            moonAlt = Int((a.moonAlt / 4).rounded())
+        }
+    }
     private var texture: MTLTexture?
     private var size = CGSize(width: 1512, height: 982)
 
@@ -107,6 +143,8 @@ final class LockStillExporter {
                weatherProvider: @escaping () -> WeatherState)
     {
         self.weatherProvider = weatherProvider
+        self.configProvider = configProvider
+        self.astroProvider = astroProvider
         stop()
         // Once a minute. The lock screen is a still, so the only thing that
         // makes it feel alive is being recent — and one offscreen frame is
@@ -119,25 +157,55 @@ final class LockStillExporter {
             // of locking regardless — and a sky moves very little in ten
             // minutes. Each export is a full-resolution render and encode, so
             // it is the largest periodic cost the app has.
-            if self.lowPower, Date().timeIntervalSince(self.lastPeriodicExport) < 600 { return }
-            self.lastPeriodicExport = Date()
-            self.export(config: configProvider(), astro: astroProvider())
+            self.request(config: configProvider(), astro: astroProvider())
         }
-        export(config: configProvider(), astro: astroProvider())
+        // A request, not an export: `start` runs on every settings change.
+        request(config: configProvider(), astro: astroProvider())
+    }
+
+    private var configProvider: () -> Config = { Config() }
+    private var astroProvider: () -> AstroState = { AstroState() }
+
+    /// Ask for a fresh still. Honoured when it is both due and different —
+    /// see the note at `lastExport`.
+    func request(config: Config, astro: AstroState) {
+        guard config.syncLockScreen else { return }
+        if Signature(config, weatherProvider(), astro) == lastSignature { return }
+        let wait = minInterval - Date().timeIntervalSince(lastExport)
+        if wait <= 0 {
+            deferred?.cancel(); deferred = nil
+            export(config: config, astro: astro)
+            return
+        }
+        // Due later. One pending export at most, which reads the CURRENT
+        // config and sky when it fires rather than these stale ones.
+        guard deferred == nil else { return }
+        let item = DispatchWorkItem { [weak self] in
+            guard let self else { return }
+            self.deferred = nil
+            self.request(config: self.configProvider(), astro: self.astroProvider())
+        }
+        deferred = item
+        DispatchQueue.main.asyncAfter(deadline: .now() + wait + 1, execute: item)
     }
 
     func stop() {
         timer?.invalidate()
         timer = nil
+        deferred?.cancel()
+        deferred = nil
     }
 
     /// Render and install a fresh still right now — called on the way into a
     /// lock so the lock screen shows the sky as of that moment.
+    /// At once, whatever the interval says — for the moment of locking.
     func exportNow(config: Config, astro: AstroState) { export(config: config, astro: astro) }
 
     private func export(config: Config, astro: AstroState) {
         guard config.syncLockScreen, let renderer else { return }
         guard !exporting else { return }
+        lastExport = Date()
+        lastSignature = Signature(config, weatherProvider(), astro)
 
         if let main = NSScreen.main {
             let s = main.frame.size
@@ -167,49 +235,56 @@ final class LockStillExporter {
         // the desktop's at all, which is exactly what "it does not mimic" looks
         // like. Toggling the setting did not help, because nothing in that path
         // resizes either.
-        var s = renderer.state
-        config.apply(to: &s)
-        s.astro = astro
-        // Weather has to be set explicitly: config.apply carries appearance
-        // only, so without this the still renders the default WeatherState —
-        // a clear sky — while the desktop shows the real thing. Sun and moon
-        // still looked right, which is what made it hard to spot.
-        s.weather = weatherProvider()
-        renderer.state = s
-        // Unconditional, every export. The renderer decides for itself whether
-        // anything needs rebuilding — it compares the size AND the row count —
-        // so this is free when nothing changed and correct when it did.
-        renderer.resize(width: w, height: h)
-
-        // The clock and the login field, as collision geometry.
-        //
-        // This still ends up BEHIND the real lock screen UI, so water has to
-        // treat that UI as solid the same way the desktop treats the dock and
-        // the saver treats these exact rectangles (Furniture.lockScreen, also
-        // used by ElementalSaver). Without it the exporter was the one renderer
-        // in the project with no furniture at all: rain fell straight through
-        // the clock and the login box and landed on the bottom of the frame,
-        // which is the one place nobody can see, so the still had none of the
-        // splash the live saver has.
-        //
-        // Same pixel dimensions the frame is rendered at, so the rectangles line
-        // up with where loginwindow actually draws. The login box is included:
-        // this image is the lock screen's background, and the lock screen has a
-        // password field on it — the saver only omits it for the little preview
-        // thumbnail in System Settings, which has no login UI over it.
-        renderer.surfaces = Furniture.lockScreen(width: Float(w), height: Float(h),
-                                                 includeLoginBox: true)
-        renderer.render(to: tex, waitForCompletion: true)
-
-        // Everything past here is bytes and files, not Metal, and none of it is
-        // fast. Hand it to the queue and let the display link have its thread
-        // back. NSScreen.screens is read here because it is AppKit state and
-        // belongs on the main thread; the screens themselves are only used as
-        // opaque handles for setDesktopImageURL.
+        // OFF THE MAIN THREAD, render included. The full-resolution frame and
+        // the wait for the GPU used to happen here on the main thread, which
+        // froze the menu, Settings and the wallpaper itself for as long as it
+        // took — and exports were being requested in bursts. This renderer
+        // belongs to the exporter alone, so it can run on the exporter's own
+        // queue; only the AppKit reads stay here.
         let screens = NSScreen.screens
+        let weather = weatherProvider()
         exporting = true
         exportQueue.async { [weak self] in
             guard let self else { return }
+            var s = renderer.state
+            config.apply(to: &s)
+            s.astro = astro
+            // Weather has to be set explicitly: config.apply carries appearance
+            // only, so without this the still renders the default WeatherState —
+            // a clear sky — while the desktop shows the real thing. Sun and moon
+            // still looked right, which is what made it hard to spot.
+            s.weather = weather
+            renderer.state = s
+            // Unconditional, every export. The renderer decides for itself whether
+            // anything needs rebuilding — it compares the size AND the row count —
+            // so this is free when nothing changed and correct when it did.
+            renderer.resize(width: w, height: h)
+
+            // The clock and the login field, as collision geometry.
+            //
+            // This still ends up BEHIND the real lock screen UI, so water has to
+            // treat that UI as solid the same way the desktop treats the dock and
+            // the saver treats these exact rectangles (Furniture.lockScreen, also
+            // used by ElementalSaver). Without it the exporter was the one renderer
+            // in the project with no furniture at all: rain fell straight through
+            // the clock and the login box and landed on the bottom of the frame,
+            // which is the one place nobody can see, so the still had none of the
+            // splash the live saver has.
+            //
+            // Same pixel dimensions the frame is rendered at, so the rectangles line
+            // up with where loginwindow actually draws. The login box is included:
+            // this image is the lock screen's background, and the lock screen has a
+            // password field on it — the saver only omits it for the little preview
+            // thumbnail in System Settings, which has no login UI over it.
+            renderer.surfaces = Furniture.lockScreen(width: Float(w), height: Float(h),
+                                                     includeLoginBox: true)
+            renderer.render(to: tex, waitForCompletion: true)
+
+            // Everything past here is bytes and files, not Metal, and none of it is
+            // fast. Hand it to the queue and let the display link have its thread
+            // back. NSScreen.screens is read here because it is AppKit state and
+            // belongs on the main thread; the screens themselves are only used as
+            // opaque handles for setDesktopImageURL.
             self.install(from: tex, width: w, height: h, screens: screens)
             DispatchQueue.main.async { self.exporting = false }
         }
@@ -325,6 +400,13 @@ final class LockStillExporter {
         let referenced = Set(referencedPaths().map(\.path))
         for f in files where f.lastPathComponent.hasPrefix("scene-")
                           && f != current && !referenced.contains(f.path) {
+            let mod = (try? f.resourceValues(forKeys: [.contentModificationDateKey]))?.contentModificationDate
+            if let mod, mod > cutoff { continue }
+            try? fm.removeItem(at: f)
+        }
+        // Temporary files left by interrupted atomic writes — `.scene-….png-XXXX`,
+        // some of them empty — accumulate forever otherwise.
+        for f in files where f.lastPathComponent.hasPrefix(".scene-") {
             let mod = (try? f.resourceValues(forKeys: [.contentModificationDateKey]))?.contentModificationDate
             if let mod, mod > cutoff { continue }
             try? fm.removeItem(at: f)
