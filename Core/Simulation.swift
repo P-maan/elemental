@@ -264,7 +264,7 @@ final class SceneSimulation {
     /// between the two it is hidden. Infinity while it is falling free.
     private var streaks: [(c: Float, y: Float, len: Float, v: Float,
                            slope: Float, wob: Float, ph: Float, hops: Float,
-                           stop: Float, resume: Float)] = []
+                           stop: Float, resume: Float, depth: Float)] = []
 
     /// Whether a point (pixels) is sheltered: under a piece of furniture, down
     /// to a little below it. Rain is not born there.
@@ -1254,15 +1254,28 @@ final class SceneSimulation {
             let deckRow = edgeArr[col] / SP
             let y0 = deckRow * max(0, 1 - deckRow / Float(rows))
             // Nothing is born inside a shelter: under a widget it is dry.
-            if shelterTop(atX: (cBirth + 0.5) * SP, below: y0 * SP) != nil { continue }
+            // DEPTH. The rain is a volume, not a sheet. Only the part of it
+            // nearest the glass is at the widgets' distance and can meet them;
+            // the rest falls far beyond them, passes behind them, and carries
+            // on below. So each streak gets a depth: about a third are NEAR
+            // (1.0) — brightest, longest, fastest, the only ones that land on a
+            // widget and splash — and the rest are background at 0.35-0.8,
+            // dimmer, shorter and slower the further off they are. Without
+            // this every streak stopped on the widgets and left the screen
+            // under them dry, which read as rain "missing a corner".
+            let near = rnd() < 0.3
+            let depth: Float = near ? 1 : 0.35 + rnd() * 0.45
+            // Nothing NEAR is born inside a shelter: under a widget, close to
+            // the glass, it is dry. The background does not care.
+            if near, shelterTop(atX: (cBirth + 0.5) * SP, below: y0 * SP) != nil { continue }
 
             streaks.append((c: cBirth, y: y0,
-                            len: lenBase * (0.75 + rnd() * 0.5),
-                            v: baseSpeed * (0.72 + rnd() * 0.56),
+                            len: lenBase * (0.75 + rnd() * 0.5) * (0.55 + 0.45 * depth),
+                            v: baseSpeed * (0.72 + rnd() * 0.56) * (0.6 + 0.4 * depth),
                             slope: slope * (0.85 + rnd() * 0.3),
                             wob: wobble * (0.4 + rnd() * 1.2),
                             ph: rnd() * 6.2832,
-                            hops: 0, stop: .infinity, resume: .infinity))
+                            hops: 0, stop: .infinity, resume: .infinity, depth: depth))
         }
 
         let f = dt * 60           // reference integrates per frame at 60fps
@@ -1291,7 +1304,9 @@ final class SceneSimulation {
             // a shelter either, every piece of furniture casts a rain shadow
             // below it, slanted by the same wind that slants the rain.
             // Free, or already out from under the last thing it landed on.
-            if (streaks[i].stop.isInfinite || prevY - streaks[i].len > streaks[i].resume)
+            // Only NEAR rain can meet the furniture; the background passes behind.
+            if streaks[i].depth > 0.99
+                && (streaks[i].stop.isInfinite || prevY - streaks[i].len > streaks[i].resume)
                 && streaks[i].v > 0 {
                 let hx = (streaks[i].c + 0.5) * SP
                 for (k, sf) in surfaces.enumerated()
@@ -1381,7 +1396,8 @@ final class SceneSimulation {
                 let fy = Int(row), fx = Int(col.rounded())
                 guard fy >= 0, fy < fh, fx >= 0, fx < fw else { continue }
                 let idx = fy * fw + fx
-                let v = 1 - k / s.len                    // brightest at the head
+                // Brightest at the head, and dimmer the further off it falls.
+                let v = (1 - k / s.len) * (0.45 + 0.55 * s.depth)
                 if v > streakFine[idx] { streakFine[idx] = v }
             }
         }
