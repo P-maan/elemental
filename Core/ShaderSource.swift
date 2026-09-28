@@ -1510,7 +1510,16 @@ fragment CellOut cellPass(VOut in [[stage_in]],
         // So: a gamma that collapses the tail, plus a punch-through that grows
         // with how strong the sun actually is and with how much is getting
         // past. Dense cloud takes it to nothing; thin cloud lets it flare.
-        float punch = powr(seeThrough, 2.2f) * (1.0f + uvNorm * 1.4f * seeThrough);
+        // A CLOSED LID SHOWS NO SUN. `seeThrough` is the cloud in front of
+        // THIS cell, and near the horizon the deck's lower fringe thins — so
+        // at sunrise under a total drizzle deck the disc came through at about
+        // half strength as a hard peach blob above the Dock. Out of a real
+        // window an overcast has no disc at all, only a brighter patch where
+        // the sun is (the deck's own `light` lobe draws that). So the disc,
+        // its glow and its ripple also answer to how closed the whole sky is.
+        float lidOpen = 1.0f - smoothstep(0.78f, 0.96f, deckOpaque(U));
+        float sunSee = seeThrough * lidOpen;
+        float punch = powr(sunSee, 2.2f) * (1.0f + uvNorm * 1.4f * sunSee);
         float glow = fexp(-d * invSunR) * uvAmp * sunDim * sunV * punch;
         float ripSpeed = 0.15f + saturate(U.uv / 11.0f) * 0.25f;
         // The solar ripple — concentric arcs radiating from the sun. Wanted,
@@ -1519,7 +1528,7 @@ fragment CellOut cellPass(VOut in [[stage_in]],
         // it was the wrong term entirely; that one is the mid-cloud sheet.)
         // The ripple has to reach exactly ZERO through a closed deck, not merely
         // become small. You can see where the sun is behind an overcast; you
-        // cannot see it shimmer. Scaled by plain `seeThrough` it survived a 97%
+        // cannot see it shimmer. Scaled by plain `sunSee` it survived a 97%
         // occluding deck at about half a luminance unit — which sounds like
         // nothing, and is not, because `posterQ` is 16 by day and contouring is
         // scale-free: an arbitrarily faint periodic signal still decides which
@@ -1528,8 +1537,8 @@ fragment CellOut cellPass(VOut in [[stage_in]],
         // channels cross their steps at different radii. That is the ringed
         // olive-and-teal target a flat overcast was wearing. Fading to zero at
         // a fifth transmission removes the signal instead of shrinking it.
-        // Clear sky is untouched: seeThrough is 1 there and so is `ripVis`.
-        float ripVis = saturate((seeThrough - 0.18f) / 0.32f);
+        // Clear sky is untouched: sunSee is 1 there and so is `ripVis`.
+        float ripVis = saturate((sunSee - 0.18f) / 0.32f);
         float rip = sin(d * 0.03f - sec * ripSpeed) * fexp(-d * invSunRip)
                   * uvAmp * sunDim * sunV * ripVis;
         L += glow * 58.0f + (rip > 0.0f ? rip * 46.0f : 0.0f);
@@ -1537,7 +1546,7 @@ fragment CellOut cellPass(VOut in [[stage_in]],
         float ww = min(1.0f, (glow * 1.6f + (rip > 0.0f ? rip * 0.5f : 0.0f)) * sunDim);
         // Same significance floor as the light pockets, and for the same reason:
         // `ww > w` is not a real test when nothing has written yet. Both `glow`
-        // and `rip` already carry `seeThrough`, so under a closed deck they come
+        // and `rip` already carry `sunSee`, so under a closed deck they come
         // out around a per cent — but the ASSIGNMENT does not care, and it was
         // stamping full-strength sun tint (255, 250, 195) across the whole
         // ripple. Against a neutral overcast grey a one per cent hue shift is
@@ -1578,16 +1587,16 @@ fragment CellOut cellPass(VOut in [[stage_in]],
                 // A sun does not have an edge like that. The disc blends into
                 // its own glow, so the contribution has to reach zero at the
                 // rim rather than land on a floor.
-                float discL = (150.0f + diskI * 120.0f) * discDim * seeThrough;
+                float discL = (150.0f + diskI * 120.0f) * discDim * sunSee;
                 L = mix(L, max(L, discL), smoothstep(0.0f, 0.25f, diskI));
                 // The disc's COLOUR must be occluded by exactly what its
-                // luminance is occluded by, one line up. Without `seeThrough`
+                // luminance is occluded by, one line up. Without `sunSee`
                 // the sun held a weight near 0.6 through a closed deck and
                 // stamped full sun tint into the cell. The cloud layers do
                 // composite over it afterwards, but a body asserting itself
                 // through opaque cloud is precisely the bug already fixed for
                 // the moon, and the sun was left carrying it.
-                float ww3 = diskI * 0.82f * sunV * discDim * seeThrough;
+                float ww3 = diskI * 0.82f * sunV * discDim * sunSee;
                 if (ww3 > w) { w = ww3; cr = sc.r; cg = min(255.0f, sc.g + 16.0f); cb = min(255.0f, sc.b + 30.0f); }
             }
         }
@@ -1989,7 +1998,21 @@ fragment CellOut cellPass(VOut in [[stage_in]],
     // bright thread; the same streak away from it is a dim one.
     {
         constexpr sampler ns(coord::pixel, filter::nearest, address::clamp_to_edge);
-        float kx = streaks2.sample(ns, float2(float(ix) + 0.5f, float(iy) + 0.5f)).r;
+        // DRIZZLE IS A MIST, NOT STREAKS. Drops a fifth of a millimetre across,
+        // falling at a metre a second, are individually invisible from a window;
+        // drawn as streaks they came out as diagonal chains of lit tiles, and
+        // split into sub-tiles, as grime. So drizzle lifts and greys the whole
+        // wall a little, and now and then one tile catches a glint.
+        bool drizzle = (U.pform > 0.5f && U.pform < 1.5f);
+        float kx = drizzle ? 0.0f
+                 : streaks2.sample(ns, float2(float(ix) + 0.5f, float(iy) + 0.5f)).r;
+        if (drizzle) {
+            L += 7.0f;
+            float gl = cellPhase(idx + uint(floor(sec * 5.0f)) * 7919u) / 6.28318f;
+            if (gl > 0.994f) L += 16.0f;
+            float a = 0.10f;
+            cr += (178.0f - cr) * a; cg += (186.0f - cg) * a; cb += (198.0f - cb) * a;
+        }
         if (kx > 0.01f) {
             float lit = 1.0f + bodyLight * 1.6f;
 
@@ -3611,7 +3634,8 @@ fragment float4 presentPass(VOut in [[stage_in]],
             (void)kc;
             // A streak's dying tail is barely there; subdividing for it just
             // scatters single lit sub-cells across the sky as specks.
-            if (hi > 0.07f && hi - lo > 0.06f) {
+            // Not for drizzle, which is a mist in the coarse pass.
+            if (!(U.pform > 0.5f && U.pform < 1.5f) && hi > 0.07f && hi - lo > 0.06f) {
                 DetailCell sc = splitCell(px, SPv, int(STREAK_SUB));
                 float v = streakFine.sample(nearestS, sc.id + 0.5f).r;
 
@@ -3622,7 +3646,17 @@ fragment float4 presentPass(VOut in [[stage_in]],
                 // what the cell was worth before the streak lit it — the rain's
                 // share of a cell's brightness, roughly, and seam-free because
                 // a uniform cell never reaches this code at all.
-                float ratio = mix(1.0f - hi * 0.55f, 1.0f, saturate(v / max(hi, 1e-4f)));
+                // How much of the cell's brightness the streak put there,
+                // which is what a sub-cell it misses has to give back. It was
+                // 0.55 for everything — right for a rain streak, and five times
+                // what drizzle adds, so drizzle drew a pale speck ringed by
+                // dark sub-cells: dirt, not water.
+                float pf = U.pform;
+                float share = (pf > 0.5f && pf < 1.5f) ? 0.10f      // drizzle
+                            : (pf > 4.5f && pf < 6.5f) ? 0.40f      // snow
+                            : (pf > 7.5f)              ? 0.55f      // hail
+                            :                            0.32f;     // rain and the rest
+                float ratio = mix(1.0f - hi * share, 1.0f, saturate(v / max(hi, 1e-4f)));
                 col *= ratio;
                 lum *= ratio;
                 dc = sc;
@@ -3861,12 +3895,23 @@ fragment float4 presentPass(VOut in [[stage_in]],
                 }
             } else {
                 // Wet cells: same cell, wetter. Darker and more saturated.
-                float k = wetness * (kind == 2 ? 1.15f : (kind == 3 ? 0.5f : 1.0f));
+                float k = wetness * (kind == 2 ? 0.55f : (kind == 3 ? 0.5f : 1.0f));
                 k = min(k, 0.55f);
                 float lumv = dot(col, float3(0.299f, 0.587f, 0.114f));
-                col = mix(col, col * 0.80f, k);
-                col = mix(col, lumv + (col - lumv) * 1.35f, k * 0.7f);
-                lum = saturate(lum * (1.0f - k * 0.18f));
+                if (kind == 2) {
+                    // A TRACK a drop left running down the glass. It was drawn
+                    // darker, like the rest of the wet film, and a one-cell-wide
+                    // dark column running down the screen reads as a seam or a
+                    // rendering fault — the user saw them hanging from the ends
+                    // of his widgets, where the water now runs off. A wet track
+                    // on a pane catches the light: faintly brighter and clearer.
+                    col = mix(col, col * 1.06f + 0.035f, k);
+                    col = mix(col, lumv + (col - lumv) * 1.15f, k * 0.5f);
+                } else {
+                    col = mix(col, col * 0.80f, k);
+                    col = mix(col, lumv + (col - lumv) * 1.35f, k * 0.7f);
+                    lum = saturate(lum * (1.0f - k * 0.18f));
+                }
 
                 // Water that is still sitting on the pane earns a finer grid:
                 // a bead and its wet surround carry an edge the coarse cell

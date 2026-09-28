@@ -325,6 +325,16 @@ final class SceneSimulation {
     /// Counts for diagnostics. Cheap, and the alternative is guessing.
     var debugCounts: String {
         let lit = streakCells.filter { $0 > 0.01 }.count
+        // Where the falling rain is, by screen third and top/bottom half — so
+        // "it only rains in one corner" is a number, not a screenshot.
+        var zones = [Int](repeating: 0, count: 6)
+        if cols > 0, rows > 0 {
+            for (i, v) in streakCells.enumerated() where v > 0.01 {
+                let cx = i % cols, cy = i / cols
+                zones[min(2, cx * 3 / cols) + (cy * 2 / rows) * 3] += 1
+            }
+        }
+        let zoneStr = "rainZones top \(zones[0])/\(zones[1])/\(zones[2]) bottom \(zones[3])/\(zones[4])/\(zones[5])"
         let wet = trailCells.filter { $0 > 0.15 }.count
         let mean = trailCells.isEmpty ? 0 : trailCells.reduce(0, +) / Float(trailCells.count)
         let peak = trailCells.max() ?? 0
@@ -339,6 +349,7 @@ final class SceneSimulation {
                       surfaces.count, splashCount, streaks.count, lit, drops.count, mean, peak, wet, trailCells.count,
                       poolDepth, spots.count, cols, rows,
                       fMin, fMean, precipField.filter { $0 < 0.05 }.count)
+            + " | " + zoneStr
             + "\n" + surfaceSummary
             + "\n" + lastWeather.presentationSummary
     }
@@ -1180,6 +1191,16 @@ final class SceneSimulation {
         let cross = Self.crossWind(weather, facingAz: facingAz)
         let push = abs(cross) > 3 ? cross / 22 : 0
         let slope = max(-2.5, min(2.5, push / max(baseSpeed, 0.05)))
+        // UPWIND OF THE FRAME. A streak drifts `slope` columns for every row it
+        // falls, and they were only ever born over the frame's own columns — so
+        // in any wind the upwind side of the lower screen could never be
+        // reached, and the rain piled into the downwind corner. The user saw
+        // exactly that: "all collecting in one corner". Rain out of a window
+        // arrives from beyond its edge, so streaks are born across the frame
+        // AND across the strip upwind of it they will drift in from, with the
+        // rate and the cap widened in proportion so the density is unchanged.
+        let reach = min(Float(cols) * 2, abs(slope) * Float(rows))
+        let widen = (Float(cols) + reach) / Float(max(1, cols))
         // Wander. `flutter` is the ratio of the wind to the fall speed, and the
         // wind's steady push is already in `slope` — what is left is TUMBLE,
         // and tumble is a property of the shape rather than of the weather. A
@@ -1198,20 +1219,25 @@ final class SceneSimulation {
         // notices a breeze, a dendrite at 0.8 goes wherever it is sent.
         let wobble = weather.flutter * weather.flutter * 2.4 * tumble
 
-        spawnAccum += perSecond * dt
+        spawnAccum += perSecond * dt * widen
         // Bounded, so one long frame cannot turn into a burst.
-        spawnAccum = min(spawnAccum, 12)
+        spawnAccum = min(spawnAccum, 12 * widen)
         while spawnAccum >= 1 {
             spawnAccum -= 1
-            guard streaks.count < maxStreaks else { break }
+            guard streaks.count < Int(Float(maxStreaks) * widen) else { break }
             // Pick a column WEIGHTED BY THE FIELD, by rejection. A dry gap
             // simply fails to place anything — which is what makes the gap dry
             // rather than merely dimmer, and dimmer is not what a shower does.
             var col = -1
+            var cBirth: Float = 0
             for _ in 0..<4 {
-                let t = Int(rnd() * Float(cols))
-                guard t >= 0, t < cols, edgeArr[t] > 0 else { continue }
-                if rnd() < precipField[t] { col = t; break }
+                // Across the frame plus the upwind strip. Off-frame births read
+                // the field and the deck at the nearest edge column.
+                var cf = rnd() * (Float(cols) + reach)
+                if slope > 0 { cf -= reach }
+                let t = max(0, min(cols - 1, Int(cf.rounded(.down))))
+                guard edgeArr[t] > 0 else { continue }
+                if rnd() < precipField[t] { col = t; cBirth = cf.rounded(.down); break }
             }
             guard col >= 0 else { continue }
 
@@ -1228,9 +1254,9 @@ final class SceneSimulation {
             let deckRow = edgeArr[col] / SP
             let y0 = deckRow * max(0, 1 - deckRow / Float(rows))
             // Nothing is born inside a shelter: under a widget it is dry.
-            if shelterTop(atX: (Float(col) + 0.5) * SP, below: y0 * SP) != nil { continue }
+            if shelterTop(atX: (cBirth + 0.5) * SP, below: y0 * SP) != nil { continue }
 
-            streaks.append((c: Float(col), y: y0,
+            streaks.append((c: cBirth, y: y0,
                             len: lenBase * (0.75 + rnd() * 0.5),
                             v: baseSpeed * (0.72 + rnd() * 0.56),
                             slope: slope * (0.85 + rnd() * 0.3),
@@ -1307,7 +1333,11 @@ final class SceneSimulation {
             }
             if streaks[i].y - streaks[i].len > floorRow
                 || streaks[i].y < -8
-                || streaks[i].c < -4 || streaks[i].c > Float(cols) + 4 {
+                // Off the side only once it is heading AWAY — a streak born
+                // upwind is off the frame on purpose and on its way in.
+                || (streaks[i].c < -4 && streaks[i].slope <= 0)
+                || (streaks[i].c > Float(cols) + 4 && streaks[i].slope >= 0)
+                || streaks[i].c < -Float(cols) * 2 - 8 || streaks[i].c > Float(cols) * 3 + 8 {
                 streaks.remove(at: i)
             }
             i -= 1
