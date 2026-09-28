@@ -197,6 +197,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
                 // Only say so when they asked. An automatic check that finds
                 // nothing should be completely silent.
                 if userAsked {
+                    NSApp.activate(ignoringOtherApps: true)
                     let a = NSAlert()
                     a.messageText = "Elemental is up to date"
                     a.informativeText = "You have version \(Updater.currentVersion)."
@@ -204,13 +205,33 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
                 }
                 return
             }
+            self.pendingUpdate = update
+            self.refreshUpdateMenuItem()
             guard userAsked || declinedVersion != update.version.description else { return }
             self.offer(update)
         }
     }
 
+    // ---- THE OFFER MUST NOT BLOCK THE APP.
+    //
+    // This was `NSAlert.runModal()`, which runs a modal session on the main
+    // thread until somebody clicks. Elemental has no Dock icon and is never the
+    // active app, so the alert usually opened BEHIND whatever was in front and
+    // simply waited there — and while it waited, every timer on the default
+    // run-loop mode stopped: weather, the sun and moon, the furniture, the lock
+    // screen, the endpoint, the menu. That is the "app gets stuck and doesn't do
+    // anything" the user kept hitting, and it came back with every release.
+    //
+    // Now the same alert is shown as an ordinary floating window, brought to the
+    // front, with its buttons wired straight to handlers; nothing waits on it.
+    // The offer also lives in the menu, so closing the window loses nothing.
+    private var pendingUpdate: AvailableUpdate?
+    private var offerAlert: NSAlert?
+    private var updateMenuItem: NSMenuItem?
+
     @MainActor
     private func offer(_ update: AvailableUpdate) {
+        offerAlert?.window.orderOut(nil)
         let a = NSAlert()
         a.messageText = "Elemental \(update.version) is available"
         let mb = Double(update.bytes) / 1_048_576
@@ -218,16 +239,44 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
             + String(format: "The update is %.1f MB.", mb)
             + "\n\nElemental will download it and open the installer. macOS will ask for your "
             + "password, because the app lives in /Applications."
-        a.addButton(withTitle: "Update")
-        a.addButton(withTitle: "Later")
-        a.addButton(withTitle: "Release Notes")
-        switch a.runModal() {
-        case .alertFirstButtonReturn:
-            install(update)
-        case .alertThirdButtonReturn:
-            NSWorkspace.shared.open(Updater.releasesPage)
-        default:
-            declinedVersion = update.version.description
+        for (i, title) in ["Update", "Later", "Release Notes"].enumerated() {
+            let b = a.addButton(withTitle: title)
+            b.tag = i
+            b.target = self
+            b.action = #selector(offerButton(_:))
+        }
+        a.layout()
+        a.window.level = .floating
+        a.window.center()
+        offerAlert = a
+        NSApp.activate(ignoringOtherApps: true)
+        a.window.makeKeyAndOrderFront(nil)
+    }
+
+    @MainActor @objc private func offerButton(_ sender: NSButton) {
+        offerAlert?.window.orderOut(nil)
+        offerAlert = nil
+        guard let update = pendingUpdate else { return }
+        switch sender.tag {
+        case 0: install(update)
+        case 2: NSWorkspace.shared.open(Updater.releasesPage)
+        default: declinedVersion = update.version.description
+        }
+    }
+
+    @MainActor @objc private func offerFromMenu() {
+        guard let u = pendingUpdate else { checkForUpdates(); return }
+        offer(u)
+    }
+
+    private func refreshUpdateMenuItem() {
+        guard let item = updateMenuItem else { return }
+        if let u = pendingUpdate {
+            item.title = "Update to \(u.version)…"
+            item.action = #selector(offerFromMenu)
+        } else {
+            item.title = "Check for Updates…"
+            item.action = #selector(checkForUpdates)
         }
     }
 
@@ -235,6 +284,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     private func install(_ update: AvailableUpdate) {
         Task { @MainActor in
             guard let pkg = await Updater.download(update) else {
+                NSApp.activate(ignoringOtherApps: true)
                 let a = NSAlert()
                 a.messageText = "Could not download the update"
                 a.informativeText = "Check your connection, or download it by hand from the "
@@ -1141,9 +1191,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         menu.addItem(withTitle: "Settings…", action: #selector(showSettings), keyEquivalent: ",")
             .target = self
         menu.addItem(withTitle: "Reload Scene", action: #selector(reload), keyEquivalent: "r")
-        menu.addItem(withTitle: "Check for Updates…", action: #selector(checkForUpdates),
-                     keyEquivalent: "")
-            .target = self
+        let upd = menu.addItem(withTitle: "Check for Updates…", action: #selector(checkForUpdates),
+                               keyEquivalent: "")
+        upd.target = self
+        updateMenuItem = upd
         menu.addItem(.separator())
         menu.addItem(withTitle: "Quit Elemental", action: #selector(quit), keyEquivalent: "q")
             .target = self
