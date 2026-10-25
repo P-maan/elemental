@@ -90,12 +90,36 @@ if [[ $EUID -eq 0 && -n "${SUDO_USER:-}" ]]; then
 fi
 
 # ---- the screen saver, if it was built
+#
+# The same root-ownership trap as the app, in the user's own Library this
+# time: one earlier `sudo ./install.sh` left the saver owned by root, every
+# later plain run failed to replace it, and the saver quietly kept running a
+# build weeks old while the app moved on. So: under sudo, install into the
+# INVOKING user's Library (not root's) and hand the bundle back to them; and
+# without sudo, refuse loudly rather than leave a stale saver in place.
+USER_HOME="$HOME"
+if [[ $EUID -eq 0 && -n "${SUDO_USER:-}" ]]; then
+  USER_HOME="$(dscl . -read "/Users/$SUDO_USER" NFSHomeDirectory | awk '{print $2}')"
+fi
 if [[ -d "$SAVER" ]]; then
-  SAVERS="$HOME/Library/Screen Savers"
+  SAVERS="$USER_HOME/Library/Screen Savers"
   echo "  saver  -> $SAVERS/Elemental.saver"
   mkdir -p "$SAVERS"
-  rm -rf "$SAVERS/Elemental.saver"
-  cp -R "$SAVER" "$SAVERS/Elemental.saver"
+  if [[ -e "$SAVERS/Elemental.saver" && ! -w "$SAVERS/Elemental.saver" && $EUID -ne 0 ]]; then
+    echo
+    echo "  The installed screen saver is owned by root (left by an earlier sudo run),"
+    echo "  so it cannot be replaced. Fix it once with:"
+    echo
+    echo "      sudo chown -R \$USER ~/Library/Screen\\ Savers/Elemental.saver"
+    echo
+    echo "  then run ./install.sh again. The app above was installed."
+  else
+    rm -rf "$SAVERS/Elemental.saver"
+    cp -R "$SAVER" "$SAVERS/Elemental.saver"
+    if [[ $EUID -eq 0 && -n "${SUDO_USER:-}" ]]; then
+      chown -R "$SUDO_USER" "$SAVERS/Elemental.saver"
+    fi
+  fi
 fi
 
 # ---- the quarantine
@@ -104,8 +128,8 @@ fi
 # leaves the executable inside it still quarantined and the app still refused.
 echo "  clearing quarantine"
 xattr -dr com.apple.quarantine "$APPS/Elemental.app" 2>/dev/null || true
-[[ -d "$HOME/Library/Screen Savers/Elemental.saver" ]] && \
-  xattr -dr com.apple.quarantine "$HOME/Library/Screen Savers/Elemental.saver" 2>/dev/null || true
+[[ -d "$USER_HOME/Library/Screen Savers/Elemental.saver" ]] && \
+  xattr -dr com.apple.quarantine "$USER_HOME/Library/Screen Savers/Elemental.saver" 2>/dev/null || true
 
 # ---- verify rather than assume
 if xattr -l "$APPS/Elemental.app" 2>/dev/null | grep -q "com.apple.quarantine"; then
