@@ -335,6 +335,26 @@ final class AutomationServer {
             app.startPreview(p, seconds: secs)
             return (200, ["ok": true, "preview": p.rawValue, "seconds": secs])
 
+        // The scene on the wall answers without being replaced - Pulse.swift.
+        // {"level": 0..1} feeds a live level (music, ~20 a second; it fades by
+        // itself when the feeder stops). {"pattern": notice|urgent|celebrate|
+        // alert|drop} plays a short shape for a message.
+        case ("POST", "/v1/pulse"):
+            let obj = (try? JSONSerialization.jsonObject(with: r.body)) as? [String: Any]
+            if let name = (obj?["pattern"] as? String) ?? r.query["pattern"] {
+                guard let p = Pulse.Pattern(rawValue: name.lowercased()) else {
+                    return (400, ["error": "pattern must be one of "
+                                  + Pulse.Pattern.allCases.map(\.rawValue).joined(separator: ", ")])
+                }
+                Pulse.shared.play(p); app.pulseStarted()
+                return (200, ["ok": true, "pattern": p.rawValue, "seconds": p.seconds])
+            }
+            guard let lv = (obj?["level"] as? Double) ?? r.query["level"].flatMap(Double.init) else {
+                return (400, ["error": "send level (0..1) or pattern"])
+            }
+            Pulse.shared.feed(lv); app.pulseStarted()
+            return (200, ["ok": true])
+
         case ("POST", "/v1/reload"):
             app.reloadScene()
             return (200, ["ok": true])
@@ -482,6 +502,10 @@ enum AutomationURL {
         case "preview":
             let name = parts.first?.lowercased() ?? "rain"
             if let p = WeatherPreview(rawValue: name) { app.startPreview(p) } else { app.endPreview() }
+        case "pulse":
+            if let p = Pulse.Pattern(rawValue: parts.first?.lowercased() ?? "notice") {
+                Pulse.shared.play(p); app.pulseStarted()
+            }
         case "reload":
             app.reloadScene()
         case "settings", "":

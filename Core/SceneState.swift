@@ -96,7 +96,9 @@ struct Uniforms {
     var grout: Float = 0.35
     /// Contact shadow between blocks, 0..1. Occupies what was `pad4`.
     var shadow: Float = 1
-    var pad5: Float = 0
+    /// The scene answering a beat or a message, 0..1. Occupies what was `pad5`,
+    /// so the struct keeps its 256 bytes. See Pulse.swift.
+    var pulse: Float = 0
 }
 
 struct GPUBreather { var ax, ay, R, per, s1, s2, ph, ph2: Float }

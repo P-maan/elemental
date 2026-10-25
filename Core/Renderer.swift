@@ -919,6 +919,7 @@ final class ElementalRenderer {
         u.depthMap = max(0, min(1, state.depthMap))
         u.grout = max(0, min(1, state.grout))
         u.shadow = max(0, min(1, state.shadow))
+        u.pulse = Pulse.shared.value()
 
         uniformBuf.contents().copyMemory(from: &u, byteCount: MemoryLayout<Uniforms>.stride)
     }

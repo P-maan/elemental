@@ -390,7 +390,8 @@ final class WallpaperSurface: NSObject, CAMetalDisplayLinkDelegate {
         // and the ceiling kept just above it, which pins a steady slow cadence.
         // When there is genuine motion — hydrometeors, lightning, a gale — it
         // runs at the user's maxFPS, pinned just as firmly; see below.
-        let moving = w.isPrecipitating || w.isThundering || w.wind > 30
+        // A pulse (Pulse.swift) is a beat; at six frames a second it is not one.
+        let moving = w.isPrecipitating || w.isThundering || w.wind > 30 || Pulse.shared.active
         let hi = moving ? ceiling : min(ceiling, preferred + 4)
 
         // LOW POWER: THE SAME PICTURE, DRAWN LESS OFTEN, AT A STEADY BEAT.
@@ -430,6 +431,7 @@ final class WallpaperSurface: NSObject, CAMetalDisplayLinkDelegate {
         if lowPower {
             var f = Float(max(4, min(30, config.lowPowerFPS)))
             if falling && config.lowPowerSmoothRain { f = max(f, min(20, Float(config.maxFPS))) }
+            if Pulse.shared.active { f = max(f, min(24, Float(config.maxFPS))) }
             link?.preferredFrameRateRange = CAFrameRateRange(minimum: f, maximum: f,
                                                              preferred: f)
             renderer.state.lowFX = false

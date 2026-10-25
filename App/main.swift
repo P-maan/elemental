@@ -1042,6 +1042,21 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         onPreviewChange?()
     }
 
+    // MARK: Pulse — see Core/Pulse.swift
+
+    private var pulseTimer: Timer?
+    /// A pulse needs frames: lift every surface to its motion rate while one is
+    /// running, and hand the energy back two seconds after the last signal.
+    func pulseStarted() {
+        guard pulseTimer == nil else { return }
+        surfaces.values.forEach { $0.applyFrameRate() }
+        pulseTimer = Timer.scheduledTimer(withTimeInterval: 0.5, repeats: true) { [weak self] t in
+            guard let self, !Pulse.shared.active else { return }
+            t.invalidate(); self.pulseTimer = nil
+            self.surfaces.values.forEach { $0.applyFrameRate() }
+        }
+    }
+
     func endPreview() {
         guard preview != nil else { return }
         preview = nil

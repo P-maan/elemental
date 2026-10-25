@@ -94,7 +94,8 @@ struct Uniforms {
     float depthMap;            // how much a block's HEIGHT colours it, 0..1
     float grout;               // strength of the painted line between tiles, 0..1
     float shadow;              // contact shadow between blocks, 0..1
-    float pad5;
+    float pulse;               // 0..1, the scene answering a beat or a message
+                               // (Pulse.swift). Took what was pad5.
 };
 
 // Rain is rasterised at this multiple of the cell grid in each axis.
@@ -1313,6 +1314,15 @@ fragment CellOut cellPass(VOut in [[stage_in]],
                  + 0.50f * sin(x * 0.0009f + y * 0.0043f + sec * 1.27f + 4.3f);
         L += sh * 2.6f * U.shimmer;
     }
+    // ---- the pulse, in every scene (Pulse.swift). A broad swell of light that
+    // rises from the bottom of the wall - spatially coherent like the shimmer,
+    // so it reads as the whole picture breathing on the beat, not as cells
+    // flickering. Kept modest: the weather stays the picture.
+    if (U.pulse > 0.002f) {
+        float yy = y / max(1.0f, H);
+        float sw = 0.55f + 0.45f * sin(x * 0.0026f + y * 0.0019f - sec * 1.9f);
+        L += U.pulse * (5.5f + 7.0f * yy) * sw;
+    }
 
     // humidity haze
     // Carried by the wind, and not a lattice: soft noise drifting across.
@@ -1539,8 +1549,14 @@ fragment CellOut cellPass(VOut in [[stage_in]],
         // a fifth transmission removes the signal instead of shrinking it.
         // Clear sky is untouched: sunSee is 1 there and so is `ripVis`.
         float ripVis = saturate((sunSee - 0.18f) / 0.32f);
-        float rip = sin(d * 0.03f - sec * ripSpeed) * fexp(-d * invSunRip)
-                  * uvAmp * sunDim * sunV * ripVis;
+        // A PULSE (a beat, a message - Pulse.swift) makes the ripple surge and
+        // reach further out, and the glow breathe with it. Only where the sun is
+        // already seen: `ripVis` and `sunSee` gate it exactly as they gate the
+        // ripple itself, so an overcast never grows rings it cannot show.
+        float pz = U.pulse;
+        float rip = sin(d * 0.03f - sec * ripSpeed) * fexp(-d * invSunRip * (1.0f - 0.45f * pz))
+                  * uvAmp * sunDim * sunV * ripVis * (1.0f + 3.2f * pz);
+        glow *= 1.0f + 0.9f * pz * ripVis;
         L += glow * 58.0f + (rip > 0.0f ? rip * 46.0f : 0.0f);
         float3 sc = sunTint(sAlt, aqiF);
         float ww = min(1.0f, (glow * 1.6f + (rip > 0.0f ? rip * 0.5f : 0.0f)) * sunDim);
