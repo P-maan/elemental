@@ -850,6 +850,17 @@ inline float moonSample(float nx, float ny) {
 // `earthRel` is earthshine over full-lit, which is not a constant: at a thin
 // crescent the lit face is dim and earthshine is nearly as bright, which is
 // exactly when you can see it in the sky.
+/// Lit or not, for a cell or sub-cell whose centre sits `sd` pixels past the
+/// terminator. A HARD step, as on the dorm wall, and on purpose.
+///
+/// This was a coverage fraction — `0.5 + sd / cellSize` — which feathers the
+/// terminator across a cell into a smooth curve: what a photograph looks like,
+/// and not what this wall is. The user asked for the moon's lit face to be
+/// square, the way dormstand draws it. Every cell is lit or shaded; the detail
+/// pass splits each cell the terminator crosses, so the edge is a staircase at
+/// sub-cell resolution — fine steps, unmistakably steps, never a curve.
+inline float moonLitStep(float sd) { return sd > 0.0f ? 1.0f : 0.0f; }
+
 inline float moonTone(float v, float litF, float earthRel) {
     return mix(earthRel, v, litF);
 }
@@ -1672,7 +1683,7 @@ fragment CellOut cellPass(VOut in [[stage_in]],
             // between two, and the unlit side keeps a low weight so it stays a
             // shaded part of the moon instead of a gap in it.
             float sdCell = litDist(mx, my, moonR, U.moonPhase);
-            float litF = saturate(0.5f + sdCell / max(SP, 1.0f));
+            float litF = moonLitStep(sdCell);
 
             // Earthshine: sunlight off the Earth onto the moon's dark side. Real,
             // and faint — visible as a dim complete disc, never as black.
@@ -3533,8 +3544,7 @@ fragment float4 presentPass(VOut in [[stage_in]],
                 if (depth > 1) {
                     float earthRel = moonEarthRel(U.moonIllum, U.covF);
                     float vCell   = max(moonSample(dcen.x / moonR, dcen.y / moonR), 0.05f);
-                    float litCell = saturate(
-                        0.5f + litDist(dcen.x, dcen.y, moonR, U.moonPhase) / max(SP, 1.0f));
+                    float litCell = moonLitStep(litDist(dcen.x, dcen.y, moonR, U.moonPhase));
                     float toneCell = moonTone(vCell, litCell, earthRel);
 
                     dc = splitCell(px, SPv, depth);
@@ -3545,8 +3555,7 @@ fragment float4 presentPass(VOut in [[stage_in]],
                     // which is the look.
                     if (dot(ds, ds) <= moonR * moonR) {
                         float vSub   = max(moonSample(ds.x / moonR, ds.y / moonR), 0.05f);
-                        float litSub = saturate(
-                            0.5f + litDist(ds.x, ds.y, moonR, U.moonPhase) / max(dc.size, 1.0f));
+                        float litSub = moonLitStep(litDist(ds.x, ds.y, moonR, U.moonPhase));
                         // A ratio, so a split cell averages back to the unsplit
                         // one and leaves no seam against a neighbour that did not
                         // split. The 0.55 power is the tone ramp's compression

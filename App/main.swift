@@ -57,6 +57,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         AppIcons.apply(config.appIcon)
         rebuildSurfaces()
         applyAutomationSetting()
+        // Creates Zo's token file on the owner's Mac (opt-in only) so Zo can
+        // read it before its first pulse. Nothing at all happens elsewhere.
+        if ZoBridge.enabled { _ = ZoBridge.token }
         restoreFurniture()
         furnitureSaveTimer = Timer.scheduledTimer(withTimeInterval: 60, repeats: true) { [weak self] _ in
             self?.saveFurniture()

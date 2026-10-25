@@ -35,6 +35,9 @@
 //    GET   /v1/grid              the row counts that fit each display
 //    POST  /v1/lowpower          {"mode": "on" | "off" | "auto" | "toggle"}
 //    POST  /v1/preview           {"weather": "rain" | "snow" | … | "off", "seconds": 90}
+//    POST  /v1/pulse             {"level": 0..1} or {"pattern": notice|urgent|…}
+//                                Zo only: needs the X-Elemental-Zo-Token header,
+//                                and is off unless this Mac opted in (ZoBridge)
 //    POST  /v1/reload            rebuild the scene
 //    POST  /v1/settings          open the settings window
 //
@@ -44,9 +47,11 @@
 //    elemental://lowpower/on | off | auto | toggle
 //    elemental://reload
 //    elemental://settings
+//    elemental://pulse/<pattern>?token=…   Zo only, as above
 
 import AppKit
 import Network
+import Security
 
 // MARK: - The keys worth documenting
 
@@ -340,6 +345,10 @@ final class AutomationServer {
         // itself when the feeder stops). {"pattern": notice|urgent|celebrate|
         // alert|drop} plays a short shape for a message.
         case ("POST", "/v1/pulse"):
+            // Zo's hook: on the owner's Mac only — see ZoBridge.
+            guard ZoBridge.accepts(r.headers[ZoBridge.header.lowercased()] ?? r.query["token"]) else {
+                return (403, ["error": "pulse is not enabled on this Mac"])
+            }
             let obj = (try? JSONSerialization.jsonObject(with: r.body)) as? [String: Any]
             if let name = (obj?["pattern"] as? String) ?? r.query["pattern"] {
                 guard let p = Pulse.Pattern(rawValue: name.lowercased()) else {
@@ -503,6 +512,10 @@ enum AutomationURL {
             let name = parts.first?.lowercased() ?? "rain"
             if let p = WeatherPreview(rawValue: name) { app.startPreview(p) } else { app.endPreview() }
         case "pulse":
+            // Zo's hook: on the owner's Mac only, and only with its token.
+            let token = URLComponents(url: url, resolvingAgainstBaseURL: false)?
+                .queryItems?.first { $0.name == "token" }?.value
+            guard ZoBridge.accepts(token) else { return }
             if let p = Pulse.Pattern(rawValue: parts.first?.lowercased() ?? "notice") {
                 Pulse.shared.play(p); app.pulseStarted()
             }
@@ -586,5 +599,59 @@ enum WeatherPreview: String, CaseIterable {
         let g = (17.27 * t) / (237.3 + t) + log(rh / 100)
         w.dewPoint = Float((237.3 * g) / (17.27 - g))
         return w
+    }
+}
+
+
+// MARK: - Zo, on one Mac only
+
+/// The gate on Zo's hooks — pulse today. Elemental is shared with other people,
+/// and Zo is Prakrit's own assistant: on anybody else's copy those hooks must do
+/// nothing at all, whatever the URL or request says.
+///
+/// OFF unless this Mac opts in, with a hidden user default that is NOT part of
+/// config.json — so the endpoint cannot switch it on, Settings never shows it,
+/// and a shipped build has it off:
+///
+///     defaults write com.prakritmaan.elemental zoBridge -bool YES
+///
+/// When on, a random token is kept at `Application Support/Elemental/zo-token`
+/// (mode 0600, created on first use), and every Zo hook must present it: the
+/// `X-Elemental-Zo-Token` header on the endpoint, or `?token=` on the URL
+/// scheme. Off, or with the wrong token, the endpoint answers 403 and the URL
+/// is ignored. The pre-release reads its own defaults domain, so it opts in
+/// separately.
+enum ZoBridge {
+    static let header = "X-Elemental-Zo-Token"
+    static let defaultsKey = "zoBridge"
+
+    static var enabled: Bool { UserDefaults.standard.bool(forKey: defaultsKey) }
+
+    static var tokenURL: URL { Config.directory.appendingPathComponent("zo-token") }
+
+    /// The token, created on first use while enabled. Nil when disabled.
+    static var token: String? {
+        guard enabled else { return nil }
+        if let t = try? String(contentsOf: tokenURL, encoding: .utf8)
+            .trimmingCharacters(in: .whitespacesAndNewlines), t.count >= 32 {
+            return t
+        }
+        var bytes = [UInt8](repeating: 0, count: 32)
+        guard SecRandomCopyBytes(kSecRandomDefault, bytes.count, &bytes) == errSecSuccess else { return nil }
+        let t = bytes.map { String(format: "%02x", $0) }.joined()
+        try? FileManager.default.createDirectory(at: Config.directory, withIntermediateDirectories: true)
+        FileManager.default.createFile(atPath: tokenURL.path, contents: Data(t.utf8),
+                                       attributes: [.posixPermissions: 0o600])
+        return t
+    }
+
+    /// Constant-time, so the comparison cannot be timed out of it.
+    static func accepts(_ presented: String?) -> Bool {
+        guard let want = token, let got = presented, got.utf8.count == want.utf8.count else {
+            return false
+        }
+        var diff: UInt8 = 0
+        for (a, b) in zip(want.utf8, got.utf8) { diff |= a ^ b }
+        return diff == 0
     }
 }
