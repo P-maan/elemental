@@ -8,6 +8,7 @@
 import AppKit
 import Metal
 import CoreLocation
+import IOKit.ps
 
 final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
 
@@ -60,6 +61,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         // Creates Zo's token file on the owner's Mac (opt-in only) so Zo can
         // read it before its first pulse. Nothing at all happens elsewhere.
         if ZoBridge.enabled { _ = ZoBridge.token }
+        startMusicVisualizer()
         restoreFurniture()
         furnitureSaveTimer = Timer.scheduledTimer(withTimeInterval: 60, repeats: true) { [weak self] _ in
             self?.saveFurniture()
@@ -797,6 +799,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         updatePowerState()
         applyPlaybackSetting()
         applyAutomationSetting()
+        applyMusicSetting()
         resumeVisible()
         scheduleSettle()
     }
@@ -832,7 +835,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
 
         let wnc = NSWorkspace.shared.notificationCenter
         wnc.addObserver(forName: NSWorkspace.willSleepNotification, object: nil, queue: .main) {
-            [weak self] _ in self?.saveFurniture(); self?.surfaces.values.forEach { $0.pause() } }
+            [weak self] _ in
+            self?.saveFurniture(); self?.surfaces.values.forEach { $0.pause() }
+            self?.asleep = true; self?.applyMusicSetting() }
+        wnc.addObserver(forName: NSWorkspace.didWakeNotification, object: nil, queue: .main) {
+            [weak self] _ in self?.asleep = false; self?.applyMusicSetting() }
         wnc.addObserver(forName: NSWorkspace.didWakeNotification, object: nil, queue: .main) {
             [weak self] _ in self?.resumeVisible(); self?.refreshEverything(reason: "wake") }
         wnc.addObserver(forName: NSWorkspace.screensDidSleepNotification, object: nil, queue: .main) {
@@ -982,6 +989,39 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     }
 
     var isLowPowerActive: Bool { lowPowerActive }
+
+    // MARK: Music visualizer — see SystemAudioMeter.swift
+
+    let music = SystemAudioMeter()
+    private var asleep = false
+    private var powerSource: CFRunLoopSource?
+
+    /// On AC power. A desktop Mac with no battery is always on AC.
+    var onACPower: Bool {
+        guard let info = IOPSCopyPowerSourcesInfo()?.takeRetainedValue(),
+              let type = IOPSGetProvidingPowerSourceType(info)?.takeUnretainedValue() else { return true }
+        return (type as String) == kIOPMACPowerKey
+    }
+
+    private func startMusicVisualizer() {
+        music.onLevel = { [weak self] in self?.pulseStarted() }
+        // Plugging in or unplugging changes whether it should run. IOKit calls
+        // a C function, so it posts a notification rather than capturing.
+        if let src = IOPSNotificationCreateRunLoopSource({ _ in
+            NotificationCenter.default.post(name: .elementalPowerSourceChanged, object: nil)
+        }, nil)?.takeRetainedValue() {
+            CFRunLoopAddSource(CFRunLoopGetMain(), src, .commonModes)
+            powerSource = src
+        }
+        NotificationCenter.default.addObserver(forName: .elementalPowerSourceChanged, object: nil,
+                                               queue: .main) { [weak self] _ in self?.applyMusicSetting() }
+        applyMusicSetting()
+    }
+
+    /// Run only while the setting is on, the Mac is awake, and it is plugged in.
+    func applyMusicSetting() {
+        music.update(shouldRun: config.musicVisualizer && !asleep && onACPower)
+    }
 
     // MARK: Remembering snow and ice on the furniture
     //
@@ -1286,3 +1326,7 @@ if let i = CommandLine.arguments.firstIndex(of: "--make-icons") {
 
 app.delegate = delegate
 app.run()
+
+extension Notification.Name {
+    static let elementalPowerSourceChanged = Notification.Name("ElementalPowerSourceChanged")
+}

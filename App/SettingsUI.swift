@@ -1036,12 +1036,32 @@ struct GeneralPage: View {
                     options: LookPresets.replays)
         }
 
+        SectionTitle("Music", info: "Uses what this Mac is playing — Spotify, Music, a video — not the "
+                     + "microphone. Only the strength of the bass is measured, about thirty times a second, "
+                     + "and nothing is recorded or kept. It runs only while the Mac is plugged in; on battery "
+                     + "it is fully off. macOS asks once for permission to read system audio.")
+        RowsCard {
+            ToggleRow(title: "Move with music",
+                      subtitle: musicSubtitle,
+                      isOn: store.binding(\.musicVisualizer))
+        }
+
         SectionTitle("Setup")
         RowsCard {
             ButtonRow(title: "First-run setup",
                       subtitle: "Walks the permissions again — the shortest fix when the sky is drawn for the wrong city.",
                       button: "Run Again…") { store.runSetupAgain() }
         }
+    }
+}
+
+extension GeneralPage {
+    var musicSubtitle: String {
+        guard let app = store.app else { return "The wall pulses with the bass of what is playing." }
+        if !store.config.musicVisualizer { return "Off." }
+        if let e = app.music.lastError { return "Not running — \(e)." }
+        if app.music.running { return "Listening to what this Mac is playing." }
+        return app.onACPower ? "Starting…" : "Paused on battery — plug in to use it."
     }
 }
 

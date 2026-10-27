@@ -74,7 +74,12 @@ final class Pulse: @unchecked Sendable {
         var v = held * exp(-(now - heldAt) / 0.18)
         if let p = pattern {
             let t = now - patternT0
-            if t >= p.seconds { pattern = nil } else { v = max(v, p.value(t)) }
+            if t >= p.seconds { pattern = nil }
+            // A MESSAGE wins over music while it plays: Zo's notice or alert
+            // has to read as itself, not be drowned by whatever is playing.
+            // A drop is the music's own, so it rides on top of it.
+            else if p == .drop { v = max(v, p.value(t)) }
+            else { v = p.value(t) }
         }
         return Float(max(0, min(1, v)))
     }

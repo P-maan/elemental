@@ -35,6 +35,8 @@
 
   <key>NSLocationWhenInUseUsageDescription</key>
   <string>Elemental uses your location to place the sun, moon and stars correctly in the wallpaper. It is read once and stored only on this Mac.</string>
+  <key>NSAudioCaptureUsageDescription</key>
+  <string>Elemental moves the wallpaper with the music your Mac is playing. It only measures how loud the bass is, only while plugged in, and never records or keeps any audio.</string>
   <key>NSLocationUsageDescription</key>
   <string>Elemental uses your location to place the sun, moon and stars correctly in the wallpaper. It is read once and stored only on this Mac.</string>
 </dict>
