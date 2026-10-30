@@ -856,16 +856,22 @@ inline float moonSample(float nx, float ny) {
 // `earthRel` is earthshine over full-lit, which is not a constant: at a thin
 // crescent the lit face is dim and earthshine is nearly as bright, which is
 // exactly when you can see it in the sky.
-/// Lit or not, for a cell or sub-cell whose centre sits `sd` pixels past the
-/// terminator. A HARD step, as on the dorm wall, and on purpose.
+/// How lit a whole COARSE cell is, for a cell whose centre sits `sd` pixels
+/// past the terminator, `sp` being the cell pitch. A BOXY FADE: the terminator
+/// steps in whole squares, and across about a cell and a half the squares step
+/// down in quarters — lit, three-quarter, half, quarter, earthshine.
 ///
-/// This was a coverage fraction — `0.5 + sd / cellSize` — which feathers the
-/// terminator across a cell into a smooth curve: what a photograph looks like,
-/// and not what this wall is. The user asked for the moon's lit face to be
-/// square, the way dormstand draws it. Every cell is lit or shaded; the detail
-/// pass splits each cell the terminator crosses, so the edge is a staircase at
-/// sub-cell resolution — fine steps, unmistakably steps, never a curve.
-inline float moonLitStep(float sd) { return sd > 0.0f ? 1.0f : 0.0f; }
+/// Asked for 30 Oct 2026: the waxing face square, keeping the boxy fading look.
+/// It was a hard step per SUB-cell, and that undid both halves of the ask: the
+/// detail pass re-drew the terminator at sub-cell pitch, which from any
+/// distance reads as a smooth curve, and a lit sub-cell inside a shaded parent
+/// was scaled up by the tone ratio to twice the lit face — the bright seam
+/// running down the edge. So this is decided ONCE per coarse cell, and the
+/// detail pass inherits it: sub-cells carry the albedo, never the phase.
+inline float moonLitBox(float sd, float sp) {
+    float f = saturate(0.5f + sd / (1.5f * max(sp, 1.0f)));
+    return floor(f * 4.0f + 0.5f) * 0.25f;
+}
 
 inline float moonTone(float v, float litF, float earthRel) {
     return mix(earthRel, v, litF);
@@ -1250,7 +1256,6 @@ fragment CellOut cellPass(VOut in [[stage_in]],
     // The music under THIS column: the spectrum laid across the wall, lowest
     // notes on the left, highest on the right, so the whole picture is an
     // analyser without looking like one. And how near a dragging pointer is.
-    float specX = specAt(spec, cxp / max(W, 1.0f));
     float near  = dragNear(U, float2(cxp, cyp), SP * 9.0f);
 
     float covF     = U.covF;
@@ -1398,7 +1403,11 @@ fragment CellOut cellPass(VOut in [[stage_in]],
         // Smaller than it was: every kind of weather now answers the music in
         // its own way (the MUSIC notes below), and this is only the common
         // floor under them.
-        L += (0.4f * U.pulse + 0.6f * specX) * (3.0f + 4.0f * yy) * sw;
+        // Quieter at night: a dark sky sits where the tone ramp is steep, so
+        // the same few levels that read as a breath by day light the whole
+        // night sky up like a screen.
+        float nightQ = mix(0.3f, 1.0f, saturate((U.sunAlt + 6.0f) / 12.0f));
+        L += (0.45f * U.pulse + 0.2f * U.pulseMid) * (3.0f + 4.0f * yy) * sw * nightQ;
     }
 
     // humidity haze
@@ -1643,9 +1652,6 @@ fragment CellOut cellPass(VOut in [[stage_in]],
         // MUSIC, clear sky: the bass drives the ripple (above); the highs make
         // the sun's own glow glint, tight around the disc.
         glow *= 1.0f + 0.6f * U.pulseHigh * ripVis * fexp(-d * invSunR * 2.0f);
-        // MUSIC: the ripple IS the spectrum, laid out radially — the rings
-        // nearest the sun answer the low notes, the outer ones the high.
-        rip *= 1.0f + 2.4f * specAt(spec, d / max(H * 0.9f, 1.0f));
         L += glow * 58.0f + (rip > 0.0f ? rip * 46.0f : 0.0f);
         float3 sc = sunTint(sAlt, aqiF);
         float ww = min(1.0f, (glow * 1.6f + (rip > 0.0f ? rip * 0.5f : 0.0f)) * sunDim);
@@ -1722,8 +1728,8 @@ fragment CellOut cellPass(VOut in [[stage_in]],
                     // a beat, each by its own amount so the sky sparkles rather
                     // than flashing as one — and ride the highs between beats.
                     float sw = fract(float(si) * 0.618034f + 0.11f);
-                    twinkle += U.beat * (0.9f + 1.6f * sw)
-                             + specAt(spec, sp.x / max(W, 1.0f)) * 0.8f * sw
+                    twinkle += U.beat * (0.45f + 0.9f * sw)
+                             + specAt(spec, sp.x / max(W, 1.0f)) * 0.45f * sw
                              // DRAG: a star the pointer passes near is tickled.
                              + 2.0f * dragNear(U, sp, SP * 10.0f);
                     // Brighter than it was (55): the stars were hard to find.
@@ -1732,31 +1738,18 @@ fragment CellOut cellPass(VOut in [[stage_in]],
                 }
             }
         }
-        // MUSIC: THE MOON THUMPS OUT RINGS. Each beat sends a ring of light
-        // out from the moon, like the cone of a speaker, travelling a few moon
-        // radii and thinning as it goes. Its age is read straight off `beat`,
-        // which decays as exp(-t / 0.11); hidden by whatever cloud is in front.
-        if (moonAbove && U.beat > 0.015f) {
-            float age = -0.11f * log(U.beat);
-            float ringR = moonR * (1.15f + 11.0f * age);
+        // MUSIC: THE MOON BREATHES. No rings, no bars — the moon is not a
+        // speaker drawn on the sky. Its light just swells into the sky round
+        // it with the bass and catches a little more on each beat, filled and
+        // soft, as if the haze near it were thickening and thinning. The beat
+        // itself is felt in the relief: the disc bulges toward you (heightPass).
+        if (moonAbove && (U.pulse > 0.01f || U.beat > 0.01f)) {
             float dist = length(float2(cxp, cyp) - moonP);
-            float band = fexp(-abs(dist - ringR) / max(SP * 0.9f, 1.0f));
-            L += band * sqrt(U.beat) * 70.0f * seeThrough * (1.0f - aqiF * 0.4f);
-        }
-        // MUSIC: a circular analyser round the moon's rim — one bar per band,
-        // the low notes at the top, the high ones meeting at the bottom, each
-        // reaching out as far as its band is loud. Drawn in whole cells, so it
-        // is mosaic, not a graph laid over it.
-        if (moonAbove) {
-            float2 dm = float2(cxp, cyp) - moonP;
-            float rr = length(dm);
-            if (rr > moonR * 1.04f && rr < moonR * 1.7f) {
-                float t = abs(atan2(dm.x, -dm.y)) / M_PI_F;      // 0 top .. 1 bottom
-                float v = specAt(spec, t);
-                float reach = moonR * (1.06f + 0.55f * v);
-                if (v > 0.05f && rr < reach)
-                    L += (30.0f + 60.0f * v) * seeThrough * (1.0f - (rr - moonR) / (reach - moonR + 1.0f) * 0.6f);
-            }
+            // A night sky sits where the tone ramp is steep: two levels here
+            // lit a whole moon-sized patch of sky. A fraction of one is plenty.
+            float halo = fexp(-max(dist - moonR, 0.0f) / (moonR * 0.35f));
+            L += halo * (0.35f * U.pulse + 0.5f * U.beat)
+               * (0.35f + 0.65f * U.moonIllum) * seeThrough * (1.0f - aqiF * 0.4f);
         }
         float mx = cxp - moonP.x, my = cyp - moonP.y;
         float md2 = mx * mx + my * my;
@@ -1798,7 +1791,7 @@ fragment CellOut cellPass(VOut in [[stage_in]],
             // between two, and the unlit side keeps a low weight so it stays a
             // shaded part of the moon instead of a gap in it.
             float sdCell = litDist(mx, my, moonR, U.moonPhase);
-            float litF = moonLitStep(sdCell);
+            float litF = moonLitBox(sdCell, SP);
 
             // Earthshine: sunlight off the Earth onto the moon's dark side. Real,
             // and faint — visible as a dim complete disc, never as black.
@@ -1971,7 +1964,7 @@ fragment CellOut cellPass(VOut in [[stage_in]],
         float rim = highAmt * bodyLight;                            // diffuser law
         L += highAmt * (28.0f + 34.0f * skyBrAmt) + rim * 96.0f;
         // MUSIC, high cloud: the strands catch the mids, brightest along them.
-        L += highAmt * specX * 26.0f;
+        L += highAmt * U.pulseHigh * 12.0f;
         float3 hc = mix(float3(186.0f, 198.0f, 220.0f),
                         float3(236.0f, 242.0f, 252.0f), saturate(skyBrAmt + rim));
 
@@ -2099,13 +2092,13 @@ fragment CellOut cellPass(VOut in [[stage_in]],
         // thunderhead glows from the inside — strongest in its thick billows,
         // in broad bands rolling across it with the wind; the mids catch its
         // ragged edges.
-        if (U.pulse > 0.002f || specX > 0.002f) {
+        if (U.pulse > 0.002f || U.pulseMid > 0.002f) {
             float cwd = crossWindKmh(U.wind, U.windDir, U.facingAz);
             float roll = 0.5f + 0.5f * sin(cxp * 0.0035f + cyp * 0.0012f
                                            - sec * (1.4f + 0.04f * cwd));
-            L += lowAmt * (0.5f * U.pulse + 0.5f * specX) * (10.0f + 38.0f * saturate(lowN))
+            L += lowAmt * (0.5f * U.pulse + 0.3f * U.pulseMid) * (6.0f + 22.0f * saturate(lowN))
                * (0.4f + 0.6f * roll);
-            L += rim * specX * 44.0f;
+            L += rim * U.pulseMid * 20.0f;
         }
         float a = lowAmt * 0.97f;
         cr += (cc.r - cr) * a; cg += (cc.g - cg) * a; cb += (cc.b - cb) * a;
@@ -2205,9 +2198,9 @@ fragment CellOut cellPass(VOut in [[stage_in]],
             bool snowy = (pf > 4.5f && pf < 7.5f);
             if (snowy) {
                 float sp = cellPhase(idx + uint(floor(sec * 9.0f)) * 3571u) / 6.28318f;
-                if (sp < specX * 0.5f) L += kx * 70.0f;
+                if (sp < U.pulseHigh * 0.3f) L += kx * 70.0f;
             } else {
-                L += kx * bright * (0.65f * specX + 0.9f * U.beat);
+                L += kx * bright * (0.4f * U.pulseHigh + 0.6f * U.beat);
             }
             rc = mix(rc, float3(252.0f, 250.0f, 245.0f), saturate(bodyLight * 0.8f));
             float a = kx * alpha;
@@ -2227,7 +2220,7 @@ fragment CellOut cellPass(VOut in [[stage_in]],
                                     y * 0.0048f + sec * 0.004f) + 13.0f);
         L += fogD * (46.0f + 80.0f * bank);
         // MUSIC, fog: the banks breathe on the bass, the thick ones most.
-        L += fogD * (0.5f * U.pulse + 0.5f * specX) * (14.0f + 40.0f * saturate(bank + 0.5f));
+        L += fogD * (0.5f * U.pulse + 0.3f * U.pulseMid) * (8.0f + 24.0f * saturate(bank + 0.5f));
         float fw = fogD * 0.7f;
         if (fw > w) { w = fw; cr = 170.0f; cg = 175.0f; cb = 185.0f; }
     }
@@ -2876,13 +2869,21 @@ fragment float4 heightPass(VOut in [[stage_in]],
     // wasted work and a chance for the DDA and the occlusion to disagree.
     if (U.splayAmt > 0.001f) h *= 1.0f + cellJit(floor(p), 0.0f) * U.splayAmt * 0.55f;
 
-    // ---- MUSIC, in every scene: the wall is an analyser. Each column's blocks
-    // lift with the band under it — lowest notes on the left, highest on the
-    // right — tallest blocks most, so the picture swells into the spectrum
-    // rather than the grid jumping. A little of the bass under all of it.
+    // ---- MUSIC, in every scene: the wall breathes. Not a bar graph — the
+    // blocks swell together with the bass, tallest most, and the mids lift
+    // some more than others so the surface stirs rather than marching.
     {
-        float sx = specAt(spec, (p.x + 0.5f) / max(U.cols, 1.0f));
-        h *= 1.0f + (0.30f * sx + 0.10f * U.pulse) * (0.4f + 0.6f * h);
+        float stir = 0.5f + 0.5f * cellJit(floor(p), 3.0f);
+        h *= 1.0f + (0.07f * U.pulse + 0.06f * U.pulseMid * stir) * (0.4f + 0.6f * h);
+    }
+
+    // ---- MUSIC: THE MOON'S THUMP. On a beat its disc bulges out of the wall
+    // like a speaker cone, most at the centre, and settles as the beat decays.
+    if (U.moonAlt > 0.0f && U.beat > 0.01f) {
+        float W = U.pixW, H = U.pixH;
+        float2 SPv = float2(W / max(U.cols, 1.0f), H / max(U.rows, 1.0f));
+        float r = length((floor(p) + 0.5f) * SPv - moonScreen(U, W, H)) / (min(W, H) * 0.10f);
+        if (r < 1.0f) h += 0.22f * U.beat * (1.0f - r * r);
     }
 
     // ---- DRAG: PIN ART. The pointer presses the blocks under it in, and the
@@ -3731,7 +3732,9 @@ fragment float4 presentPass(VOut in [[stage_in]],
                 if (depth > 1) {
                     float earthRel = moonEarthRel(U.moonIllum, U.covF);
                     float vCell   = max(moonSample(dcen.x / moonR, dcen.y / moonR), 0.05f);
-                    float litCell = moonLitStep(litDist(dcen.x, dcen.y, moonR, U.moonPhase));
+                    // The phase is the coarse cell's (moonLitBox): sub-cells
+                    // share it, so they refine the albedo and nothing else.
+                    float litCell = moonLitBox(litDist(dcen.x, dcen.y, moonR, U.moonPhase), SP);
                     float toneCell = moonTone(vCell, litCell, earthRel);
 
                     dc = splitCell(px, SPv, depth);
@@ -3742,7 +3745,7 @@ fragment float4 presentPass(VOut in [[stage_in]],
                     // which is the look.
                     if (dot(ds, ds) <= moonR * moonR) {
                         float vSub   = max(moonSample(ds.x / moonR, ds.y / moonR), 0.05f);
-                        float litSub = moonLitStep(litDist(ds.x, ds.y, moonR, U.moonPhase));
+                        float litSub = litCell;
                         // A ratio, so a split cell averages back to the unsplit
                         // one and leaves no seam against a neighbour that did not
                         // split. The 0.55 power is the tone ramp's compression
@@ -4195,7 +4198,7 @@ fragment float4 presentPass(VOut in [[stage_in]],
                         float tw = 0.75f + 0.25f * sin(U.time * 1.7f + float(si) * 2.4f);
                         // MUSIC: each star on its own band, by where it sits.
                         float sw = fract(float(si) * 0.618034f + 0.11f);
-                        tw += U.beat * (0.6f + 1.0f * sw) + specAt(spec, sp.x / max(W, 1.0f)) * 0.7f
+                        tw += U.beat * (0.35f + 0.7f * sw) + specAt(spec, sp.x / max(W, 1.0f)) * 0.4f
                             // DRAG: tickled.
                             + 1.4f * dragNear(U, sp, SP * 10.0f);
                         float l = saturate((0.30f + 1.10f * vis * br * tw) * shape);
