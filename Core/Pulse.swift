@@ -19,6 +19,9 @@ final class Pulse: @unchecked Sendable {
     private let lock = NSLock()
     private var held: Double = 0
     private var heldAt: CFAbsoluteTime = 0
+    private var heldMid: Double = 0
+    private var heldHigh: Double = 0
+    private var beatAt: CFAbsoluteTime = -100
     private var pattern: Pattern?
     private var patternT0: CFAbsoluteTime = 0
     private var lastSignal: CFAbsoluteTime = 0
@@ -60,6 +63,35 @@ final class Pulse: @unchecked Sendable {
         lock.lock(); defer { lock.unlock() }
         let now = CFAbsoluteTimeGetCurrent()
         held = max(0, min(1, level)); heldAt = now; lastSignal = now
+        // A bare level (the endpoint) carries no bands of its own; lend the
+        // others a share of it so every scene still answers.
+        heldMid = held * 0.6; heldHigh = held * 0.4
+    }
+
+    /// Music, split: bass (`level`), mids, highs, and whether this buffer is a
+    /// beat. Each kind of weather answers a different part of it — see the
+    /// music section of the cell pass in Scene.metal.
+    func feedBands(bass: Double, mid: Double, high: Double, beat: Bool) {
+        lock.lock(); defer { lock.unlock() }
+        let now = CFAbsoluteTimeGetCurrent()
+        held = max(0, min(1, bass)); heldMid = max(0, min(1, mid)); heldHigh = max(0, min(1, high))
+        heldAt = now; lastSignal = now
+        if beat { beatAt = now }
+    }
+
+    /// Everything the shader reads, for THIS frame. A message pattern replaces
+    /// the bass while it plays and quiets the music's other bands, so it reads
+    /// as itself.
+    func bands() -> (bass: Float, mid: Float, high: Float, beat: Float) {
+        let bass = value()
+        lock.lock(); defer { lock.unlock() }
+        let now = CFAbsoluteTimeGetCurrent()
+        let fade = exp(-(now - heldAt) / 0.18)
+        let message = pattern != nil && pattern != .drop
+        let k = message ? 0.25 : 1.0
+        let mid = Float(heldMid * fade * k), high = Float(heldHigh * fade * k)
+        let beat = Float(exp(-(now - beatAt) / 0.11) * k)
+        return (bass, max(0, min(1, mid)), max(0, min(1, high)), max(0, min(1, beat)))
     }
 
     func play(_ p: Pattern) {

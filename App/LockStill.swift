@@ -381,10 +381,27 @@ final class LockStillExporter {
     /// identical for every path, so the bytes are too: the file just written is
     /// read once and laid down everywhere else, which costs a disk copy instead
     /// of a compression pass per Space.
+    ///
+    /// HARD LINKS, NOT COPIES. Even encoded once, the frame was still WRITTEN
+    /// once per referenced path — and the store only ever gains names (every
+    /// export is a new file, and Spaces you do not visit keep their old ones),
+    /// so on the user's Mac it reached sixty: a 1 MB picture cost 60 MB of
+    /// writing, 8.6 GB in nine hours, and macOS flagged the app for it again.
+    /// Each old name is now re-pointed at the new file — a hard link made
+    /// beside it and renamed over it, which is atomic and writes no data at all,
+    /// however many names there are. The store sees exactly what it saw before:
+    /// a new file at the same path.
     private func mirrorToReferencedPaths(from source: URL) {
-        guard let bytes = try? Data(contentsOf: source) else { return }
+        let fm = FileManager.default
         for url in referencedPaths() where url != source {
-            try? bytes.write(to: url, options: .atomic)
+            let tmp = url.deletingLastPathComponent()
+                .appendingPathComponent(".link-\(UUID().uuidString)")
+            do {
+                try fm.linkItem(at: source, to: tmp)
+                if rename(tmp.path, url.path) != 0 { try? fm.removeItem(at: tmp) }
+            } catch {
+                try? fm.removeItem(at: tmp)
+            }
         }
     }
 
@@ -406,7 +423,8 @@ final class LockStillExporter {
         }
         // Temporary files left by interrupted atomic writes — `.scene-….png-XXXX`,
         // some of them empty — accumulate forever otherwise.
-        for f in files where f.lastPathComponent.hasPrefix(".scene-") {
+        for f in files where f.lastPathComponent.hasPrefix(".scene-")
+                          || f.lastPathComponent.hasPrefix(".link-") {
             let mod = (try? f.resourceValues(forKeys: [.contentModificationDateKey]))?.contentModificationDate
             if let mod, mod > cutoff { continue }
             try? fm.removeItem(at: f)

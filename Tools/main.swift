@@ -775,6 +775,12 @@ guard let tex = renderer.device.makeTexture(descriptor: td) else {
 // deterministic and independent of how fast this loop actually runs.
 renderer.fixedTimeStep = 1.0 / 60.0
 let total = max(1, warmup)
+// --bass/--mid/--high 0..1 and --beat: render the music reaction offline.
+// Fed right before the frames, so the short held levels have not decayed.
+if args["bass"] != nil || args["mid"] != nil || args["high"] != nil || args["beat"] != nil {
+    Pulse.shared.feedBands(bass: num("bass", 0), mid: num("mid", 0), high: num("high", 0),
+                           beat: args["beat"] != nil)
+}
 
 // --dryfor N: soak the pane for the warm-up, then stop the rain and run N more
 // frames. The only way to actually see evaporation work, since while it is

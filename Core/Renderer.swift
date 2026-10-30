@@ -919,7 +919,8 @@ final class ElementalRenderer {
         u.depthMap = max(0, min(1, state.depthMap))
         u.grout = max(0, min(1, state.grout))
         u.shadow = max(0, min(1, state.shadow))
-        u.pulse = Pulse.shared.value()
+        let pb = Pulse.shared.bands()
+        u.pulse = pb.bass; u.pulseMid = pb.mid; u.pulseHigh = pb.high; u.beat = pb.beat
 
         uniformBuf.contents().copyMemory(from: &u, byteCount: MemoryLayout<Uniforms>.stride)
     }

@@ -661,6 +661,17 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
                 s.setAstroProvider { [weak self] date in
                     self?.astro(at: date) ?? AstroState()
                 }
+                // Last resort from the stall watchdog: throw this surface away
+                // and build a fresh one for the same display, with the current
+                // weather handed straight back in.
+                s.onUnrecoverable = { [weak self] dead in
+                    guard let self else { return }
+                    let w = dead.renderer.state.weather
+                    dead.close()
+                    self.surfaces[id] = nil
+                    self.rebuildSurfaces()
+                    self.surfaces[id]?.updateWeather(w, snap: true)
+                }
                 surfaces[id] = s
                 s.resume()
             }
@@ -1115,7 +1126,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     var surfaceStats: [[String: Any]] {
         surfaces.map { id, s in
             ["displayID": Int(id), "fps": (s.measuredFPS * 10).rounded() / 10,
-             "paused": s.isPaused, "visible": s.isVisible,
+             "paused": s.isPaused, "visible": s.isVisible, "recoveries": s.recoveries,
              "engine": s.engineDebug.split(separator: "\n").map(String.init)]
         }
     }

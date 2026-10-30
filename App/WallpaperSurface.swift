@@ -163,6 +163,10 @@ final class WallpaperSurface: NSObject, CAMetalDisplayLinkDelegate {
         link = dl
         applyFrameRate()
 
+        let wd = Timer(timeInterval: 5, repeats: true) { [weak self] _ in self?.checkAlive() }
+        RunLoop.main.add(wd, forMode: .common)
+        watchdog = wd
+
         NotificationCenter.default.addObserver(
             self, selector: #selector(occlusionChanged),
             name: NSWindow.didChangeOcclusionStateNotification, object: window)
@@ -463,7 +467,57 @@ final class WallpaperSurface: NSObject, CAMetalDisplayLinkDelegate {
     func resume() {
         guard paused else { return }
         paused = false
+        lastFrameAt = CACurrentMediaTime()
         link?.isPaused = false
+    }
+
+    // MARK: - Watchdog
+    //
+    // THE WALLPAPER STOPPED AND STAYED STOPPED. Seen on the user's Mac after a
+    // day of running: not paused, on screen, the main thread idle and the
+    // display timer still firing — and no frame for hours, so only quitting
+    // brought it back ("hangs every time, requiring a manual restart"). The
+    // display link had stopped handing out drawables, which happens when it is
+    // left bound to a display through a sleep or reconfiguration, or when the
+    // drawable pool is never returned. Nothing in the app noticed.
+    //
+    // Now it does. Every five seconds: if the surface should be drawing and no
+    // frame has arrived for eight, the display link is rebuilt; if two rebuilds
+    // in a row bring nothing back, the host replaces the whole surface. Each
+    // recovery is counted and shown in /v1/status.
+    private var watchdog: Timer?
+    private var lastFrameAt = CACurrentMediaTime()
+    private var failedRebuilds = 0
+    private(set) var recoveries = 0
+    /// Called when rebuilding the display link has not helped; the host
+    /// replaces the surface.
+    var onUnrecoverable: ((WallpaperSurface) -> Void)?
+
+    private func checkAlive() {
+        guard !paused, isVisible || config.renderWhenOccluded else {
+            lastFrameAt = CACurrentMediaTime()
+            return
+        }
+        let stalled = CACurrentMediaTime() - lastFrameAt
+        guard stalled > 8 else { failedRebuilds = 0; return }
+        if failedRebuilds >= 2 {
+            NSLog("Elemental: wallpaper still stalled after relinking — replacing the surface")
+            failedRebuilds = 0
+            onUnrecoverable?(self)
+            return
+        }
+        NSLog("Elemental: no frame for %.0fs — rebuilding the display link", stalled)
+        link?.invalidate()
+        let dl = CAMetalDisplayLink(metalLayer: metalLayer)
+        dl.delegate = self
+        dl.add(to: .main, forMode: .common)
+        dl.isPaused = false
+        link = dl
+        applyFrameRate()
+        renderer.markIdle()
+        lastFrameAt = CACurrentMediaTime()
+        failedRebuilds += 1
+        recoveries += 1
     }
 
     func pause() {
@@ -488,6 +542,8 @@ final class WallpaperSurface: NSObject, CAMetalDisplayLinkDelegate {
         refreshHeadroom()
         renderer.render(to: update.drawable.texture, presenting: update.drawable)
         frameStamps.append(CACurrentMediaTime())
+        lastFrameAt = frameStamps[frameStamps.count - 1]
+        failedRebuilds = 0
         if frameStamps.count > 64 { frameStamps.removeFirst(frameStamps.count - 64) }
     }
 
@@ -561,6 +617,8 @@ final class WallpaperSurface: NSObject, CAMetalDisplayLinkDelegate {
     }
 
     func close() {
+        watchdog?.invalidate()
+        watchdog = nil
         link?.invalidate()
         link = nil
         window.orderOut(nil)

@@ -99,6 +99,14 @@ struct Uniforms {
     /// The scene answering a beat or a message, 0..1. Occupies what was `pad5`,
     /// so the struct keeps its 256 bytes. See Pulse.swift.
     var pulse: Float = 0
+    // ---- A fourth block of four, 256 -> 272 bytes, still a multiple of 16:
+    // the music's other bands, so each kind of weather can answer a different
+    // part of it. `pulse` above is the bass. Append only — trap 5.
+    var pulseMid: Float = 0
+    var pulseHigh: Float = 0
+    /// A detected beat: 1 at the onset, decaying over about a tenth of a second.
+    var beat: Float = 0
+    var pulsePad: Float = 0
 }
 
 struct GPUBreather { var ax, ay, R, per, s1, s2, ph, ph2: Float }

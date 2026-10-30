@@ -62,8 +62,13 @@ final class SystemAudioMeter: @unchecked Sendable {
     // ---- analysis state: touched only on `queue`
     private var sampleRate: Double = 48_000
     private var lp: Float = 0
+    private var lp2: Float = 0          // 2 kHz: splits mids from highs
     private var env: Float = 0
     private var peak: Float = 1e-4
+    private var envMid: Float = 0, peakMid: Float = 1e-4
+    private var envHigh: Float = 0, peakHigh: Float = 1e-4
+    private var bassAvg: Float = 0      // ~0.4 s average, the baseline a beat rises from
+    private var lastBeat: CFAbsoluteTime = 0
     private var quietSince: CFAbsoluteTime?
     private var lastDrop: CFAbsoluteTime = 0
     private var lastPost: CFAbsoluteTime = 0
@@ -169,7 +174,8 @@ final class SystemAudioMeter: @unchecked Sendable {
         running = false
         queue.async { [weak self] in
             guard let self else { return }
-            self.env = 0; self.lp = 0; self.quietSince = nil; self.latest = 0
+            self.env = 0; self.lp = 0; self.lp2 = 0; self.envMid = 0; self.envHigh = 0
+            self.bassAvg = 0; self.quietSince = nil; self.latest = 0
         }
     }
 
@@ -180,34 +186,58 @@ final class SystemAudioMeter: @unchecked Sendable {
     private func analyse(_ list: UnsafePointer<AudioBufferList>) {
         let abl = UnsafeMutableAudioBufferListPointer(UnsafeMutablePointer(mutating: list))
         let a = Float(1 - exp(-2 * Double.pi * 150 / sampleRate))
-        var sum: Float = 0
+        let a2 = Float(1 - exp(-2 * Double.pi * 2000 / sampleRate))
+        var sum: Float = 0, sumMid: Float = 0, sumHigh: Float = 0
         var n = 0
         // Float32 samples, interleaved or not: every channel of every buffer
-        // goes through the same low-pass, which is a mono bass sum in effect.
+        // goes through the same filters, which is a mono sum in effect. Three
+        // bands from two one-pole low-passes: bass under 150 Hz, mids from
+        // there to 2 kHz, highs above — the kick, the voice, the hats.
         for buf in abl {
             guard let data = buf.mData else { continue }
             let count = Int(buf.mDataByteSize) / MemoryLayout<Float>.size
             let p = data.assumingMemoryBound(to: Float.self)
             for i in 0..<count {
-                lp += a * (p[i] - lp)
-                sum += lp * lp
+                let x = p[i]
+                lp += a * (x - lp)
+                lp2 += a2 * (x - lp2)
+                let m = lp2 - lp, h = x - lp2
+                sum += lp * lp; sumMid += m * m; sumHigh += h * h
             }
             n += count
         }
         guard n > 0 else { return }
         let rms = (sum / Float(n)).squareRoot()
+        let rmsMid = (sumMid / Float(n)).squareRoot()
+        let rmsHigh = (sumHigh / Float(n)).squareRoot()
 
-        // Envelope: quick to rise, slower to fall, per buffer (~10 ms each).
+        // Envelopes: quick to rise, slower to fall, per buffer (~10 ms each).
+        // Highs fall faster than bass — a hat is short, a kick rings.
         let rise: Float = 0.6, fall: Float = 0.07
         env += (rms > env ? rise : fall) * (rms - env)
+        envMid += (rmsMid > envMid ? rise : 0.10) * (rmsMid - envMid)
+        envHigh += (rmsHigh > envHigh ? 0.75 : 0.18) * (rmsHigh - envHigh)
 
-        // Slow peak to normalise against: decays over about a minute, so a
+        // Slow peaks to normalise against: decay over about a minute, so a
         // loud track does not leave a quiet one with nothing to show.
         peak = max(env, peak * 0.99985, 1e-4)
+        peakMid = max(envMid, peakMid * 0.99985, 1e-4)
+        peakHigh = max(envHigh, peakHigh * 0.99985, 1e-4)
         let lv = Double(min(1, env / peak))
+        let mid = Double(min(1, envMid / peakMid))
+        let high = Double(min(1, envHigh / peakHigh))
 
         let now = CFAbsoluteTimeGetCurrent()
         latest = lv
+
+        // A BEAT: the bass jumping well above where it has been for the last
+        // half second, and loud enough to count, no closer than ~0.18 s apart.
+        bassAvg += 0.025 * (env - bassAvg)
+        var beat = false
+        if env > bassAvg * 1.35 && env > peak * 0.30 && now - lastBeat > 0.18 {
+            beat = true
+            lastBeat = now
+        }
 
         // A drop: quiet for three seconds, then back above three quarters.
         var drop = false
@@ -223,12 +253,12 @@ final class SystemAudioMeter: @unchecked Sendable {
 
         // Nothing playing: say nothing, so the wall settles instead of being
         // fed a stream of zeros that keeps the frame rate up.
-        guard env > 0.0004 || drop else { return }
-        guard drop || now - lastPost >= 1.0 / 30 else { return }
+        guard env > 0.0004 || envHigh > 0.0004 || drop else { return }
+        guard drop || beat || now - lastPost >= 1.0 / 30 else { return }
         lastPost = now
         DispatchQueue.main.async { [weak self] in
             if drop { Pulse.shared.play(.drop) }
-            Pulse.shared.feed(lv)
+            Pulse.shared.feedBands(bass: lv, mid: mid, high: high, beat: beat)
             self?.onLevel?()
         }
     }
