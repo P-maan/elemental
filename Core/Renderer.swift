@@ -147,6 +147,15 @@ final class ElementalRenderer {
     private static let maxBolt = 128
     private static let maxGlassQuads = 2048
     private var glassBuf: MTLBuffer!
+    /// The music's 24 bands (Pulse.spectrum), padded to 32. Bound at index 7
+    /// in the cell, height and present passes.
+    private var spectrumBuf: MTLBuffer!
+
+    /// This surface's screen in global top-left points, and its scale, so the
+    /// dragging pointer (Cursor.swift) can be placed in its pixels. Set by the
+    /// host; zero means "not a desktop surface" and the pointer is ignored.
+    var cursorFrame: CGRect = .zero
+    var cursorScale: CGFloat = 2
 
     // Scene clock. Kept in Double on the CPU and handed to the shader as a
     // Float, which stays exact for a few thousand seconds. The origin is
@@ -347,6 +356,7 @@ final class ElementalRenderer {
     private func buildBuffers() {
         let opt: MTLResourceOptions = .storageModeShared
         uniformBuf  = device.makeBuffer(length: MemoryLayout<Uniforms>.stride, options: opt)
+        spectrumBuf = device.makeBuffer(length: MemoryLayout<Float>.stride * 32, options: opt)
         breatherBuf = device.makeBuffer(length: MemoryLayout<GPUBreather>.stride * 3, options: opt)
         starBuf     = device.makeBuffer(length: MemoryLayout<GPUStar>.stride * Self.maxStars, options: opt)
         streakBuf   = device.makeBuffer(length: MemoryLayout<GPUStreak>.stride * Self.maxStreaks, options: opt)
@@ -667,6 +677,7 @@ final class ElementalRenderer {
             e.setFragmentBuffer(colIndexBuf, offset: 0, index: 4)
             e.setFragmentBuffer(boltBuf,     offset: 0, index: 5)
             e.setFragmentBuffer(edgeBuf,     offset: 0, index: 6)
+            e.setFragmentBuffer(spectrumBuf, offset: 0, index: 7)
             e.setFragmentTexture(streakTex, index: 0)
             e.drawPrimitives(type: .triangle, vertexStart: 0, vertexCount: 3)
             e.endEncoding()
@@ -695,6 +706,8 @@ final class ElementalRenderer {
                 e.setRenderPipelineState(a < 1 ? heightRisePS : heightPS)
                 if a < 1 { e.setBlendColor(red: a, green: a, blue: a, alpha: a) }
                 e.setFragmentBuffer(uniformBuf, offset: 0, index: 0)
+                e.setFragmentBuffer(starBuf,    offset: 0, index: 2)
+                e.setFragmentBuffer(spectrumBuf, offset: 0, index: 7)
                 e.setFragmentTexture(cellTex, index: 0)
                 // Cloud occlusion per cell, so relief can follow WHAT IS IN
                 // FRONT rather than what is brightest — see heightPass.
@@ -713,6 +726,7 @@ final class ElementalRenderer {
         if let e = cmd.makeRenderCommandEncoder(descriptor: bDesc) {
             e.setRenderPipelineState(presentPS)
             e.setFragmentBuffer(uniformBuf, offset: 0, index: 0)
+            e.setFragmentBuffer(spectrumBuf, offset: 0, index: 7)
             e.setFragmentBuffer(starBuf,    offset: 0, index: 2)
             e.setFragmentTexture(cellTex, index: 0)
             e.setFragmentTexture(glassTex, index: 1)
@@ -921,6 +935,14 @@ final class ElementalRenderer {
         u.shadow = max(0, min(1, state.shadow))
         let pb = Pulse.shared.bands()
         u.pulse = pb.bass; u.pulseMid = pb.mid; u.pulseHigh = pb.high; u.beat = pb.beat
+        let spec = Pulse.shared.spectrum()
+        let sp = spectrumBuf.contents().assumingMemoryBound(to: Float.self)
+        for k in 0..<32 { sp[k] = k < spec.count ? spec[k] : 0 }
+        if cursorFrame.width > 0 {
+            let c = Cursor.shared.state(in: cursorFrame, scale: cursorScale)
+            u.cursorX = c.x; u.cursorY = c.y; u.cursorVX = c.vx; u.cursorVY = c.vy; u.drag = c.drag
+            sim.cursor = c
+        }
 
         uniformBuf.contents().copyMemory(from: &u, byteCount: MemoryLayout<Uniforms>.stride)
     }

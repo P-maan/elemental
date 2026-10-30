@@ -638,6 +638,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
 
     func applicationWillTerminate(_ note: Notification) {
         saveFurniture()
+        cursorTracker.stop()
         surfaces.values.forEach { $0.close() }
         automation.stop()
         lockStill?.stop()
@@ -1004,6 +1005,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     // MARK: Music visualizer — see SystemAudioMeter.swift
 
     let music = SystemAudioMeter()
+    let cursorTracker = CursorTracker()
     private var asleep = false
     private var powerSource: CFRunLoopSource?
 
@@ -1027,6 +1029,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         NotificationCenter.default.addObserver(forName: .elementalPowerSourceChanged, object: nil,
                                                queue: .main) { [weak self] _ in self?.applyMusicSetting() }
         applyMusicSetting()
+        // Dragging on the desktop plays with the scene. No permission needed:
+        // a global monitor sees mouse events, only keys need Accessibility.
+        cursorTracker.start()
     }
 
     /// Run only while the setting is on, the Mac is awake, and it is plugged in.

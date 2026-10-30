@@ -197,6 +197,12 @@ final class WallpaperSurface: NSObject, CAMetalDisplayLinkDelegate {
         renderer.motionSpeed = config.motionSpeed
         renderer.playbackOnWake = config.playbackOnWake
         renderer.playbackMaxSeconds = config.playbackMaxSeconds
+        // The cursor arrives in global top-left points (the window list's
+        // space); AppKit frames are bottom-left from the primary display.
+        let primaryH = NSScreen.screens.first?.frame.height ?? frame.height
+        renderer.cursorFrame = CGRect(x: frame.minX, y: primaryH - frame.maxY,
+                                      width: frame.width, height: frame.height)
+        renderer.cursorScale = scale
 
         // Always call through: the renderer decides whether anything actually
         // needs rebuilding, and it now accounts for a changed row count as well

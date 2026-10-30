@@ -775,6 +775,14 @@ guard let tex = renderer.device.makeTexture(descriptor: td) else {
 // deterministic and independent of how fast this loop actually runs.
 renderer.fixedTimeStep = 1.0 / 60.0
 let total = max(1, warmup)
+// --cursor x,y (pixels): a pointer dragging there, to render the drag reactions.
+if let c = args["cursor"]?.split(separator: ",").compactMap({ Double($0) }), c.count == 2 {
+    renderer.cursorFrame = CGRect(x: 0, y: 0, width: width, height: height)
+    renderer.cursorScale = 1
+    Cursor.shared.dragged(to: CGPoint(x: c[0] - 30, y: c[1]))
+    usleep(16_000)
+    Cursor.shared.dragged(to: CGPoint(x: c[0], y: c[1]))
+}
 // --bass/--mid/--high 0..1 and --beat: render the music reaction offline.
 // Fed right before the frames, so the short held levels have not decayed.
 if args["bass"] != nil || args["mid"] != nil || args["high"] != nil || args["beat"] != nil {

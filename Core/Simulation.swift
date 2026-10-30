@@ -405,6 +405,10 @@ final class SceneSimulation {
     private var sunAlt: Float = 0
     private var facingAz: Float = 180
 
+    /// The pointer dragging on the desktop, in this surface's pixels — set by
+    /// the renderer each frame. See Cursor.swift.
+    var cursor = Cursor.State(x: -1e5, y: -1e5, vx: 0, vy: 0, drag: 0)
+
     /// The wind ACROSS the screen, km/h, positive blowing toward the right.
     ///
     /// One definition for every element, because they used to disagree. The sky
@@ -558,10 +562,30 @@ final class SceneSimulation {
     /// The film state is parallel to this array, so replacing the furniture —
     /// a display change, the dock moving edge — starts the new pieces dry
     /// rather than inheriting the old ones' weather.
+    ///
+    /// When the list changes, what each piece is carrying FOLLOWS IT: a new
+    /// surface inherits the film of the old one of the same kind nearest to
+    /// it. App windows are furniture now, and they come and go and move all
+    /// the time; resetting every film whenever the count changed would wipe
+    /// the snow off every widget the moment a window opened.
     var surfaces: [Surface] = [] {
         didSet {
-            guard films.count != surfaces.count else { return }
-            films = [SurfaceFilm](repeating: SurfaceFilm(), count: surfaces.count)
+            let oldFilms = films
+            let span = max(W, H, 1)
+            var used = Set<Int>()
+            var next = [SurfaceFilm](repeating: SurfaceFilm(), count: surfaces.count)
+            for (i, s) in surfaces.enumerated() {
+                var best = -1, bestD = span * 0.15
+                for (j, o) in oldValue.enumerated()
+                    where j < oldFilms.count && !used.contains(j) && o.kind == s.kind {
+                    let dx = (o.left + o.w / 2) - (s.left + s.w / 2)
+                    let dy = (o.top + o.h / 2) - (s.top + s.h / 2)
+                    let d = (dx * dx + dy * dy).squareRoot()
+                    if d < bestD { bestD = d; best = j }
+                }
+                if best >= 0 { used.insert(best); next[i] = oldFilms[best] }
+            }
+            films = next
             applyPendingMemory()
         }
     }
@@ -1295,6 +1319,25 @@ final class SceneSimulation {
             // The head travels along the slope, so the whole streak leans.
             streaks[i].c += streaks[i].slope * dy
 
+            // DRAG. The pointer is an UMBRELLA to rain — drops swerve round it
+            // to either side — and a hand stirring snow, which swirls round it.
+            if cursor.drag > 0.02 {
+                let hx = (streaks[i].c + 0.5) * SP, hy = streaks[i].y * SP
+                let ddx = hx - cursor.x, ddy = hy - cursor.y
+                let dist = (ddx * ddx + ddy * ddy).squareRoot()
+                let R = SP * 7
+                if dist < R && dist > 1 {
+                    let k = cursor.drag * (1 - dist / R) * f
+                    let pf = lastWeather.precipForm
+                    if pf == .snow || pf == .snowGrains || pf == .graupel {
+                        streaks[i].c += (-ddy / dist) * k * 0.6
+                        streaks[i].y += (ddx / dist) * k * 0.6
+                    } else {
+                        streaks[i].c += (ddx >= 0 ? 1 : -1) * k * 0.7
+                    }
+                }
+            }
+
             // LANDING. Rain used to fall straight through the dock and every
             // widget as if they were not there — the one thing that made the
             // furniture look untouched by weather however much the physics
@@ -1928,7 +1971,7 @@ final class SceneSimulation {
     private func marks(_ kind: Surface.Kind) -> Bool {
         switch kind {
         case .dock:             return Furniture.options.dock
-        case .widget:           return Furniture.options.widgets
+        case .widget, .window:  return Furniture.options.widgets
         case .menuBar:          return Furniture.options.menuBar
         case .clock, .loginBox: return true
         }
@@ -2491,6 +2534,17 @@ final class SceneSimulation {
         // never called — the call sites were lost in an earlier edit, which is
         // why water accumulated forever with no decay path at all.
         ageTrails(dt: dt, evaporation: w.evaporationRate)
+        // DRAG: and wipes the wet film clean where it passes, like a wiper.
+        if cursor.drag > 0.02, !trailCells.isEmpty {
+            let R = SP * 3
+            let c0 = max(0, Int((cursor.x - R) / SP)), c1 = min(cols - 1, Int((cursor.x + R) / SP))
+            let r0 = max(0, Int((cursor.y - R) / SP)), r1 = min(rows - 1, Int((cursor.y + R) / SP))
+            if c0 <= c1, r0 <= r1 {
+                for cy in r0...r1 { for cx in c0...c1 {
+                    trailCells[cy * cols + cx] *= 1 - min(1, cursor.drag * dt * 6)
+                } }
+            }
+        }
         // The water standing along the bottom edge evaporates too. Nothing
         // took it away before: measured, a pool left by a shower was still
         // there after three hours of dry afternoon. Same physical rate as the
@@ -2617,6 +2671,19 @@ final class SceneSimulation {
                 // the rain has stopped.
                 d.r = max(d.r * (1 - dt * 0.10) - dt * SP * 0.03 * evaporation, SP * 0.02)
             }
+            // ---- DRAG: a finger across the glass smears the water with it.
+            if cursor.drag > 0.02 && d.ride < 0 {
+                let ddx = d.x - cursor.x, ddy = d.y - cursor.y
+                let R = SP * 4
+                let dist = (ddx * ddx + ddy * ddy).squareRoot()
+                if dist < R {
+                    let k = cursor.drag * (1 - dist / R)
+                    d.x += cursor.vx * dt * 0.55 * k
+                    d.y += cursor.vy * dt * 0.55 * k
+                    if !d.falling && k > 0.3 { d.falling = true }
+                }
+            }
+
             // ---- running along an edge
             //
             // Held on the top edge of the widget it met, moving toward the

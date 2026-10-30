@@ -23,7 +23,7 @@ import AppKit
 /// A rectangle water can land on, in PIXEL coordinates with y increasing
 /// downward — matching the simulation and the shader, not AppKit.
 struct Surface {
-    enum Kind: Int32 { case menuBar = 0, dock = 1, clock = 2, loginBox = 3, widget = 4 }
+    enum Kind: Int32 { case menuBar = 0, dock = 1, clock = 2, loginBox = 3, widget = 4, window = 5 }
     var x: Float, y: Float, w: Float, h: Float
     var kind: Kind
 
@@ -104,6 +104,11 @@ struct SurfaceMaterial {
             // face before it finds an edge, so the film gets deep and the run
             // down the front is continuous rather than a series of drips.
             retention = 1.35; shed = 0.80; beadiness = 0.70; rebound = 0.85
+        case .window:
+            // An app window: a big flat slab with a sharp top edge, standing in
+            // front of the wall. Wide like a widget, so it holds a little, but
+            // its top is a thin bezel rather than a panel, so it sheds sooner.
+            retention = 0.90; shed = 1.05; beadiness = 0.75; rebound = 0.95
         case .menuBar:
             // Not a ledge. It is flush with the top of the display, so it has no
             // top face to collect anything and only an underside to hang from.
@@ -279,13 +284,100 @@ enum Furniture {
             }
         }
         guard options.widgets else { return out }
-        // Desktop widgets. macOS does not publish their positions, so these
-        // come from config — populated by hand today, and the place a
-        // screenshot-derived detector would write to later.
-        out.append(contentsOf: widgets.map {
+        // Desktop widgets: read LIVE from the window list when macOS lists them
+        // (see `liveWidgets`), and only otherwise from what was placed by hand.
+        let placed = liveWidgets(on: screen) ?? widgets
+        out.append(contentsOf: placed.map {
             Surface(x: $0.x * W, y: $0.y * H, w: $0.w * W, h: $0.h * H,
                     kind: .widget, wetness: $0.wetness)
         })
+        // App windows: the layer above the widgets. Whatever of their edges is
+        // exposed over the wall is a ledge like any other — rain lands on top,
+        // water runs along and drips off the bottom, snow settles. The parts
+        // behind other windows are drawn behind them, so they need no special
+        // case.
+        out.append(contentsOf: liveWindows(on: screen).map {
+            Surface(x: $0.x * W, y: $0.y * H, w: $0.w * W, h: $0.h * H, kind: .window)
+        })
+        return out
+    }
+
+    // MARK: Widgets, found rather than placed
+    //
+    // The comment this replaces said "macOS does not publish their positions",
+    // and the Elements pane exists because of it: a screenshot, a detector, and
+    // dragging rectangles by hand. It turns out the window list does publish
+    // them. Every desktop widget is its own window owned by "Notification
+    // Center" at a desktop-level window layer (below zero, where app windows
+    // are at zero and up), with its exact bounds — and its name, "Forecast",
+    // "List", "Daily Overview". Bounds need no Screen Recording permission.
+    //
+    // So the furniture follows the widgets wherever they are moved, added or
+    // removed, with nothing to set up. Read every furniture refresh (two
+    // seconds); the last good answer is kept if a read comes back empty, so a
+    // momentary gap does not wipe the water off every widget. Nil when nothing
+    // has ever been found, which falls back to the hand-placed rectangles.
+
+    private static var lastLive: [CGDirectDisplayID: [WidgetRect]] = [:]
+
+    static func liveWidgets(on screen: NSScreen) -> [WidgetRect]? {
+        let id = (screen.deviceDescription[NSDeviceDescriptionKey("NSScreenNumber")] as? NSNumber)?
+            .uint32Value ?? 0
+        guard let list = CGWindowListCopyWindowInfo([.optionOnScreenOnly], kCGNullWindowID)
+                as? [[String: Any]] else { return lastLive[id] }
+        // Window bounds are global, top-left origin at the primary display;
+        // NSScreen frames are bottom-left. Convert the screen into the former.
+        let primaryH = NSScreen.screens.first?.frame.height ?? screen.frame.height
+        let f = screen.frame
+        let top = primaryH - f.maxY
+        var out: [WidgetRect] = []
+        for w in list {
+            guard (w[kCGWindowOwnerName as String] as? String) == "Notification Center",
+                  let layer = w[kCGWindowLayer as String] as? Int, layer < 0,
+                  let b = w[kCGWindowBounds as String] as? [String: Double],
+                  let x = b["X"], let y = b["Y"], let bw = b["Width"], let bh = b["Height"],
+                  bw >= 60, bh >= 60, bw < f.width * 0.9, bh < f.height * 0.9 else { continue }
+            // On this screen?
+            let cx = x + bw / 2 - f.minX, cy = y + bh / 2 - top
+            guard cx >= 0, cx <= f.width, cy >= 0, cy <= f.height else { continue }
+            // The window carries a few points of margin round the visible
+            // widget; trim it so splashes land on the widget's real edge.
+            let inset = 4.0
+            out.append(WidgetRect(x: Float((x - f.minX + inset) / f.width),
+                                  y: Float((y - top + inset) / f.height),
+                                  w: Float((bw - 2 * inset) / f.width),
+                                  h: Float((bh - 2 * inset) / f.height)))
+        }
+        if out.isEmpty { return lastLive[id] }
+        out.sort { ($0.y, $0.x) < ($1.y, $1.x) }
+        lastLive[id] = out
+        return out
+    }
+
+    /// Ordinary app windows on this screen, from the same window list: layer 0
+    /// (normal windows), visible, a sensible size, not Elemental's own, and at
+    /// most a dozen, front-most first. Normalised to the screen like widgets.
+    static func liveWindows(on screen: NSScreen) -> [WidgetRect] {
+        guard let list = CGWindowListCopyWindowInfo([.optionOnScreenOnly, .excludeDesktopElements],
+                                                    kCGNullWindowID) as? [[String: Any]] else { return [] }
+        let primaryH = NSScreen.screens.first?.frame.height ?? screen.frame.height
+        let f = screen.frame
+        let top = primaryH - f.maxY
+        let me = ProcessInfo.processInfo.processIdentifier
+        var out: [WidgetRect] = []
+        for w in list {
+            guard out.count < 12,
+                  (w[kCGWindowLayer as String] as? Int) == 0,
+                  (w[kCGWindowOwnerPID as String] as? Int32) != me,
+                  let alpha = w[kCGWindowAlpha as String] as? Double, alpha > 0.3,
+                  let b = w[kCGWindowBounds as String] as? [String: Double],
+                  let x = b["X"], let y = b["Y"], let bw = b["Width"], let bh = b["Height"],
+                  bw >= 160, bh >= 100 else { continue }
+            let cx = x + bw / 2 - f.minX, cy = y + bh / 2 - top
+            guard cx >= 0, cx <= f.width, cy >= 0, cy <= f.height else { continue }
+            out.append(WidgetRect(x: Float((x - f.minX) / f.width), y: Float((y - top) / f.height),
+                                  w: Float(bw / f.width), h: Float(bh / f.height)))
+        }
         return out
     }
 

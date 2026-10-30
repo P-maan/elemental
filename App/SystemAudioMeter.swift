@@ -45,6 +45,7 @@
 import Foundation
 import CoreAudio
 import AudioToolbox
+import Accelerate
 
 final class SystemAudioMeter: @unchecked Sendable {
 
@@ -61,12 +62,8 @@ final class SystemAudioMeter: @unchecked Sendable {
 
     // ---- analysis state: touched only on `queue`
     private var sampleRate: Double = 48_000
-    private var lp: Float = 0
-    private var lp2: Float = 0          // 2 kHz: splits mids from highs
     private var env: Float = 0
     private var peak: Float = 1e-4
-    private var envMid: Float = 0, peakMid: Float = 1e-4
-    private var envHigh: Float = 0, peakHigh: Float = 1e-4
     private var bassAvg: Float = 0      // ~0.4 s average, the baseline a beat rises from
     private var lastBeat: CFAbsoluteTime = 0
     private var quietSince: CFAbsoluteTime?
@@ -174,8 +171,9 @@ final class SystemAudioMeter: @unchecked Sendable {
         running = false
         queue.async { [weak self] in
             guard let self else { return }
-            self.env = 0; self.lp = 0; self.lp2 = 0; self.envMid = 0; self.envHigh = 0
-            self.bassAvg = 0; self.quietSince = nil; self.latest = 0
+            self.env = 0; self.bassAvg = 0; self.quietSince = nil; self.latest = 0
+            self.bandEnv = [Float](repeating: 0, count: Self.bandCount)
+            self.ring = [Float](repeating: 0, count: 1024); self.fresh = 0
         }
     }
 
@@ -183,56 +181,118 @@ final class SystemAudioMeter: @unchecked Sendable {
 
     // MARK: Analysis — on `queue` only
 
+    // ---- spectrum: touched only on `queue`
+    static let bandCount = 24
+    private let fftN = 1024
+    private lazy var fftSetup: FFTSetup = vDSP_create_fftsetup(10, FFTRadix(kFFTRadix2))!
+    private lazy var hann: [Float] = {
+        var w = [Float](repeating: 0, count: fftN)
+        vDSP_hann_window(&w, vDSP_Length(fftN), Int32(vDSP_HANN_NORM))
+        return w
+    }()
+    private var ring = [Float](repeating: 0, count: 1024)
+    private var ringPos = 0
+    private var fresh = 0
+    private var bandEnv = [Float](repeating: 0, count: SystemAudioMeter.bandCount)
+    private var bandPeak = [Float](repeating: 1e-6, count: SystemAudioMeter.bandCount)
+
+    /// ALL OF IT, not only the bass. The first version split the signal into
+    /// three bands with two one-pole filters, and the wall answered mostly the
+    /// kick. Now every hop (~10 ms of new audio) runs a 1024-point FFT with a
+    /// Hann window and folds it into 24 bands spaced logarithmically from 40 Hz
+    /// to 16 kHz — the way an ear hears pitch — each with its own envelope and
+    /// its own slow peak, so the hats and the voice move as much as the kick
+    /// instead of being drowned by it. Bass, mids and highs and the beat are
+    /// derived from the same bands.
     private func analyse(_ list: UnsafePointer<AudioBufferList>) {
         let abl = UnsafeMutableAudioBufferListPointer(UnsafeMutablePointer(mutating: list))
-        let a = Float(1 - exp(-2 * Double.pi * 150 / sampleRate))
-        let a2 = Float(1 - exp(-2 * Double.pi * 2000 / sampleRate))
-        var sum: Float = 0, sumMid: Float = 0, sumHigh: Float = 0
-        var n = 0
-        // Float32 samples, interleaved or not: every channel of every buffer
-        // goes through the same filters, which is a mono sum in effect. Three
-        // bands from two one-pole low-passes: bass under 150 Hz, mids from
-        // there to 2 kHz, highs above — the kick, the voice, the hats.
+        // Mono, into the ring: interleaved buffers are averaged across their
+        // channels; non-interleaved ones arrive as one buffer per channel and
+        // are each added at half weight, which is a mono mix in either case.
+        let bufs = abl.count
         for buf in abl {
             guard let data = buf.mData else { continue }
-            let count = Int(buf.mDataByteSize) / MemoryLayout<Float>.size
+            let ch = max(1, Int(buf.mNumberChannels))
+            let frames = Int(buf.mDataByteSize) / MemoryLayout<Float>.size / ch
             let p = data.assumingMemoryBound(to: Float.self)
-            for i in 0..<count {
-                let x = p[i]
-                lp += a * (x - lp)
-                lp2 += a2 * (x - lp2)
-                let m = lp2 - lp, h = x - lp2
-                sum += lp * lp; sumMid += m * m; sumHigh += h * h
+            let w = 1 / Float(ch * max(1, bufs))
+            for f in 0..<frames {
+                var m: Float = 0
+                for c in 0..<ch { m += p[f * ch + c] }
+                if bufs > 1 && buf.mData != abl[0].mData {
+                    // a later channel buffer: add onto the samples just written
+                    let at = (ringPos - frames + f + fftN * 2) % fftN
+                    ring[at] += m * w
+                } else {
+                    ring[ringPos] = m * w
+                    ringPos = (ringPos + 1) % fftN
+                    fresh += 1
+                }
             }
-            n += count
         }
-        guard n > 0 else { return }
-        let rms = (sum / Float(n)).squareRoot()
-        let rmsMid = (sumMid / Float(n)).squareRoot()
-        let rmsHigh = (sumHigh / Float(n)).squareRoot()
+        guard fresh >= 512 else { return }
+        fresh = 0
+        spectrumHop()
+    }
 
-        // Envelopes: quick to rise, slower to fall, per buffer (~10 ms each).
-        // Highs fall faster than bass — a hat is short, a kick rings.
-        let rise: Float = 0.6, fall: Float = 0.07
-        env += (rms > env ? rise : fall) * (rms - env)
-        envMid += (rmsMid > envMid ? rise : 0.10) * (rmsMid - envMid)
-        envHigh += (rmsHigh > envHigh ? 0.75 : 0.18) * (rmsHigh - envHigh)
+    private func spectrumHop() {
+        let n = fftN, half = n / 2
+        // Oldest-first copy of the ring, windowed.
+        var x = [Float](repeating: 0, count: n)
+        for i in 0..<n { x[i] = ring[(ringPos + i) % n] * hann[i] }
+        var re = [Float](repeating: 0, count: half), im = [Float](repeating: 0, count: half)
+        var power = [Float](repeating: 0, count: half)
+        re.withUnsafeMutableBufferPointer { rp in
+            im.withUnsafeMutableBufferPointer { ip in
+                var split = DSPSplitComplex(realp: rp.baseAddress!, imagp: ip.baseAddress!)
+                x.withUnsafeBufferPointer { xp in
+                    xp.baseAddress!.withMemoryRebound(to: DSPComplex.self, capacity: half) {
+                        vDSP_ctoz($0, 2, &split, 1, vDSP_Length(half))
+                    }
+                }
+                vDSP_fft_zrip(fftSetup, &split, 1, 10, FFTDirection(FFT_FORWARD))
+                vDSP_zvmags(&split, 1, &power, 1, vDSP_Length(half))
+            }
+        }
 
-        // Slow peaks to normalise against: decay over about a minute, so a
-        // loud track does not leave a quiet one with nothing to show.
-        peak = max(env, peak * 0.99985, 1e-4)
-        peakMid = max(envMid, peakMid * 0.99985, 1e-4)
-        peakHigh = max(envHigh, peakHigh * 0.99985, 1e-4)
-        let lv = Double(min(1, env / peak))
-        let mid = Double(min(1, envMid / peakMid))
-        let high = Double(min(1, envHigh / peakHigh))
+        // Fold into log-spaced bands, 40 Hz to 16 kHz.
+        let B = Self.bandCount
+        let binHz = Float(sampleRate) / Float(n)
+        var bands = [Float](repeating: 0, count: B)
+        for k in 0..<B {
+            let f0 = 40 * pow(400, Float(k) / Float(B))
+            let f1 = 40 * pow(400, Float(k + 1) / Float(B))
+            let i0 = max(1, Int(f0 / binHz)), i1 = max(i0 + 1, min(half, Int(f1 / binHz) + 1))
+            var acc: Float = 0
+            for i in i0..<i1 { acc += power[i] }
+            bands[k] = (acc / Float(i1 - i0)).squareRoot()
+        }
+
+        // Envelope and normalisation per band: quick rise, ~150 ms fall
+        // (faster up top, where sounds are short), each against its own
+        // decaying peak — but never against less than a fraction of the
+        // loudest band, or a silent band would amplify its own noise.
+        let loudest = bandPeak.max() ?? 1e-6
+        var spec = [Float](repeating: 0, count: B)
+        for k in 0..<B {
+            let v = bands[k]
+            let fall: Float = k < 8 ? 0.12 : (k < 16 ? 0.18 : 0.26)
+            bandEnv[k] += (v > bandEnv[k] ? 0.6 : fall) * (v - bandEnv[k])
+            bandPeak[k] = max(bandEnv[k], bandPeak[k] * 0.9993, 1e-6)
+            spec[k] = min(1, bandEnv[k] / max(bandPeak[k], loudest * 0.08))
+        }
+
+        func mean(_ r: Range<Int>) -> Float { r.reduce(0) { $0 + spec[$1] } / Float(r.count) }
+        let bass = Double(mean(0..<6)), mid = Double(mean(6..<15)), high = Double(mean(15..<B))
+        let bassEnv = (bandEnv[0] + bandEnv[1] + bandEnv[2] + bandEnv[3] + bandEnv[4] + bandEnv[5]) / 6
+        env = bassEnv
+        peak = max(env, peak * 0.9993, 1e-6)
 
         let now = CFAbsoluteTimeGetCurrent()
-        latest = lv
+        latest = bass
 
-        // A BEAT: the bass jumping well above where it has been for the last
-        // half second, and loud enough to count, no closer than ~0.18 s apart.
-        bassAvg += 0.025 * (env - bassAvg)
+        // A BEAT: the bass jumping well above its half-second average.
+        bassAvg += 0.05 * (env - bassAvg)
         var beat = false
         if env > bassAvg * 1.35 && env > peak * 0.30 && now - lastBeat > 0.18 {
             beat = true
@@ -241,7 +301,7 @@ final class SystemAudioMeter: @unchecked Sendable {
 
         // A drop: quiet for three seconds, then back above three quarters.
         var drop = false
-        if env < peak * 0.35 && peak > 0.002 {
+        if env < peak * 0.35 && peak > 1e-4 {
             if quietSince == nil { quietSince = now }
         } else if env > peak * 0.75 {
             if let q = quietSince, now - q >= 3, now - lastDrop >= 40 {
@@ -251,14 +311,15 @@ final class SystemAudioMeter: @unchecked Sendable {
             quietSince = nil
         }
 
-        // Nothing playing: say nothing, so the wall settles instead of being
-        // fed a stream of zeros that keeps the frame rate up.
-        guard env > 0.0004 || envHigh > 0.0004 || drop else { return }
+        // Nothing playing: say nothing, so the wall settles.
+        let total = bands.reduce(0, +)
+        guard total > 1e-4 || drop else { return }
         guard drop || beat || now - lastPost >= 1.0 / 30 else { return }
         lastPost = now
+        let out = spec
         DispatchQueue.main.async { [weak self] in
             if drop { Pulse.shared.play(.drop) }
-            Pulse.shared.feedBands(bass: lv, mid: mid, high: high, beat: beat)
+            Pulse.shared.feedSpectrum(out, bass: bass, mid: mid, high: high, beat: beat)
             self?.onLevel?()
         }
     }

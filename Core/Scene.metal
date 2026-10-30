@@ -96,6 +96,12 @@ struct Uniforms {
     float pulseHigh;           // its highs, 0..1
     float beat;                // 1 at a detected beat, decaying in ~0.1 s
     float pulsePad;
+    // ---- a fifth block, 272 -> 304 bytes: the pointer dragging on the desktop
+    // (Cursor.swift). Pixels in this surface; drag 0..1. Mirrored by hand.
+    float cursorX, cursorY;
+    float cursorVX, cursorVY;
+    float drag;
+    float cursorPad0, cursorPad1, cursorPad2;
 };
 
 // Rain is rasterised at this multiple of the cell grid in each axis.
@@ -902,6 +908,57 @@ inline float2 astroXY(float alt, float az, float facing, float W, float H) {
     return float2((0.5f + relAz / 190.0f) * W, (1.0f - alt / 85.0f) * H);
 }
 
+// ---- Where the sun and moon are DRAWN. Every pass asks here, so a drag that
+// moves them moves them identically everywhere — the moon's detail pass must
+// land on the same cells as its coarse disc, or the two come apart.
+//
+// Played with by the pointer (Cursor.swift): the SUN IS DRAWN TOWARD YOU — it
+// leans a tenth of the way to a cursor dragging near it — and the MOON IS SHY,
+// sliding a little away from one that comes close.
+inline float2 sunScreen(constant Uniforms &U, float W, float H) {
+    float2 p = astroXY(U.sunAlt, U.sunAz, U.facingAz, W, H);
+    if (U.drag > 0.002f) {
+        float2 c = float2(U.cursorX, U.cursorY);
+        p += (c - p) * 0.10f * U.drag * smoothstep(H * 1.2f, 0.0f, length(c - p));
+    }
+    return p;
+}
+inline float2 moonScreen(constant Uniforms &U, float W, float H) {
+    float2 p = astroXY(U.moonAlt, U.moonAz, U.facingAz, W, H);
+    if (U.drag > 0.002f) {
+        float2 c = float2(U.cursorX, U.cursorY);
+        float2 d = p - c;
+        float r = min(W, H) * 0.10f, L = length(d);
+        p += (L > 1.0f ? d / L : float2(0.0f, -1.0f)) * r * 0.55f * U.drag
+           * smoothstep(r * 5.0f, r * 0.8f, L);
+    }
+    return p;
+}
+
+// ---- The music's full spectrum: 24 bands, 40 Hz to 16 kHz, log-spaced
+// (SystemAudioMeter). `t` runs from the lowest band at 0 to the highest at 1.
+inline float specAt(constant float *spec, float t) {
+    float f = saturate(t) * 23.0f;
+    int i = int(f);
+    return mix(spec[i], spec[min(i + 1, 23)], f - float(i));
+}
+
+/// How near the dragging pointer is, 0..1 times how alive the drag is, for a
+/// reach of `R` pixels — the falloff every drag reaction shares.
+inline float dragNear(constant Uniforms &U, float2 p, float R) {
+    if (U.drag < 0.002f) return 0.0f;
+    return U.drag * smoothstep(R, 0.0f, length(p - float2(U.cursorX, U.cursorY)));
+}
+
+/// How visible the stars are at all: dark enough, clear enough, clean enough.
+inline float starVisibility(constant Uniforms &U) {
+    float wet  = (U.code >= 51 && U.code <= 99) ? 0.35f : 0.0f;
+    float fogf = U.fogOn > 0.5f ? 0.45f : 0.0f;
+    float aq   = saturate((U.scAQI - 50.0f) / 200.0f);
+    return max(0.0f, 1.0f - U.covF / 0.7f) * saturate((-U.sunAlt - 6.0f) / 10.0f)
+         * (1.0f - aq * 0.45f) * (1.0f - wet) * (1.0f - fogf);
+}
+
 // How much of the dome sits behind something you cannot see the sun through.
 //
 // Lives here rather than inline in cellPass because the rainbow needs the same
@@ -1167,6 +1224,7 @@ fragment CellOut cellPass(VOut in [[stage_in]],
                          constant int2      *colIndex [[buffer(4)]],  // per column: (start, count)
                          constant BoltPt    *bolt     [[buffer(5)]],
                          constant float     *edgeArr  [[buffer(6)]],
+                         constant float     *spec     [[buffer(7)]],
                          texture2d<float>    streaks2 [[texture(0)]])
 {
     int ix = int(in.pos.x), iy = int(in.pos.y);
@@ -1189,6 +1247,11 @@ fragment CellOut cellPass(VOut in [[stage_in]],
     float sec   = U.time;
     float sAlt  = U.sunAlt;
     float dotPh = cellPhase(idx);
+    // The music under THIS column: the spectrum laid across the wall, lowest
+    // notes on the left, highest on the right, so the whole picture is an
+    // analyser without looking like one. And how near a dragging pointer is.
+    float specX = specAt(spec, cxp / max(W, 1.0f));
+    float near  = dragNear(U, float2(cxp, cyp), SP * 9.0f);
 
     float covF     = U.covF;
     // Opaque cover: how much of the sky is behind something you cannot see blue
@@ -1201,8 +1264,8 @@ fragment CellOut cellPass(VOut in [[stage_in]],
     float aqiF     = U.aqiF, smokeF = U.smokeF;
     float skyBrAmt = U.skyBrAmt;
 
-    float2 sunP  = astroXY(U.sunAlt,  U.sunAz,  U.facingAz, W, H);
-    float2 moonP = astroXY(U.moonAlt, U.moonAz, U.facingAz, W, H);
+    float2 sunP  = sunScreen(U, W, H);
+    float2 moonP = moonScreen(U, W, H);
     float  moonR = min(W, H) * 0.10f;
     float  sunDiscR = min(W, H) * 0.05f;
     bool   moonAbove = U.moonAlt > 0.0f;
@@ -1335,7 +1398,7 @@ fragment CellOut cellPass(VOut in [[stage_in]],
         // Smaller than it was: every kind of weather now answers the music in
         // its own way (the MUSIC notes below), and this is only the common
         // floor under them.
-        L += U.pulse * (3.0f + 4.0f * yy) * sw;
+        L += (0.4f * U.pulse + 0.6f * specX) * (3.0f + 4.0f * yy) * sw;
     }
 
     // humidity haze
@@ -1401,6 +1464,8 @@ fragment CellOut cellPass(VOut in [[stage_in]],
         float fib = 0.5f + 1.2f * deckField(cxp, cyp, W, H, U.facingAz, 8.0f, 2.6f, 4.5f,
                                             U.windDir, max(U.wind, 12.0f), sec + 900.0f);
         highAmt = saturate(fib * U.cloudHigh * veil * 1.25f - 0.18f);
+        // DRAG: high cloud is a veil, and a finger through it parts it.
+        highAmt *= 1.0f - 0.8f * near;
     }
 
     // Mid deck: banded, moderately opaque.
@@ -1417,6 +1482,7 @@ fragment CellOut cellPass(VOut in [[stage_in]],
         midN = 0.5f + 1.1f * deckField(cxp, cyp, W, H, U.facingAz, 3.0f, 1.3f, 2.4f,
                                        U.windDir, U.wind, sec + 400.0f);
         midAmt = saturate(midN * U.cloudMid * band * 1.35f - 0.22f);
+        midAmt *= 1.0f - 0.85f * near;
     }
 
     // Low deck: the dense lid hanging from the top.
@@ -1490,6 +1556,9 @@ fragment CellOut cellPass(VOut in [[stage_in]],
 
         lowThick = lowK * (0.45f + 0.55f * lowD2)
                  * min(1.0f, 0.35f + U.cloudLow) * lowDen;
+        // DRAG: the pointer opens a hole in the deck as it passes, like a
+        // finger drawn through mist, and the sky shows through behind it.
+        lowThick *= 1.0f - 0.9f * near;
         lowAmt   = lowThick * nightCloudDim;
     }
 
@@ -1574,6 +1643,9 @@ fragment CellOut cellPass(VOut in [[stage_in]],
         // MUSIC, clear sky: the bass drives the ripple (above); the highs make
         // the sun's own glow glint, tight around the disc.
         glow *= 1.0f + 0.6f * U.pulseHigh * ripVis * fexp(-d * invSunR * 2.0f);
+        // MUSIC: the ripple IS the spectrum, laid out radially — the rings
+        // nearest the sun answer the low notes, the outer ones the high.
+        rip *= 1.0f + 2.4f * specAt(spec, d / max(H * 0.9f, 1.0f));
         L += glow * 58.0f + (rip > 0.0f ? rip * 46.0f : 0.0f);
         float3 sc = sunTint(sAlt, aqiF);
         float ww = min(1.0f, (glow * 1.6f + (rip > 0.0f ? rip * 0.5f : 0.0f)) * sunDim);
@@ -1650,8 +1722,12 @@ fragment CellOut cellPass(VOut in [[stage_in]],
                     // a beat, each by its own amount so the sky sparkles rather
                     // than flashing as one — and ride the highs between beats.
                     float sw = fract(float(si) * 0.618034f + 0.11f);
-                    twinkle += U.beat * (0.9f + 1.6f * sw) + U.pulseHigh * 0.6f * sw;
-                    L += starVis * stars[si].br * 55.0f * twinkle * seeThrough
+                    twinkle += U.beat * (0.9f + 1.6f * sw)
+                             + specAt(spec, sp.x / max(W, 1.0f)) * 0.8f * sw
+                             // DRAG: a star the pointer passes near is tickled.
+                             + 2.0f * dragNear(U, sp, SP * 10.0f);
+                    // Brighter than it was (55): the stars were hard to find.
+                    L += starVis * stars[si].br * 85.0f * twinkle * seeThrough
                        * max(0.0f, 1.0f - sqrt(ddx * ddx + ddy * ddy));
                 }
             }
@@ -1666,6 +1742,21 @@ fragment CellOut cellPass(VOut in [[stage_in]],
             float dist = length(float2(cxp, cyp) - moonP);
             float band = fexp(-abs(dist - ringR) / max(SP * 0.9f, 1.0f));
             L += band * sqrt(U.beat) * 70.0f * seeThrough * (1.0f - aqiF * 0.4f);
+        }
+        // MUSIC: a circular analyser round the moon's rim — one bar per band,
+        // the low notes at the top, the high ones meeting at the bottom, each
+        // reaching out as far as its band is loud. Drawn in whole cells, so it
+        // is mosaic, not a graph laid over it.
+        if (moonAbove) {
+            float2 dm = float2(cxp, cyp) - moonP;
+            float rr = length(dm);
+            if (rr > moonR * 1.04f && rr < moonR * 1.7f) {
+                float t = abs(atan2(dm.x, -dm.y)) / M_PI_F;      // 0 top .. 1 bottom
+                float v = specAt(spec, t);
+                float reach = moonR * (1.06f + 0.55f * v);
+                if (v > 0.05f && rr < reach)
+                    L += (30.0f + 60.0f * v) * seeThrough * (1.0f - (rr - moonR) / (reach - moonR + 1.0f) * 0.6f);
+            }
         }
         float mx = cxp - moonP.x, my = cyp - moonP.y;
         float md2 = mx * mx + my * my;
@@ -1880,7 +1971,7 @@ fragment CellOut cellPass(VOut in [[stage_in]],
         float rim = highAmt * bodyLight;                            // diffuser law
         L += highAmt * (28.0f + 34.0f * skyBrAmt) + rim * 96.0f;
         // MUSIC, high cloud: the strands catch the mids, brightest along them.
-        L += highAmt * U.pulseMid * 26.0f;
+        L += highAmt * specX * 26.0f;
         float3 hc = mix(float3(186.0f, 198.0f, 220.0f),
                         float3(236.0f, 242.0f, 252.0f), saturate(skyBrAmt + rim));
 
@@ -2008,12 +2099,13 @@ fragment CellOut cellPass(VOut in [[stage_in]],
         // thunderhead glows from the inside — strongest in its thick billows,
         // in broad bands rolling across it with the wind; the mids catch its
         // ragged edges.
-        if (U.pulse > 0.002f || U.pulseMid > 0.002f) {
+        if (U.pulse > 0.002f || specX > 0.002f) {
             float cwd = crossWindKmh(U.wind, U.windDir, U.facingAz);
             float roll = 0.5f + 0.5f * sin(cxp * 0.0035f + cyp * 0.0012f
                                            - sec * (1.4f + 0.04f * cwd));
-            L += lowAmt * U.pulse * (10.0f + 38.0f * saturate(lowN)) * (0.4f + 0.6f * roll);
-            L += rim * U.pulseMid * 44.0f;
+            L += lowAmt * (0.5f * U.pulse + 0.5f * specX) * (10.0f + 38.0f * saturate(lowN))
+               * (0.4f + 0.6f * roll);
+            L += rim * specX * 44.0f;
         }
         float a = lowAmt * 0.97f;
         cr += (cc.r - cr) * a; cg += (cc.g - cg) * a; cb += (cc.b - cb) * a;
@@ -2113,9 +2205,9 @@ fragment CellOut cellPass(VOut in [[stage_in]],
             bool snowy = (pf > 4.5f && pf < 7.5f);
             if (snowy) {
                 float sp = cellPhase(idx + uint(floor(sec * 9.0f)) * 3571u) / 6.28318f;
-                if (sp < U.pulseHigh * 0.45f) L += kx * 70.0f;
+                if (sp < specX * 0.5f) L += kx * 70.0f;
             } else {
-                L += kx * bright * (0.55f * U.pulseHigh + 0.9f * U.beat);
+                L += kx * bright * (0.65f * specX + 0.9f * U.beat);
             }
             rc = mix(rc, float3(252.0f, 250.0f, 245.0f), saturate(bodyLight * 0.8f));
             float a = kx * alpha;
@@ -2126,7 +2218,8 @@ fragment CellOut cellPass(VOut in [[stage_in]],
 
     // fog
     if (fog) {
-        float fogD = max(0.3f, 1.0f - U.vis / 5000.0f);
+        // DRAG: wiped clear along the pointer, like a fogged window.
+        float fogD = max(0.3f, 1.0f - U.vis / 5000.0f) * (1.0f - 0.85f * near);
         // Banks of fog drifting with the wind — wide, low, soft — rather than
         // horizontal stripes rolling vertically on a fixed clock.
         float cw = crossWindKmh(U.wind, U.windDir, U.facingAz);
@@ -2134,7 +2227,7 @@ fragment CellOut cellPass(VOut in [[stage_in]],
                                     y * 0.0048f + sec * 0.004f) + 13.0f);
         L += fogD * (46.0f + 80.0f * bank);
         // MUSIC, fog: the banks breathe on the bass, the thick ones most.
-        L += fogD * U.pulse * (14.0f + 40.0f * saturate(bank + 0.5f));
+        L += fogD * (0.5f * U.pulse + 0.5f * specX) * (14.0f + 40.0f * saturate(bank + 0.5f));
         float fw = fogD * 0.7f;
         if (fw > w) { w = fw; cr = 170.0f; cg = 175.0f; cb = 185.0f; }
     }
@@ -2641,6 +2734,8 @@ constant float2 RING[8] = {
 
 fragment float4 heightPass(VOut in [[stage_in]],
                            constant Uniforms &U     [[buffer(0)]],
+                           constant Star     *stars [[buffer(2)]],
+                           constant float    *spec  [[buffer(7)]],
                            texture2d<float>   cells [[texture(0)]],
                            texture2d<float>   aux   [[texture(1)]])
 {
@@ -2781,9 +2876,43 @@ fragment float4 heightPass(VOut in [[stage_in]],
     // wasted work and a chance for the DDA and the occlusion to disagree.
     if (U.splayAmt > 0.001f) h *= 1.0f + cellJit(floor(p), 0.0f) * U.splayAmt * 0.55f;
 
-    // MUSIC, in every scene: the wall itself lifts on the bass — the tallest
-    // blocks most, so the picture swells rather than the grid jumping.
-    h *= 1.0f + 0.18f * U.pulse * h;
+    // ---- MUSIC, in every scene: the wall is an analyser. Each column's blocks
+    // lift with the band under it — lowest notes on the left, highest on the
+    // right — tallest blocks most, so the picture swells into the spectrum
+    // rather than the grid jumping. A little of the bass under all of it.
+    {
+        float sx = specAt(spec, (p.x + 0.5f) / max(U.cols, 1.0f));
+        h *= 1.0f + (0.30f * sx + 0.10f * U.pulse) * (0.4f + 0.6f * h);
+    }
+
+    // ---- DRAG: PIN ART. The pointer presses the blocks under it in, and the
+    // ones just outside bulge up as if pushed aside, then everything springs
+    // back as the drag fades.
+    if (U.drag > 0.002f) {
+        float2 cc = float2(U.cursorX, U.cursorY) / max(U.cellSP, 1.0f);
+        float dd = length((floor(p) + 0.5f) - cc);
+        float R = 4.5f;
+        h *= 1.0f - 0.75f * U.drag * smoothstep(R, 0.0f, dd);
+        h += 0.14f * U.drag * fexp(-pow((dd - R) / (R * 0.35f), 2.0f) * 4.0f);
+    }
+
+    // ---- STARS STAND OUT OF THE WALL. A star's cell is split finer than
+    // anything around it in the present pass; here it is also raised above
+    // the dark sky's blocks, so the star catches the light as a real point.
+    float sv = starVisibility(U);
+    if (sv > 0.05f) {
+        float W = U.pixW, H = U.pixH;
+        float2 SPv = float2(W / max(U.cols, 1.0f), H / max(U.rows, 1.0f));
+        for (int si = 0; si < U.starCount; ++si) {
+            if (stars[si].br < 0.30f) continue;
+            float2 sp;
+            if (!starXY(stars[si], U.facingAz, W, H, sp)) continue;
+            if (all(floor(sp / SPv) == floor(p))) {
+                h = max(h, sv * (0.55f + 0.40f * stars[si].br));
+                break;
+            }
+        }
+    }
 
     return float4(saturate(h), 0.0f, 0.0f, 1.0f);
 }
@@ -3345,6 +3474,7 @@ inline float3 styleCell(float3 col, float2 cuv, float cellPx, float lum,
 fragment float4 presentPass(VOut in [[stage_in]],
                             constant Uniforms &U     [[buffer(0)]],
                             constant Star     *stars [[buffer(2)]],
+                            constant float    *spec  [[buffer(7)]],
                             texture2d<float>   cells [[texture(0)]],
                             texture2d<float>   glass [[texture(1)]],
                             texture2d<float>   streakFine [[texture(2)]],
@@ -3523,7 +3653,7 @@ fragment float4 presentPass(VOut in [[stage_in]],
 
     if (U.lowfx < 0.5f) {
         float W = U.pixW, H = U.pixH;
-        float2 moonP = astroXY(U.moonAlt, U.moonAz, U.facingAz, W, H);
+        float2 moonP = moonScreen(U, W, H);
         float  moonR = min(W, H) * 0.10f;
 
         // ---- The moon.
@@ -4032,33 +4162,47 @@ fragment float4 presentPass(VOut in [[stage_in]],
         // breaks down, the star occupies a single sub-cell of it, and the grid
         // resumes at full size immediately either side. Only the brighter ones,
         // only the upper half (roomstand.py:2643).
+        //
+        // Reworked: the stars were hard to see at all. More of them (any star
+        // of useful brightness, down to the last fifth of the sky above the
+        // horizon), split FINER than anything else on the wall — up to six by
+        // six, so a star is a true point — and SIZED by brightness: a faint
+        // star is one sub-cell, a bright one a small cross, the brightest a
+        // cross with soft corners. Tinted per star, blue-white to warm, as real
+        // stars are. Their cells also stand proud of the wall (heightPass).
         if (U.sunAlt < -6.0f && dc.depth == 1) {
-            float wet  = (U.code >= 51 && U.code <= 99) ? 0.35f : 0.0f;
-            float fogf = U.fogOn > 0.5f ? 0.45f : 0.0f;
-            float aq   = saturate((U.scAQI - 50.0f) / 200.0f);
-            float vis = max(0.0f, 1.0f - U.covF / 0.7f) * max(0.0f, (-U.sunAlt - 6.0f) / 14.0f)
-                      * (1.0f - aq * 0.45f) * (1.0f - wet) * (1.0f - fogf);
-            if (vis > 0.05f) {
+            float vis = starVisibility(U);
+            if (vis > 0.04f) {
                 for (int si = 0; si < U.starCount; ++si) {
-                    if (stars[si].br < 0.55f) continue;      // only ones worth the detail
+                    float br = stars[si].br;
+                    if (br < 0.30f) continue;
                     float2 sp;
                     if (!starXY(stars[si], U.facingAz, W, H, sp)) continue;
-                    if (sp.y > H * 0.5f) continue;
+                    if (sp.y > H * 0.82f) continue;
                     if (!all(floor(sp / SPv) == cid)) continue;  // not this cell: resume
-                    // A point source is maximum contrast; capped tighter than
-                    // the moon so a star stays a point rather than a patch.
-                    int depth = detailDepth(1.0f, 0.05f, SP, 4.0f, 4);
+                    int depth = detailDepth(1.0f, 0.05f, SP, 3.0f, 6);
                     if (depth < 2) break;
                     dc = splitCell(px, SPv, depth);
-                    if (all(floor(sp / dc.sizev) == dc.id)) {
-                        float tw = 0.72f + 0.28f * sin(U.time * 1.7f + float(si) * 2.4f);
-                        // MUSIC, a clear night: each star answers the highs at
-                        // its own strength, so the sky flickers like a
-                        // spectrum instead of brightening all at once.
-                        tw += U.pulseHigh * 0.8f * fract(float(si) * 0.618034f);
-                        float l = min(1.0f, vis * stars[si].br * tw);
-                        col = float3(l, l, min(1.0f, l * 1.06f));
-                        lum = l;
+                    float2 dd = abs(dc.id - floor(sp / dc.sizev));
+                    float man = dd.x + dd.y;
+                    // Its shape: core, arms for bright stars, corners for the
+                    // brightest.
+                    float shape = (man < 0.5f) ? 1.0f
+                                : (man < 1.5f && br > 0.62f) ? 0.55f * saturate((br - 0.62f) / 0.2f + 0.4f)
+                                : (dd.x < 1.5f && dd.y < 1.5f && br > 0.85f) ? 0.28f
+                                : 0.0f;
+                    if (shape > 0.0f) {
+                        float tw = 0.75f + 0.25f * sin(U.time * 1.7f + float(si) * 2.4f);
+                        // MUSIC: each star on its own band, by where it sits.
+                        float sw = fract(float(si) * 0.618034f + 0.11f);
+                        tw += U.beat * (0.6f + 1.0f * sw) + specAt(spec, sp.x / max(W, 1.0f)) * 0.7f
+                            // DRAG: tickled.
+                            + 1.4f * dragNear(U, sp, SP * 10.0f);
+                        float l = saturate((0.30f + 1.10f * vis * br * tw) * shape);
+                        float warm = fract(float(si) * 0.381966f);
+                        float3 tint = mix(float3(0.86f, 0.92f, 1.0f), float3(1.0f, 0.93f, 0.82f), warm);
+                        col = max(col, tint * l);
+                        lum = max(lum, l);
                     }
                     phase = cellPhase(uint(dc.id.y * U.cols * float(depth) + dc.id.x));
                     break;
@@ -4094,8 +4238,8 @@ fragment float4 presentPass(VOut in [[stage_in]],
     // over from the sun to the moon across a few degrees of altitude instead of
     // jumping direction between two frames.
     float2 hereP = (rel.cell + 0.5f) * SPv;
-    float2 sunSP  = astroXY(U.sunAlt,  U.sunAz,  U.facingAz, U.pixW, U.pixH);
-    float2 moonSP = astroXY(U.moonAlt, U.moonAz, U.facingAz, U.pixW, U.pixH);
+    float2 sunSP  = sunScreen(U, U.pixW, U.pixH);
+    float2 moonSP = moonScreen(U, U.pixW, U.pixH);
     float2 dS = sunSP - hereP, dM = moonSP - hereP;
 
     // From part way through civil twilight to a few degrees up. A smoothstep

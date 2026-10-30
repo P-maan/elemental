@@ -87,7 +87,7 @@ CORE=(Core/SceneState.swift Core/Astro.swift Core/Simulation.swift \
       Core/Renderer.swift Core/Config.swift Core/Weather.swift \
       Core/Furniture.swift Core/Observation.swift Core/Calibration.swift \
       Core/SkyImagery.swift Core/Updater.swift Core/ShaderSource.swift \
-      Core/Pulse.swift)
+      Core/Pulse.swift Core/Cursor.swift)
 
 # ---------------------------------------------------------------- deployment
 #

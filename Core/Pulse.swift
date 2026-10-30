@@ -66,6 +66,9 @@ final class Pulse: @unchecked Sendable {
         // A bare level (the endpoint) carries no bands of its own; lend the
         // others a share of it so every scene still answers.
         heldMid = held * 0.6; heldHigh = held * 0.4
+        for k in 0..<Self.bandCount {
+            heldSpectrum[k] = Float(held) * (1 - 0.6 * Float(k) / Float(Self.bandCount))
+        }
     }
 
     /// Music, split: bass (`level`), mids, highs, and whether this buffer is a
@@ -77,6 +80,30 @@ final class Pulse: @unchecked Sendable {
         held = max(0, min(1, bass)); heldMid = max(0, min(1, mid)); heldHigh = max(0, min(1, high))
         heldAt = now; lastSignal = now
         if beat { beatAt = now }
+    }
+
+    // ---- the full spectrum, 24 log-spaced bands, 40 Hz to 16 kHz
+    static let bandCount = 24
+    private var heldSpectrum = [Float](repeating: 0, count: Pulse.bandCount)
+
+    /// Music from the system-audio meter: every band, plus the three summaries
+    /// and the beat derived from them.
+    func feedSpectrum(_ s: [Float], bass: Double, mid: Double, high: Double, beat: Bool) {
+        lock.lock()
+        for k in 0..<min(s.count, Self.bandCount) { heldSpectrum[k] = max(0, min(1, s[k])) }
+        lock.unlock()
+        feedBands(bass: bass, mid: mid, high: high, beat: beat)
+    }
+
+    /// The spectrum for THIS frame, faded with the same hold as the level and
+    /// quieted under a message pattern. A bare level (the endpoint) lends every
+    /// band a share of itself, low bands most, so the wall still answers.
+    func spectrum() -> [Float] {
+        lock.lock(); defer { lock.unlock() }
+        let now = CFAbsoluteTimeGetCurrent()
+        let fade = Float(exp(-(now - heldAt) / 0.18))
+        let k: Float = (pattern != nil && pattern != .drop) ? 0.25 : 1
+        return heldSpectrum.map { $0 * fade * k }
     }
 
     /// Everything the shader reads, for THIS frame. A message pattern replaces
