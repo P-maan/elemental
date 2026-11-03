@@ -22,6 +22,18 @@ final class Pulse: @unchecked Sendable {
     private var heldMid: Double = 0
     private var heldHigh: Double = 0
     private var beatAt: CFAbsoluteTime = -100
+    private var economyOn = false
+
+    /// ON BATTERY (or Low Power): the music is felt slowly. The host does not
+    /// lift the frame rate for it, the meter posts a few times a second, and
+    /// levels are held over ~0.6 s instead of ~0.18 so they glide between
+    /// posts rather than flickering; no beat. A breath, a tinge and slow rays
+    /// read fine at five frames a second — a kick drum does not.
+    var economy: Bool {
+        get { lock.lock(); defer { lock.unlock() }; return economyOn }
+        set { lock.lock(); economyOn = newValue; lock.unlock() }
+    }
+    private var hold: Double { economyOn ? 0.6 : 0.18 }     // under `lock`
     private var pattern: Pattern?
     private var patternT0: CFAbsoluteTime = 0
     private var lastSignal: CFAbsoluteTime = 0
@@ -78,7 +90,9 @@ final class Pulse: @unchecked Sendable {
         lock.lock(); defer { lock.unlock() }
         let now = CFAbsoluteTimeGetCurrent()
         held = max(0, min(1, bass)); heldMid = max(0, min(1, mid)); heldHigh = max(0, min(1, high))
-        heldAt = now; lastSignal = now
+        heldAt = now
+        // Economy music does not count as motion: it must not lift the rate.
+        if !economyOn { lastSignal = now }
         if beat { beatAt = now }
     }
 
@@ -101,7 +115,7 @@ final class Pulse: @unchecked Sendable {
     func spectrum() -> [Float] {
         lock.lock(); defer { lock.unlock() }
         let now = CFAbsoluteTimeGetCurrent()
-        let fade = Float(exp(-(now - heldAt) / 0.18))
+        let fade = Float(exp(-(now - heldAt) / hold))
         let k: Float = (pattern != nil && pattern != .drop) ? 0.25 : 1
         return heldSpectrum.map { $0 * fade * k }
     }
@@ -113,11 +127,11 @@ final class Pulse: @unchecked Sendable {
         let bass = value()
         lock.lock(); defer { lock.unlock() }
         let now = CFAbsoluteTimeGetCurrent()
-        let fade = exp(-(now - heldAt) / 0.18)
+        let fade = exp(-(now - heldAt) / hold)
         let message = pattern != nil && pattern != .drop
         let k = message ? 0.25 : 1.0
         let mid = Float(heldMid * fade * k), high = Float(heldHigh * fade * k)
-        let beat = Float(exp(-(now - beatAt) / 0.11) * k)
+        let beat = economyOn ? 0 : Float(exp(-(now - beatAt) / 0.11) * k)
         return (bass, max(0, min(1, mid)), max(0, min(1, high)), max(0, min(1, beat)))
     }
 
@@ -130,7 +144,7 @@ final class Pulse: @unchecked Sendable {
     func value() -> Float {
         lock.lock(); defer { lock.unlock() }
         let now = CFAbsoluteTimeGetCurrent()
-        var v = held * exp(-(now - heldAt) / 0.18)
+        var v = held * exp(-(now - heldAt) / hold)
         if let p = pattern {
             let t = now - patternT0
             if t >= p.seconds { pattern = nil }
@@ -141,6 +155,14 @@ final class Pulse: @unchecked Sendable {
             else { v = p.value(t) }
         }
         return Float(max(0, min(1, v)))
+    }
+
+    /// A message pattern's value right now, music excluded; 0 when none plays.
+    func message() -> Float {
+        lock.lock(); defer { lock.unlock() }
+        guard let p = pattern, p != .drop else { return 0 }
+        let t = CFAbsoluteTimeGetCurrent() - patternT0
+        return t < p.seconds ? Float(max(0, min(1, p.value(t)))) : 0
     }
 
     /// Something is pulsing, or did within the last two seconds - the frame rate

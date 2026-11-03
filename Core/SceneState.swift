@@ -106,13 +106,20 @@ struct Uniforms {
     var pulseHigh: Float = 0
     /// A detected beat: 1 at the onset, decaying over about a tenth of a second.
     var beat: Float = 0
-    var pulsePad: Float = 0
+    /// A MESSAGE's pattern alone (Zo's notice, alert…), without the music —
+    /// so the sun's ripple can surge for a message and stay calm for a song.
+    /// Took what was pulsePad.
+    var message: Float = 0
     // ---- A fifth block, 272 -> 304 bytes: the pointer dragging on the
     // desktop, in this surface's pixels (Cursor.swift). Append only — trap 5.
     var cursorX: Float = -1e5, cursorY: Float = -1e5
     var cursorVX: Float = 0, cursorVY: Float = 0
     var drag: Float = 0
     var cursorPad0: Float = 0, cursorPad1: Float = 0, cursorPad2: Float = 0
+    // ---- A sixth block, 304 -> 320 bytes: the song's tinge (SongTint.swift),
+    // colour 0..255 and how much of it. Append only — trap 5.
+    var tintR: Float = 255, tintG: Float = 255, tintB: Float = 255
+    var tintAmt: Float = 0
 }
 
 struct GPUBreather { var ax, ay, R, per, s1, s2, ph, ph2: Float }

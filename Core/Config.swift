@@ -384,9 +384,13 @@ struct Config: Codable, Equatable {
     /// is only legible as motion; at five frames a second it falls in jumps.
     var lowPowerSmoothRain: Bool = true
 
-    /// The wall pulses with what this Mac is playing — system audio, bass only,
-    /// measured and thrown away. Only while plugged in; see SystemAudioMeter.
+    /// The wall moves with what this Mac is playing — system audio, measured
+    /// and thrown away, only while something plays; see SystemAudioMeter.
     var musicVisualizer: Bool = true
+
+    /// A very faint tinge of the playing song's album cover over the wall
+    /// (Music or Spotify only; see NowPlaying, SongTint).
+    var songTint: Bool = true
 
     /// The address the automation endpoint listens on, 127.0.0.1 only.
     var automationPort: Int = 7417
@@ -885,6 +889,7 @@ extension Config {
         lowPowerFPS        = max(4, min(30, c.lenient(.lowPowerFPS, d.lowPowerFPS)))
         lowPowerSmoothRain = c.lenient(.lowPowerSmoothRain, d.lowPowerSmoothRain)
         musicVisualizer    = c.lenient(.musicVisualizer, d.musicVisualizer)
+        songTint           = c.lenient(.songTint, d.songTint)
         automationPort     = c.lenient(.automationPort, d.automationPort)
         automationEnabled  = c.lenient(.automationEnabled, d.automationEnabled)
         lock               = c.lenient(.lock, d.lock)

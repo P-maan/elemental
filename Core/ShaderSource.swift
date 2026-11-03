@@ -100,13 +100,17 @@ struct Uniforms {
     float pulseMid;            // the music's mids, 0..1
     float pulseHigh;           // its highs, 0..1
     float beat;                // 1 at a detected beat, decaying in ~0.1 s
-    float pulsePad;
+    float message;             // a message pattern alone, no music (was pulsePad)
     // ---- a fifth block, 272 -> 304 bytes: the pointer dragging on the desktop
     // (Cursor.swift). Pixels in this surface; drag 0..1. Mirrored by hand.
     float cursorX, cursorY;
     float cursorVX, cursorVY;
     float drag;
     float cursorPad0, cursorPad1, cursorPad2;
+    // ---- a sixth block, 304 -> 320 bytes: the song's tinge (SongTint.swift).
+    // Colour 0..255, amount 0..~0.17. Mirrored by hand — trap 5.
+    float tintR, tintG, tintB;
+    float tintAmt;
 };
 
 // Rain is rasterised at this multiple of the cell grid in each axis.
@@ -1650,7 +1654,11 @@ fragment CellOut cellPass(VOut in [[stage_in]],
         // reach further out, and the glow breathe with it. Only where the sun is
         // already seen: `ripVis` and `sunSee` gate it exactly as they gate the
         // ripple itself, so an overcast never grows rings it cannot show.
-        float pz = U.pulse;
+        // A MESSAGE only. The music used to drive this too, and a bass line
+        // surging the ripple threefold is a set of rings pumping out of the
+        // sun — exactly the speaker-cone look that was asked away. The music
+        // has its own answer here: the rays below.
+        float pz = U.message;
         float rip = sin(d * 0.03f - sec * ripSpeed) * fexp(-d * invSunRip * (1.0f - 0.45f * pz))
                   * uvAmp * sunDim * sunV * ripVis * (1.0f + 3.2f * pz);
         glow *= 1.0f + 0.9f * pz * ripVis;
@@ -1658,6 +1666,27 @@ fragment CellOut cellPass(VOut in [[stage_in]],
         // the sun's own glow glint, tight around the disc.
         glow *= 1.0f + 0.6f * U.pulseHigh * ripVis * fexp(-d * invSunR * 2.0f);
         L += glow * 58.0f + (rip > 0.0f ? rip * 46.0f : 0.0f);
+        // MUSIC: SUN RAYS IN ASCENDING FREQUENCIES. Asked for 3 Nov 2026. A
+        // sunburst whose every ray is one band of the music, the lowest
+        // straight up and rising clockwise round the disc, each reaching out
+        // as far as its band is loud and falling back as it fades. Drawn per
+        // cell like everything else, so the rays are stepped mosaic beams, and
+        // gated exactly as the ripple is: only where the sun is actually seen.
+        // The whole burst turns very slowly so no ray is pinned in place.
+        if (U.pulse + U.pulseMid + U.pulseHigh > 0.01f) {
+            float ang = atan2(dx, -dy);                                  // 0 = up, clockwise
+            float t = fract(ang / (2.0f * M_PI_F) + 1.0f + sec * 0.003f);
+            const float N = 24.0f;
+            float fi = t * N, k = floor(fi), off = fi - k - 0.5f;
+            float v = specAt(spec, (k + 0.5f) / N);
+            float beam = fexp(-off * off / (2.0f * 0.13f * 0.13f));
+            // Out past the glare: within a few disc radii the glow is already
+            // near white and a ray there cannot be seen at all.
+            float reach = sunDiscR * (3.0f + 16.0f * v);
+            float along = smoothstep(sunDiscR * 1.2f, sunDiscR * 3.0f, d)
+                        * fexp(-max(d - sunDiscR * 2.0f, 0.0f) / reach);
+            L += beam * along * v * 260.0f * ripVis * sunV * sunDim;
+        }
         float3 sc = sunTint(sAlt, aqiF);
         float ww = min(1.0f, (glow * 1.6f + (rip > 0.0f ? rip * 0.5f : 0.0f)) * sunDim);
         // Same significance floor as the light pockets, and for the same reason:
@@ -2531,6 +2560,17 @@ fragment CellOut cellPass(VOut in [[stage_in]],
         float qq = max(0.0f, (fl + riser) * U.posterQ);
 
         g *= qq / max(qv, 1e-3f);
+    }
+
+    // ---- MUSIC: THE SONG'S TINGE. The colour of what is playing (its cover,
+    // or its sound — SongTint.swift), laid over the whole wall at a fraction.
+    // Luminance-preserving: the hue moves toward the song's, the brightness of
+    // every tile stays exactly what the weather made it.
+    if (U.tintAmt > 0.002f) {
+        float3 tc = float3(U.tintR, U.tintG, U.tintB);
+        const float3 Y = float3(0.2126f, 0.7152f, 0.0722f);
+        float3 tinted = tc * (dot(g, Y) / max(dot(tc, Y), 1e-3f));
+        g = mix(g, min(tinted, float3(255.0f)), U.tintAmt);
     }
 
     // ---- EDR. Give the clipped emissive excess back, up to the headroom the

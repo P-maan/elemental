@@ -41,6 +41,13 @@ final class Cursor: @unchecked Sendable {
         lastMove = now
     }
 
+    /// A drag happened in the last second and a half — the scene is being
+    /// played with and needs its full frame rate.
+    var active: Bool {
+        lock.lock(); defer { lock.unlock() }
+        return CFAbsoluteTimeGetCurrent() - lastMove < 1.5
+    }
+
     /// `frame` is the surface's screen in global top-left points.
     func state(in frame: CGRect, scale: CGFloat) -> State {
         lock.lock(); defer { lock.unlock() }

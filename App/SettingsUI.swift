@@ -1037,13 +1037,17 @@ struct GeneralPage: View {
         }
 
         SectionTitle("Music", info: "Uses what this Mac is playing — Spotify, Music, a video — not the "
-                     + "microphone. Only the strength of the bass is measured, about thirty times a second, "
-                     + "and nothing is recorded or kept. It runs only while the Mac is plugged in; on battery "
-                     + "it is fully off. macOS asks once for permission to read system audio.")
+                     + "microphone. Only how loud each part of the sound is gets measured, about thirty times a second, "
+                     + "and nothing is recorded or kept. It listens only while something is playing, so a quiet "
+                     + "Mac — on battery or not — carries nothing. macOS asks once for permission to read system audio.")
         RowsCard {
             ToggleRow(title: "Move with music",
                       subtitle: musicSubtitle,
                       isOn: store.binding(\.musicVisualizer))
+            ToggleRow(title: "Album cover tint",
+                      subtitle: "A very faint hint of the cover's colour while Music or Spotify plays. "
+                              + "macOS asks once to let Elemental read the player.",
+                      isOn: store.binding(\.songTint))
         }
 
         SectionTitle("Setup")
@@ -1061,7 +1065,7 @@ extension GeneralPage {
         if !store.config.musicVisualizer { return "Off." }
         if let e = app.music.lastError { return "Not running — \(e)." }
         if app.music.running { return "Listening to what this Mac is playing." }
-        return app.onACPower ? "Starting…" : "Paused on battery — plug in to use it."
+        return "Waiting for something to play."
     }
 }
 

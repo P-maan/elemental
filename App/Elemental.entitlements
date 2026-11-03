@@ -36,5 +36,10 @@
          nothing listens. -->
     <key>com.apple.security.network.client</key>
     <true/>
+
+    <!-- The cover of what Music or Spotify is playing, for the song's tinge
+         (NowPlaying.swift). Asked of an already-running player only. -->
+    <key>com.apple.security.automation.apple-events</key>
+    <true/>
 </dict>
 </plist>

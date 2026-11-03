@@ -401,7 +401,10 @@ final class WallpaperSurface: NSObject, CAMetalDisplayLinkDelegate {
         // When there is genuine motion — hydrometeors, lightning, a gale — it
         // runs at the user's maxFPS, pinned just as firmly; see below.
         // A pulse (Pulse.swift) is a beat; at six frames a second it is not one.
-        let moving = w.isPrecipitating || w.isThundering || w.wind > 30 || Pulse.shared.active
+        // So is a drag on the desktop: at six frames a second the clouds
+        // parting under the pointer arrive in visible jumps, a beat behind it.
+        let playing = Pulse.shared.active || Cursor.shared.active
+        let moving = w.isPrecipitating || w.isThundering || w.wind > 30 || playing
         let hi = moving ? ceiling : min(ceiling, preferred + 4)
 
         // LOW POWER: THE SAME PICTURE, DRAWN LESS OFTEN, AT A STEADY BEAT.
@@ -441,7 +444,7 @@ final class WallpaperSurface: NSObject, CAMetalDisplayLinkDelegate {
         if lowPower {
             var f = Float(max(4, min(30, config.lowPowerFPS)))
             if falling && config.lowPowerSmoothRain { f = max(f, min(20, Float(config.maxFPS))) }
-            if Pulse.shared.active { f = max(f, min(24, Float(config.maxFPS))) }
+            if playing { f = max(f, min(24, Float(config.maxFPS))) }
             link?.preferredFrameRateRange = CAFrameRateRange(minimum: f, maximum: f,
                                                              preferred: f)
             renderer.state.lowFX = false

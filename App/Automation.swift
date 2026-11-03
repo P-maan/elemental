@@ -100,7 +100,8 @@ enum AutomationSchema {
         Key(name: "liveWeather", type: "bool", detail: "Follow the real weather, or draw a clear calm day."),
         Key(name: "lowPower", type: "automatic | on | off", detail: "The Low Power preset."),
         Key(name: "lowPowerFPS", type: "int 4…30", detail: "Steady frame rate while Low Power is in force. Default 5 (about 1% CPU)."),
-        Key(name: "musicVisualizer", type: "bool", detail: "Pulse with the bass of what this Mac is playing, only while plugged in. Default true."),
+        Key(name: "musicVisualizer", type: "bool", detail: "Move with what this Mac is playing, only while something plays. Default true."),
+        Key(name: "songTint", type: "bool", detail: "A very faint tinge of the playing song's album cover (Music or Spotify). Default true."),
         Key(name: "lowPowerSmoothRain", type: "bool", detail: "Steady 20 fps in Low Power while rain or snow is falling. Default true."),
         Key(name: "syncLockScreen", type: "bool", detail: "Show the scene on the lock screen."),
         Key(name: "renderWhenOccluded", type: "bool", detail: "Keep drawing behind fullscreen apps."),
@@ -411,6 +412,7 @@ final class AutomationServer {
                 "surfaces": app.surfaceStats,
                 "music": ["enabled": c.musicVisualizer, "onAC": app.onACPower,
                           "running": app.music.running, "level": (app.music.level * 100).rounded() / 100,
+                          "economy": Pulse.shared.economy, "songTint": c.songTint,
                           "error": app.music.lastError ?? NSNull()] as [String: Any]]
     }
 

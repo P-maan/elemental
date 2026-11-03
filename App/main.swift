@@ -1006,6 +1006,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
 
     let music = SystemAudioMeter()
     let cursorTracker = CursorTracker()
+    let nowPlaying = NowPlaying()
     private var asleep = false
     private var powerSource: CFRunLoopSource?
 
@@ -1017,7 +1018,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     }
 
     private func startMusicVisualizer() {
-        music.onLevel = { [weak self] in self?.pulseStarted() }
+        // Economy music never lifts the rate, so there is nothing to nudge.
+        music.onLevel = { [weak self] in if !Pulse.shared.economy { self?.pulseStarted() } }
         // Plugging in or unplugging changes whether it should run. IOKit calls
         // a C function, so it posts a notification rather than capturing.
         if let src = IOPSNotificationCreateRunLoopSource({ _ in
@@ -1031,12 +1033,60 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         applyMusicSetting()
         // Dragging on the desktop plays with the scene. No permission needed:
         // a global monitor sees mouse events, only keys need Accessibility.
+        cursorTracker.onDrag = { [weak self] in self?.pulseStarted() }
         cursorTracker.start()
     }
 
-    /// Run only while the setting is on, the Mac is awake, and it is plugged in.
+    /// Run only while the setting is on, the Mac is awake, and something is
+    /// actually PLAYING. On battery too: the tap is cheap; what costs is an
+    /// aggregate device holding the audio hardware awake with nothing to hear,
+    /// and that is exactly what the silence gate removes. The tap is built
+    /// when another app starts sending sound to the output and torn down ten
+    /// seconds after the last one stops, so a quiet Mac carries no tap at all.
     func applyMusicSetting() {
-        music.update(shouldRun: config.musicVisualizer && !asleep && onACPower)
+        let wanted = config.musicVisualizer && !asleep
+        if wanted && audioGateTimer == nil {
+            audioGateTimer = Timer.scheduledTimer(withTimeInterval: 2, repeats: true) { [weak self] _ in
+                self?.pollAudioGate()
+            }
+            audioGateTimer?.tolerance = 0.5
+            pollAudioGate()
+        } else if !wanted {
+            audioGateTimer?.invalidate(); audioGateTimer = nil
+        }
+        let heard = CFAbsoluteTimeGetCurrent() - lastAudioAt < 10
+        music.update(shouldRun: wanted && heard)
+        applyMusicEconomy()
+    }
+
+    /// On battery or in Low Power the music is felt slowly and costs nothing
+    /// extra: no frame-rate lift, a meter that wakes a dozen times a second,
+    /// a cover checked every fifteen. See Pulse.economy.
+    private var musicEconomy: Bool { !onACPower || lowPowerActive }
+    private func applyMusicEconomy() {
+        let e = musicEconomy
+        Pulse.shared.economy = e
+        music.setEconomy(e)
+        nowPlaying.update(shouldRun: music.running && config.songTint, economy: e)
+    }
+
+    private var audioGateTimer: Timer?
+    private var lastAudioAt: CFAbsoluteTime = -100
+    private let audioGateQueue = DispatchQueue(label: "com.elemental.audiogate", qos: .utility)
+
+    /// Asks Core Audio — off the main thread, HAL calls can stall — whether any
+    /// other process is running output right now.
+    private func pollAudioGate() {
+        audioGateQueue.async { [weak self] in
+            let playing = SystemAudioMeter.othersPlaying()
+            DispatchQueue.main.async {
+                guard let self else { return }
+                if playing { self.lastAudioAt = CFAbsoluteTimeGetCurrent() }
+                self.music.update(shouldRun: self.config.musicVisualizer && !self.asleep
+                                  && CFAbsoluteTimeGetCurrent() - self.lastAudioAt < 10)
+                self.applyMusicEconomy()
+            }
+        }
     }
 
     // MARK: Remembering snow and ice on the furniture
@@ -1110,7 +1160,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         guard pulseTimer == nil else { return }
         surfaces.values.forEach { $0.applyFrameRate() }
         pulseTimer = Timer.scheduledTimer(withTimeInterval: 0.5, repeats: true) { [weak self] t in
-            guard let self, !Pulse.shared.active else { return }
+            guard let self, !Pulse.shared.active, !Cursor.shared.active else { return }
             t.invalidate(); self.pulseTimer = nil
             self.surfaces.values.forEach { $0.applyFrameRate() }
         }
@@ -1190,6 +1240,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
                     NSDeviceDescriptionKey("NSScreenNumber")] as? NSNumber else { continue }
             surfaces[CGDirectDisplayID(num.uint32Value)]?.apply(config: drawingConfig, screen: screen)
         }
+        applyMusicEconomy()
         NSLog("Elemental: Low Power preset %@", low ? "ON" : "off")
     }
 

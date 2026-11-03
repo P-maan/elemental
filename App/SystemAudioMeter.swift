@@ -26,9 +26,10 @@
 //
 //  ---- When it runs
 //
-//  Only on AC power, only while the setting is on, never asleep. On battery
-//  there is no tap at all — not a paused one. The host calls `update(...)`
-//  whenever any of that changes.
+//  While the setting is on and the Mac is awake — on battery too — and only
+//  while another app is actually playing (`othersPlaying`, polled by the host
+//  every two seconds). Silent for ten seconds and there is no tap at all, not
+//  a paused one. The host calls `update(...)` whenever any of that changes.
 //
 //  ---- Threading
 //
@@ -70,6 +71,32 @@ final class SystemAudioMeter: @unchecked Sendable {
     private var lastDrop: CFAbsoluteTime = 0
     private var lastPost: CFAbsoluteTime = 0
     private var latest: Double = 0
+
+    private var economy = false        // on `queue`
+
+    /// ON BATTERY: the cheapest way to still hear the music. The audio arrives
+    /// in 4096-frame buffers instead of 512 — about twelve wake-ups a second
+    /// instead of ninety-odd — with one spectrum per buffer, envelopes slowed
+    /// to about half a second, no beat and no drop, posted six times a second.
+    /// What reaches the wall is the shape of the song, not its kick: exactly
+    /// what still reads at Low Power's five frames a second.
+    func setEconomy(_ on: Bool) {
+        queue.async { [weak self] in
+            guard let self, self.economy != on else { return }
+            self.economy = on
+            self.applyBufferSize()
+        }
+    }
+
+    /// On `queue`. Harmless if the device refuses: the hop below still follows.
+    private func applyBufferSize() {
+        guard aggID != kAudioObjectUnknown else { return }
+        var frames = UInt32(economy ? 4096 : 512)
+        var addr = AudioObjectPropertyAddress(mSelector: kAudioDevicePropertyBufferFrameSize,
+                                              mScope: kAudioObjectPropertyScopeGlobal,
+                                              mElement: kAudioObjectPropertyElementMain)
+        AudioObjectSetPropertyData(aggID, &addr, 0, nil, UInt32(MemoryLayout<UInt32>.size), &frames)
+    }
 
     /// The most recent level, 0..1. For status only.
     var level: Double { queue.sync { latest } }
@@ -125,6 +152,7 @@ final class SystemAudioMeter: @unchecked Sendable {
             return
         }
         aggID = agg
+        queue.sync { applyBufferSize() }
 
         if let sr = Self.tapSampleRate(tap) { queue.sync { sampleRate = sr } }
 
@@ -220,8 +248,13 @@ final class SystemAudioMeter: @unchecked Sendable {
                 var m: Float = 0
                 for c in 0..<ch { m += p[f * ch + c] }
                 if bufs > 1 && buf.mData != abl[0].mData {
-                    // a later channel buffer: add onto the samples just written
-                    let at = (ringPos - frames + f + fftN * 2) % fftN
+                    // a later channel buffer: add onto the samples just written.
+                    // Only the last ring's worth survived the first channel;
+                    // adding older ones would wrap and pile onto it.
+                    if f < frames - fftN { continue }
+                    // Floored modulo: with 4096-frame buffers (economy) the
+                    // offset runs far below zero, and Swift's % keeps the sign.
+                    let at = ((ringPos - frames + f) % fftN + fftN) % fftN
                     ring[at] += m * w
                 } else {
                     ring[ringPos] = m * w
@@ -230,7 +263,7 @@ final class SystemAudioMeter: @unchecked Sendable {
                 }
             }
         }
-        guard fresh >= 512 else { return }
+        guard fresh >= (economy ? 4096 : 512) else { return }
         fresh = 0
         spectrumHop()
     }
@@ -272,13 +305,16 @@ final class SystemAudioMeter: @unchecked Sendable {
         // (faster up top, where sounds are short), each against its own
         // decaying peak — but never against less than a fraction of the
         // loudest band, or a silent band would amplify its own noise.
+        // The slow peak forgets over ~15 s whatever the hop.
+        let peakDecay: Float = economy ? 0.9945 : 0.9993
         let loudest = bandPeak.max() ?? 1e-6
         var spec = [Float](repeating: 0, count: B)
         for k in 0..<B {
             let v = bands[k]
-            let fall: Float = k < 8 ? 0.12 : (k < 16 ? 0.18 : 0.26)
-            bandEnv[k] += (v > bandEnv[k] ? 0.6 : fall) * (v - bandEnv[k])
-            bandPeak[k] = max(bandEnv[k], bandPeak[k] * 0.9993, 1e-6)
+            let fall: Float = economy ? 0.12 : (k < 8 ? 0.12 : (k < 16 ? 0.18 : 0.26))
+            let rise: Float = economy ? 0.45 : 0.6
+            bandEnv[k] += (v > bandEnv[k] ? rise : fall) * (v - bandEnv[k])
+            bandPeak[k] = max(bandEnv[k], bandPeak[k] * peakDecay, 1e-6)
             spec[k] = min(1, bandEnv[k] / max(bandPeak[k], loudest * 0.08))
         }
 
@@ -286,7 +322,7 @@ final class SystemAudioMeter: @unchecked Sendable {
         let bass = Double(mean(0..<6)), mid = Double(mean(6..<15)), high = Double(mean(15..<B))
         let bassEnv = (bandEnv[0] + bandEnv[1] + bandEnv[2] + bandEnv[3] + bandEnv[4] + bandEnv[5]) / 6
         env = bassEnv
-        peak = max(env, peak * 0.9993, 1e-6)
+        peak = max(env, peak * peakDecay, 1e-6)
 
         let now = CFAbsoluteTimeGetCurrent()
         latest = bass
@@ -294,7 +330,7 @@ final class SystemAudioMeter: @unchecked Sendable {
         // A BEAT: the bass jumping well above its half-second average.
         bassAvg += 0.05 * (env - bassAvg)
         var beat = false
-        if env > bassAvg * 1.35 && env > peak * 0.30 && now - lastBeat > 0.18 {
+        if !economy && env > bassAvg * 1.35 && env > peak * 0.30 && now - lastBeat > 0.18 {
             beat = true
             lastBeat = now
         }
@@ -304,7 +340,7 @@ final class SystemAudioMeter: @unchecked Sendable {
         if env < peak * 0.35 && peak > 1e-4 {
             if quietSince == nil { quietSince = now }
         } else if env > peak * 0.75 {
-            if let q = quietSince, now - q >= 3, now - lastDrop >= 40 {
+            if !economy, let q = quietSince, now - q >= 3, now - lastDrop >= 40 {
                 drop = true
                 lastDrop = now
             }
@@ -314,7 +350,7 @@ final class SystemAudioMeter: @unchecked Sendable {
         // Nothing playing: say nothing, so the wall settles.
         let total = bands.reduce(0, +)
         guard total > 1e-4 || drop else { return }
-        guard drop || beat || now - lastPost >= 1.0 / 30 else { return }
+        guard drop || beat || now - lastPost >= (economy ? 1.0 / 6 : 1.0 / 30) else { return }
         lastPost = now
         let out = spec
         DispatchQueue.main.async { [weak self] in
@@ -325,6 +361,33 @@ final class SystemAudioMeter: @unchecked Sendable {
     }
 
     // MARK: Helpers
+
+    /// Whether any OTHER process is sending audio to an output right now —
+    /// the silence gate the host polls. Our own process is skipped: the
+    /// aggregate device would otherwise keep the answer yes forever.
+    static func othersPlaying() -> Bool {
+        guard #available(macOS 14.2, *) else { return true }
+        let sys = AudioObjectID(kAudioObjectSystemObject)
+        var addr = AudioObjectPropertyAddress(mSelector: kAudioHardwarePropertyProcessObjectList,
+                                              mScope: kAudioObjectPropertyScopeGlobal,
+                                              mElement: kAudioObjectPropertyElementMain)
+        var size: UInt32 = 0
+        guard AudioObjectGetPropertyDataSize(sys, &addr, 0, nil, &size) == noErr, size > 0 else { return false }
+        var ids = [AudioObjectID](repeating: 0, count: Int(size) / MemoryLayout<AudioObjectID>.size)
+        guard AudioObjectGetPropertyData(sys, &addr, 0, nil, &size, &ids) == noErr else { return false }
+        let me = getpid()
+        for id in ids {
+            var pid: pid_t = 0
+            var ps = UInt32(MemoryLayout<pid_t>.size)
+            addr.mSelector = kAudioProcessPropertyPID
+            if AudioObjectGetPropertyData(id, &addr, 0, nil, &ps, &pid) == noErr, pid == me { continue }
+            var run: UInt32 = 0
+            var rs = UInt32(MemoryLayout<UInt32>.size)
+            addr.mSelector = kAudioProcessPropertyIsRunningOutput
+            if AudioObjectGetPropertyData(id, &addr, 0, nil, &rs, &run) == noErr, run != 0 { return true }
+        }
+        return false
+    }
 
     private static func defaultOutputUID() -> String? {
         var dev = AudioObjectID(kAudioObjectUnknown)

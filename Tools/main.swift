@@ -786,8 +786,20 @@ if let c = args["cursor"]?.split(separator: ",").compactMap({ Double($0) }), c.c
 // --bass/--mid/--high 0..1 and --beat: render the music reaction offline.
 // Fed right before the frames, so the short held levels have not decayed.
 if args["bass"] != nil || args["mid"] != nil || args["high"] != nil || args["beat"] != nil {
-    Pulse.shared.feedBands(bass: num("bass", 0), mid: num("mid", 0), high: num("high", 0),
-                           beat: args["beat"] != nil)
+    // A synthetic 24-band spectrum shaped by the three levels, with a little
+    // per-band wobble so it looks like music rather than three steps.
+    let b = Float(num("bass", 0)), m = Float(num("mid", 0)), h = Float(num("high", 0))
+    let spec: [Float] = (0..<Pulse.bandCount).map { k in
+        let lvl = k < 6 ? b : (k < 15 ? m : h)
+        return max(0, min(1, lvl * (0.65 + 0.35 * sin(Float(k) * 2.3) * sin(Float(k) * 0.7 + 1))))
+    }
+    Pulse.shared.feedSpectrum(spec, bass: num("bass", 0), mid: num("mid", 0), high: num("high", 0),
+                              beat: args["beat"] != nil)
+}
+// --tint r,g,b (0..255): the song's tinge at full strength, as if a cover
+// of that colour were playing.
+if let t = args["tint"]?.split(separator: ",").compactMap({ Float($0) }), t.count == 3 {
+    SongTint.shared.forced = SIMD3<Float>(t[0], t[1], t[2]) / 255
 }
 
 // --dryfor N: soak the pane for the warm-up, then stop the rain and run N more

@@ -935,9 +935,13 @@ final class ElementalRenderer {
         u.shadow = max(0, min(1, state.shadow))
         let pb = Pulse.shared.bands()
         u.pulse = pb.bass; u.pulseMid = pb.mid; u.pulseHigh = pb.high; u.beat = pb.beat
+        u.message = Pulse.shared.message()
         let spec = Pulse.shared.spectrum()
         let sp = spectrumBuf.contents().assumingMemoryBound(to: Float.self)
         for k in 0..<32 { sp[k] = k < spec.count ? spec[k] : 0 }
+        let tint = SongTint.shared.step(spectrum: spec)
+        u.tintR = tint.rgb.x * 255; u.tintG = tint.rgb.y * 255; u.tintB = tint.rgb.z * 255
+        u.tintAmt = tint.amount
         if cursorFrame.width > 0 {
             let c = Cursor.shared.state(in: cursorFrame, scale: cursorScale)
             u.cursorX = c.x; u.cursorY = c.y; u.cursorVX = c.vx; u.cursorVY = c.vy; u.drag = c.drag
