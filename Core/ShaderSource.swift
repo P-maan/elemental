@@ -2285,42 +2285,105 @@ fragment CellOut cellPass(VOut in [[stage_in]],
         if (qx * qx + qy * qy < SP * SP * 2.0f) L += 150.0f * sin(M_PI_F * a2);
     }
 
-    // ---- SIGNALS ON THE RAYS (Signals.swift). When Settings gives the rays
-    // sources — battery, CPU, Zo's reminders… — each ray is a GAUGE: it
-    // reaches out from the disc as far as its value and ends there, in its
-    // source's colour. From the sun by day and the moon by night, so the
-    // wall can be read at any hour. Drawn after the cloud, faded but never
-    // hidden by it: this is information, and an overcast must not erase a
-    // reminder. Ray 0 points straight up; the rest follow clockwise.
+    // ---- SIGNALS (Signals.swift): the elements as gauges. Each signal has a
+    // value 0..1 and a colour, and the sky shows it in whichever element is
+    // there to carry it — each in its own way, never one shape everywhere:
+    //
+    //   RAYS     the sun on screen and not under a deck: a ray from the disc,
+    //            as long as the value.
+    //   SHAFTS   daytime under an overcast, or the sun off screen (a fixed
+    //            heading looking away from it): light breaking down through
+    //            the cloud from the top of the wall, leaning away from where
+    //            the sun is; a shaft reaches as far down as the value.
+    //   RINGS    night, the moon on screen: a ring round the moon per signal,
+    //            lit clockwise from the top as far as the value, over a faint
+    //            track so the whole ring can be read.
+    //   COMETS   night with no moon to use (set, new, off screen): a comet per
+    //            signal across the upper sky, its tail as long as the value.
+    //
+    // Drawn after the cloud and faded by it, never hidden: a reminder must not
+    // vanish because it clouded over. Signal 0 is the first ray / the left
+    // shaft / the inner ring / the left comet.
     if (U.rayCount > 0.5f) {
+        int RC = min(int(U.rayCount + 0.5f), 12);
+        float N = float(RC);
+        float2 pc = float2(cxp, cyp);
         bool day = U.sunAlt > -4.0f;
-        if (day || moonAbove) {
-            float2 o = day ? sunP : moonP;
-            float r0 = day ? sunDiscR : moonR;
-            float ox = cxp - o.x, oy = cyp - o.y, od = sqrt(ox * ox + oy * oy);
-            int RC = min(int(U.rayCount + 0.5f), 12);
-            float N = float(RC);
-            float tt = fract(atan2(ox, -oy) / (2.0f * M_PI_F) + 1.0f + 0.5f / N);
-            float fi = tt * N;
-            int k = min(int(fi), RC - 1);
-            float off = fi - float(k) - 0.5f;
+        bool sunOn = day && all(sunP > float2(-0.02f) * float2(W, H)) && all(sunP < float2(1.02f) * float2(W, H));
+        bool moonOn = !day && moonAbove && U.moonIllum > 3.0f
+                   && all(moonP > float2(0.0f)) && all(moonP < float2(W, H));
+        int mode = (sunOn && deckOpaque(U) < 0.75f) ? 0 : (day ? 1 : (moonOn ? 2 : 3));
+        float sg = 0.0f;
+        int k = 0;
+        if (mode == 0) {
+            float ox = cxp - sunP.x, oy = cyp - sunP.y, od = sqrt(ox * ox + oy * oy);
+            float fi = fract(atan2(ox, -oy) / (2.0f * M_PI_F) + 1.0f + 0.5f / N) * N;
+            k = min(int(fi), RC - 1);
+            float off = fi - float(k) - 0.5f, v = spec[64 + k];
+            float base = sunDiscR * 1.1f, len = base + sunDiscR * (0.8f + 11.0f * v);
+            sg = fexp(-off * off / (2.0f * 0.09f * 0.09f))
+               * smoothstep(base, base + sunDiscR * 0.7f, od)
+               * (1.0f - smoothstep(len - SP * 1.5f, len, od)) * step(0.004f, v);
+        } else if (mode == 1) {
+            float cx = clamp(sunP.x, W * 0.3f, W * 0.7f);
+            float lean = clamp((cx - sunP.x) / max(W, 1.0f), -0.4f, 0.4f) * 0.35f;
+            float spacing = min(W * 0.6f / N, SP * 7.0f);
+            float x0 = cx - spacing * (N - 1.0f) * 0.5f;
+            float xs = cxp - lean * cyp;                     // into the shafts' own frame
+            k = clamp(int(round((xs - x0) / spacing)), 0, RC - 1);
             float v = spec[64 + k];
-            float3 col = float3(spec[76 + 3 * k], spec[77 + 3 * k], spec[78 + 3 * k]);
-            // Length in SUN-disc units from the body's rim, so a gauge reads
-            // the same from the moon (twice the sun's size) as from the sun.
-            float base = r0 * 1.1f;
-            float len = base + sunDiscR * (0.8f + 11.0f * v);
-            float s = fexp(-off * off / (2.0f * 0.09f * 0.09f))
-                    * smoothstep(base, base + sunDiscR * 0.7f, od)
-                    * (1.0f - smoothstep(len - SP * 1.5f, len, od))
-                    * step(0.004f, v);
+            float dist = abs(xs - (x0 + spacing * float(k)));
+            float wdt = SP * 0.8f + cyp * 0.015f;            // a shaft widens as it falls
+            float len = H * 0.85f * v;
+            sg = fexp(-dist * dist / (wdt * wdt) * 2.0f)
+               * (1.0f - smoothstep(len - SP * 1.5f, len, cyp)) * step(0.004f, v);
+        } else if (mode == 2) {
+            float ox = cxp - moonP.x, oy = cyp - moonP.y, od = sqrt(ox * ox + oy * oy);
+            float gap = max(SP * 1.3f, moonR * 0.22f);
+            float r0 = moonR * 1.35f;
+            float fk = (od - r0) / gap;
+            if (fk >= 0.0f && fk < N) {
+                k = int(fk);
+                float v = spec[64 + k];
+                float rk = r0 + gap * (float(k) + 0.5f);
+                float across = 1.0f - smoothstep(gap * 0.22f, gap * 0.40f, abs(od - rk));
+                float t = fract(atan2(ox, -oy) / (2.0f * M_PI_F) + 1.0f);
+                sg = across * (t < v ? 1.0f : 0.14f);
+            }
+        } else {
+            float2 dir = normalize(float2(-0.94f, -0.34f));  // tails stream up and to the left
+            for (int c = 0; c < RC; ++c) {
+                float v = spec[64 + c];
+                if (v < 0.004f) continue;
+                float2 head = float2(W * (0.12f + 0.76f * (float(c) + 0.5f) / N),
+                                     H * (0.16f + 0.18f * fract(float(c) * 0.618034f)));
+                float2 rel = pc - head;
+                float along = dot(rel, dir), perp = abs(dot(rel, float2(-dir.y, dir.x)));
+                float len = SP * 3.0f + v * W * 0.28f;
+                if (along < -SP * 1.5f || along > len) continue;
+                float a = saturate(along / len);
+                float wdt = SP * (0.9f + 0.7f * a);
+                float sc = fexp(-perp * perp / (wdt * wdt) * 2.0f) * (1.0f - a * 0.6f)
+                         + (length(rel) < SP * 1.3f ? 1.0f : 0.0f);
+                if (sc > sg) { sg = saturate(sc); k = c; }
+            }
+        }
+        if (sg > 0.002f) {
             float vis = mix(0.45f, 1.0f, seeThrough);
+            float3 col = float3(spec[76 + 3 * k], spec[77 + 3 * k], spec[78 + 3 * k]);
             // Carried by COLOUR more than light: by day the rays cross the
             // sun's white glare, where added brightness alone cannot be seen.
-            L += s * (day ? 30.0f : 20.0f) * vis;
-            float a = s * 0.85f * vis;
+            // At night the composite admits colour only in proportion to the
+            // cell's own light (max(0.25, lum/210)), so a dark gauge is a grey
+            // one: night gauges carry more light to keep their colour.
+            L += sg * (day ? 30.0f : 60.0f) * vis;
+            float a = sg * 0.85f * vis;
             float bc = day ? 245.0f : 200.0f;
-            if (a > w) { w = a; cr = col.r * bc; cg = col.g * bc; cb = col.b * bc; }
+            // BLENDED over whatever is there, not swapped in where it wins:
+            // under a full deck the cloud already claims the cell at w = 1,
+            // and a gauge that must out-weigh it never showed at all.
+            cr = mix(cr, col.r * bc, a); cg = mix(cg, col.g * bc, a); cb = mix(cb, col.b * bc, a);
+            w = max(w, a);
         }
     }
 
