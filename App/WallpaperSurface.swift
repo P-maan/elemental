@@ -197,6 +197,7 @@ final class WallpaperSurface: NSObject, CAMetalDisplayLinkDelegate {
         renderer.motionSpeed = config.motionSpeed
         renderer.playbackOnWake = config.playbackOnWake
         renderer.playbackMaxSeconds = config.playbackMaxSeconds
+        renderer.raySources = config.rays
         // The cursor arrives in global top-left points (the window list's
         // space); AppKit frames are bottom-left from the primary display.
         let primaryH = NSScreen.screens.first?.frame.height ?? frame.height

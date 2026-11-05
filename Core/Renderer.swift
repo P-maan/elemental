@@ -151,6 +151,8 @@ final class ElementalRenderer {
     /// in the cell, height and present passes.
     private var spectrumBuf: MTLBuffer!
     private var slowSpec = [Float](repeating: 0, count: Pulse.bandCount)
+    /// What each ray shows (Config.rays). Empty: the music.
+    var raySources: [String] = []
     private var slowSpecAt: CFAbsoluteTime = 0
 
     /// This surface's screen in global top-left points, and its scale, so the
@@ -358,7 +360,7 @@ final class ElementalRenderer {
     private func buildBuffers() {
         let opt: MTLResourceOptions = .storageModeShared
         uniformBuf  = device.makeBuffer(length: MemoryLayout<Uniforms>.stride, options: opt)
-        spectrumBuf = device.makeBuffer(length: MemoryLayout<Float>.stride * 64, options: opt)
+        spectrumBuf = device.makeBuffer(length: MemoryLayout<Float>.stride * 128, options: opt)
         breatherBuf = device.makeBuffer(length: MemoryLayout<GPUBreather>.stride * 3, options: opt)
         starBuf     = device.makeBuffer(length: MemoryLayout<GPUStar>.stride * Self.maxStars, options: opt)
         streakBuf   = device.makeBuffer(length: MemoryLayout<GPUStreak>.stride * Self.maxStreaks, options: opt)
@@ -949,6 +951,13 @@ final class ElementalRenderer {
         for k in 0..<Pulse.bandCount {
             slowSpec[k] += ease * ((k < spec.count ? spec[k] : 0) - slowSpec[k])
             sp[32 + k] = slowSpec[k]
+        }
+        // Slots 64..75: each SIGNAL ray's value; 76..111 its colour, rgb 0..1.
+        let rays = Signals.shared.resolve(raySources, music: (pb.bass, pb.mid, pb.high))
+        u.rayCount = Float(rays.count)
+        for (i, r) in rays.enumerated() {
+            sp[64 + i] = r.value
+            sp[76 + 3 * i] = r.rgb.x; sp[77 + 3 * i] = r.rgb.y; sp[78 + 3 * i] = r.rgb.z
         }
         let tint = SongTint.shared.step(spectrum: spec)
         u.tintR = tint.rgb.x * 255; u.tintG = tint.rgb.y * 255; u.tintB = tint.rgb.z * 255

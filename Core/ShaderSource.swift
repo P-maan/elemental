@@ -106,7 +106,8 @@ struct Uniforms {
     float cursorX, cursorY;
     float cursorVX, cursorVY;
     float drag;
-    float cursorPad0, cursorPad1, cursorPad2;
+    float rayCount;            // rays showing signals (Signals.swift); 0 = music. Was cursorPad0.
+    float cursorPad1, cursorPad2;
     // ---- a sixth block, 304 -> 320 bytes: the song's tinge (SongTint.swift).
     // Colour 0..255, amount 0..~0.17. Mirrored by hand — trap 5.
     float tintR, tintG, tintB;
@@ -1676,7 +1677,7 @@ fragment CellOut cellPass(VOut in [[stage_in]],
         // the rays grow and shrink with the song instead of flashing a few
         // segments at a time; and the burst holds still — it used to turn,
         // which with the flashing read as something chasing round the sun.
-        if (U.pulse + U.pulseMid + U.pulseHigh > 0.01f) {
+        if (U.rayCount < 0.5f && U.pulse + U.pulseMid + U.pulseHigh > 0.01f) {
             float ang = atan2(dx, -dy);                                  // 0 = up, clockwise
             float t = fract(ang / (2.0f * M_PI_F) + 1.0f);
             const float N = 24.0f;
@@ -1765,6 +1766,9 @@ fragment CellOut cellPass(VOut in [[stage_in]],
                     // a beat, each by its own amount so the sky sparkles rather
                     // than flashing as one — and ride the highs between beats.
                     float sw = fract(float(si) * 0.618034f + 0.11f);
+                    // A MESSAGE makes the whole sky shimmer, each star its
+                    // own amount — a moment you notice at night.
+                    twinkle += U.message * (0.8f + 1.6f * sw);
                     twinkle += U.beat * (0.45f + 0.9f * sw)
                              + specAt(spec, sp.x / max(W, 1.0f)) * 0.45f * sw
                              // DRAG: a star the pointer passes near is tickled.
@@ -1780,12 +1784,13 @@ fragment CellOut cellPass(VOut in [[stage_in]],
         // it with the bass and catches a little more on each beat, filled and
         // soft, as if the haze near it were thickening and thinning. The beat
         // itself is felt in the relief: the disc bulges toward you (heightPass).
-        if (moonAbove && (U.pulse > 0.01f || U.beat > 0.01f)) {
+        if (moonAbove && (U.pulse > 0.01f || U.beat > 0.01f || U.message > 0.01f)) {
             float dist = length(float2(cxp, cyp) - moonP);
             // A night sky sits where the tone ramp is steep: two levels here
             // lit a whole moon-sized patch of sky. A fraction of one is plenty.
             float halo = fexp(-max(dist - moonR, 0.0f) / (moonR * 0.35f));
-            L += halo * (0.35f * U.pulse + 0.5f * U.beat)
+            // A MESSAGE (Zo's notice, alert…) flares it properly: a moment.
+            L += halo * (0.35f * U.pulse + 0.5f * U.beat + 6.0f * U.message)
                * (0.35f + 0.65f * U.moonIllum) * seeThrough * (1.0f - aqiF * 0.4f);
         }
         float mx = cxp - moonP.x, my = cyp - moonP.y;
@@ -2278,6 +2283,45 @@ fragment CellOut cellPass(VOut in [[stage_in]],
         float hx = U.shootX + a2 * W * 0.26f, hy = U.shootY + a2 * W * 0.26f * 0.35f;
         float qx = cxp - hx, qy = cyp - hy;
         if (qx * qx + qy * qy < SP * SP * 2.0f) L += 150.0f * sin(M_PI_F * a2);
+    }
+
+    // ---- SIGNALS ON THE RAYS (Signals.swift). When Settings gives the rays
+    // sources — battery, CPU, Zo's reminders… — each ray is a GAUGE: it
+    // reaches out from the disc as far as its value and ends there, in its
+    // source's colour. From the sun by day and the moon by night, so the
+    // wall can be read at any hour. Drawn after the cloud, faded but never
+    // hidden by it: this is information, and an overcast must not erase a
+    // reminder. Ray 0 points straight up; the rest follow clockwise.
+    if (U.rayCount > 0.5f) {
+        bool day = U.sunAlt > -4.0f;
+        if (day || moonAbove) {
+            float2 o = day ? sunP : moonP;
+            float r0 = day ? sunDiscR : moonR;
+            float ox = cxp - o.x, oy = cyp - o.y, od = sqrt(ox * ox + oy * oy);
+            int RC = min(int(U.rayCount + 0.5f), 12);
+            float N = float(RC);
+            float tt = fract(atan2(ox, -oy) / (2.0f * M_PI_F) + 1.0f + 0.5f / N);
+            float fi = tt * N;
+            int k = min(int(fi), RC - 1);
+            float off = fi - float(k) - 0.5f;
+            float v = spec[64 + k];
+            float3 col = float3(spec[76 + 3 * k], spec[77 + 3 * k], spec[78 + 3 * k]);
+            // Length in SUN-disc units from the body's rim, so a gauge reads
+            // the same from the moon (twice the sun's size) as from the sun.
+            float base = r0 * 1.1f;
+            float len = base + sunDiscR * (0.8f + 11.0f * v);
+            float s = fexp(-off * off / (2.0f * 0.09f * 0.09f))
+                    * smoothstep(base, base + sunDiscR * 0.7f, od)
+                    * (1.0f - smoothstep(len - SP * 1.5f, len, od))
+                    * step(0.004f, v);
+            float vis = mix(0.45f, 1.0f, seeThrough);
+            // Carried by COLOUR more than light: by day the rays cross the
+            // sun's white glare, where added brightness alone cannot be seen.
+            L += s * (day ? 30.0f : 20.0f) * vis;
+            float a = s * 0.85f * vis;
+            float bc = day ? 245.0f : 200.0f;
+            if (a > w) { w = a; cr = col.r * bc; cg = col.g * bc; cb = col.b * bc; }
+        }
     }
 
     // How much this cell is LIT CIRRUS — cloud that the low sun is turning

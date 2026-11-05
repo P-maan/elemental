@@ -48,7 +48,7 @@ final class TextBox: ObservableObject { @Published var text = "" }
 // MARK: - Pages
 
 enum SettingsPage: String, CaseIterable, Identifiable {
-    case general, power, home, look, lock, saver, elements, location, automation, about
+    case general, power, home, look, lock, saver, elements, signals, location, automation, about
     var id: String { rawValue }
 
     var title: String {
@@ -60,6 +60,7 @@ enum SettingsPage: String, CaseIterable, Identifiable {
         case .lock: "Lock Screen"
         case .saver: "Screen Saver"
         case .elements: "Elements"
+        case .signals: "Signals"
         case .location: "Location"
         case .automation: "Automation"
         case .about: "About"
@@ -75,6 +76,7 @@ enum SettingsPage: String, CaseIterable, Identifiable {
         case .lock: "lock.fill"
         case .saver: "sparkles.tv.fill"
         case .elements: "rectangle.3.group.fill"
+        case .signals: "sun.max.fill"
         case .location: "location.fill"
         case .automation: "chevron.left.forwardslash.chevron.right"
         case .about: "info"
@@ -90,6 +92,7 @@ enum SettingsPage: String, CaseIterable, Identifiable {
         case .lock: Color(white: 0.42)
         case .saver: .teal
         case .elements: .orange
+        case .signals: .yellow
         case .location: .red
         case .automation: .pink
         case .about: Color(red: 0.2, green: 0.72, blue: 0.4)
@@ -106,6 +109,7 @@ enum SettingsPage: String, CaseIterable, Identifiable {
         case .lock: "lock screen still password"
         case .saver: "screen saver idle"
         case .elements: "dock widgets menu bar furniture rain glass water"
+        case .signals: "rays sun moon signals battery cpu memory zo reminders information gauge"
         case .location: "city place search location services"
         case .automation: "api endpoint http url scheme curl shortcuts script automation"
         case .about: "version update icon github"
@@ -446,6 +450,7 @@ struct SettingsDetail: View {
             }
         case .lock: SurfacePage(store: s, role: .lock)
         case .saver: SurfacePage(store: s, role: .saver)
+        case .signals: SignalsPage(store: s)
         case .automation: AutomationPage(store: s)
         case .about: AboutPage(store: s)
         case .elements, .location: EmptyView()
@@ -1454,6 +1459,77 @@ struct SurfacePage: View {
 }
 
 // MARK: - Automation
+
+// MARK: - Signals
+
+/// The rays as gauges (Signals.swift): choose what each one shows.
+struct SignalsPage: View {
+    @ObservedObject var store: SettingsStore
+
+    var body: some View {
+        let n = store.config.rays.count
+        SectionTitle("Rays", info: "The rays round the sun — round the moon at night — can show "
+                     + "information instead of the music. Each ray reaches out as far as its value and "
+                     + "is drawn in its own colour, through cloud and at any hour. Zo can put reminders "
+                     + "and anything else on a ray, and clears them when they are done.")
+        RowsCard {
+            MenuRow(title: "The rays show",
+                    subtitle: n == 0 ? "The music: one ray per band, lowest straight up, rising clockwise."
+                                     : "\(n) gauges, the first straight up, the rest clockwise.",
+                    selection: Binding(get: { store.config.rays.count },
+                                       set: { k in store.update { $0.rays = Self.resized($0.rays, to: k) } }),
+                    options: [(0, "The music"), (4, "4 signals"), (6, "6 signals"),
+                              (8, "8 signals"), (12, "12 signals")])
+        }
+
+        if n > 0 {
+            SectionTitle("Each ray")
+            RowsCard {
+                ForEach(0..<n, id: \.self) { i in
+                    MenuRow(title: "Ray \(i + 1)", subtitle: Self.position(i, of: n),
+                            selection: Binding(get: { store.config.rays.indices.contains(i) ? store.config.rays[i] : "off" },
+                                               set: { v in store.update { if $0.rays.indices.contains(i) { $0.rays[i] = v } } }),
+                            options: sourceOptions(including: store.config.rays[i]))
+                    if i < n - 1 { RowDivider() }
+                }
+            }
+        }
+
+        SectionTitle("From Zo")
+        RowsCard {
+            let live = Signals.shared.zoSignals()
+            RowLabel(title: live.isEmpty ? "Nothing from Zo right now" : live.map { s in
+                        s.signal.label ?? s.name }.joined(separator: " · "),
+                     subtitle: "Zo sets a signal with POST /v1/signal and clears it with DELETE. "
+                             + "A ray set to \"Zo — next signal\" shows them in order.")
+                .rowPadding()
+        }
+    }
+
+    private func sourceOptions(including current: String) -> [(String, String)] {
+        var opts = Signals.sources.map { ($0.id, $0.title) }
+        let named = Signals.shared.zoSignals().map { ("zo:" + $0.name, "Zo — " + ($0.signal.label ?? $0.name)) }
+        opts.insert(contentsOf: named, at: opts.count - 1)
+        if !opts.contains(where: { $0.0 == current }) {
+            opts.insert((current, current.hasPrefix("zo:") ? "Zo — " + current.dropFirst(3) : current),
+                        at: opts.count - 1)
+        }
+        return opts
+    }
+
+    /// Where a ray points, as a clock position.
+    static func position(_ i: Int, of n: Int) -> String {
+        let hour = (Double(i) * 12 / Double(n))
+        let h = Int(hour.rounded()) % 12
+        return "Toward \(h == 0 ? 12 : h) o'clock"
+    }
+
+    /// Keep what is set, fill new rays from the default layout.
+    static func resized(_ rays: [String], to n: Int) -> [String] {
+        if n <= rays.count { return Array(rays.prefix(n)) }
+        return rays + Signals.defaultLayout[rays.count..<n]
+    }
+}
 
 struct AutomationPage: View {
     @ObservedObject var store: SettingsStore

@@ -812,6 +812,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         applyPlaybackSetting()
         applyAutomationSetting()
         applyMusicSetting()
+        systemSignals.update(layout: config.rays)
         resumeVisible()
         scheduleSettle()
     }
@@ -1007,6 +1008,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     let music = SystemAudioMeter()
     let cursorTracker = CursorTracker()
     let nowPlaying = NowPlaying()
+    let systemSignals = SystemSignals()
     private var asleep = false
     private var powerSource: CFRunLoopSource?
 
@@ -1030,6 +1032,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         NotificationCenter.default.addObserver(forName: .elementalPowerSourceChanged, object: nil,
                                                queue: .main) { [weak self] _ in self?.applyMusicSetting() }
         applyMusicSetting()
+        systemSignals.update(layout: config.rays)
         // Dragging on the desktop plays with the scene. No permission needed:
         // a global monitor sees mouse events, only keys need Accessibility.
         cursorTracker.onDrag = { [weak self] in self?.pulseStarted() }

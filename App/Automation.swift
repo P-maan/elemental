@@ -102,6 +102,7 @@ enum AutomationSchema {
         Key(name: "lowPowerFPS", type: "int 4…30", detail: "Steady frame rate while Low Power is in force. Default 5 (about 1% CPU)."),
         Key(name: "musicVisualizer", type: "bool", detail: "Move with what this Mac is playing, only while something plays. Default true."),
         Key(name: "songTint", type: "bool", detail: "A very faint tinge of the playing song's album cover (Music or Spotify). Default true."),
+        Key(name: "rays", type: "array", detail: "What each sun/moon ray shows, up to 12: battery, cpu, memory, day, zo, zo:NAME, music.bass, music.mid, music.high, off. Empty: the music."),
         Key(name: "lowPowerSmoothRain", type: "bool", detail: "Steady 20 fps in Low Power while rain or snow is falling. Default true."),
         Key(name: "syncLockScreen", type: "bool", detail: "Show the scene on the lock screen."),
         Key(name: "renderWhenOccluded", type: "bool", detail: "Keep drawing behind fullscreen apps."),
@@ -166,6 +167,13 @@ enum AutomationSchema {
 // MARK: - The HTTP endpoint
 
 final class AutomationServer {
+    /// "#ff8800" or "ff8800" to 0..1 rgb.
+    static func hexColor(_ s: String) -> SIMD3<Float>? {
+        let h = s.trimmingCharacters(in: CharacterSet(charactersIn: "# "))
+        guard h.count == 6, let n = UInt32(h, radix: 16) else { return nil }
+        return SIMD3(Float((n >> 16) & 255), Float((n >> 8) & 255), Float(n & 255)) / 255
+    }
+
 
     private weak var app: AppDelegate?
     private var listener: NWListener?
@@ -293,7 +301,8 @@ final class AutomationServer {
                           "endpoints": ["GET /v1/status", "GET /v1/config", "PATCH /v1/config",
                                         "GET /v1/schema", "GET /v1/grid", "POST /v1/lowpower",
                                         "POST /v1/preview",
-                                        "POST /v1/reload", "POST /v1/settings"]])
+                                        "POST /v1/reload", "POST /v1/settings",
+                                        "POST /v1/signal", "DELETE /v1/signal", "GET /v1/signals"]])
 
         case ("GET", "/v1/status"):
             return (200, Self.status(app))
@@ -365,6 +374,36 @@ final class AutomationServer {
             }
             Pulse.shared.feed(lv); app.pulseStarted()
             return (200, ["ok": true])
+
+        // Zo's SIGNALS (Signals.swift): a named value the rays can show — a
+        // reminder, a countdown, anything. {"name": "class", "value": 0..1,
+        // "color": "#ff8800", "label": "CLASS 2:10", "seconds": optional}.
+        // It stays until Zo clears it (DELETE) or its seconds run out.
+        case ("POST", "/v1/signal"), ("DELETE", "/v1/signal"), ("GET", "/v1/signals"):
+            guard ZoBridge.accepts(r.headers[ZoBridge.header.lowercased()] ?? r.query["token"]) else {
+                return (403, ["error": "signals are not enabled on this Mac"])
+            }
+            if r.method == "GET" {
+                let list = Signals.shared.zoSignals().map { s -> [String: Any] in
+                    ["name": s.name, "value": s.signal.value, "label": s.signal.label ?? NSNull()]
+                }
+                return (200, ["signals": list, "rays": app.currentConfig.rays])
+            }
+            let obj = (try? JSONSerialization.jsonObject(with: r.body)) as? [String: Any]
+            guard let name = ((obj?["name"] as? String) ?? r.query["name"])?
+                    .trimmingCharacters(in: .whitespaces).lowercased(), !name.isEmpty else {
+                return (400, ["error": "send a name"])
+            }
+            if r.method == "DELETE" {
+                Signals.shared.clear("zo." + name)
+                return (200, ["ok": true, "cleared": name])
+            }
+            let value = (obj?["value"] as? Double) ?? r.query["value"].flatMap(Double.init) ?? 1
+            let color = ((obj?["color"] as? String) ?? r.query["color"]).flatMap(Self.hexColor)
+            Signals.shared.set("zo." + name, value: Float(value), color: color,
+                               label: (obj?["label"] as? String) ?? r.query["label"],
+                               seconds: (obj?["seconds"] as? Double) ?? r.query["seconds"].flatMap(Double.init))
+            return (200, ["ok": true, "name": name, "value": max(0, min(1, value))])
 
         case ("POST", "/v1/reload"):
             app.reloadScene()
@@ -525,6 +564,17 @@ enum AutomationURL {
             if let p = Pulse.Pattern(rawValue: parts.first?.lowercased() ?? "notice") {
                 Pulse.shared.play(p); app.pulseStarted()
             }
+        case "signal", "clear":
+            // elemental://signal/NAME?value=0.6&color=ff8800&token=…
+            // elemental://clear/NAME?token=…   — Zo's signals, by URL.
+            let q = URLComponents(url: url, resolvingAgainstBaseURL: false)?.queryItems ?? []
+            func item(_ n: String) -> String? { q.first { $0.name == n }?.value }
+            guard ZoBridge.accepts(item("token")), let name = parts.first?.lowercased(),
+                  !name.isEmpty else { return }
+            if host == "clear" { Signals.shared.clear("zo." + name); return }
+            Signals.shared.set("zo." + name, value: Float(item("value").flatMap(Double.init) ?? 1),
+                               color: item("color").flatMap(AutomationServer.hexColor),
+                               label: item("label"), seconds: item("seconds").flatMap(Double.init))
         case "reload":
             app.reloadScene()
         case "settings", "":

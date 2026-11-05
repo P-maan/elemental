@@ -392,6 +392,10 @@ struct Config: Codable, Equatable {
     /// (Music or Spotify only; see NowPlaying, SongTint).
     var songTint: Bool = true
 
+    /// What each of the sun's (or moon's) rays shows, ray by ray — a source id
+    /// from `Signals.sources`. Empty: the rays show the music, one band each.
+    var rays: [String] = []
+
     /// The address the automation endpoint listens on, 127.0.0.1 only.
     var automationPort: Int = 7417
     /// Whether the local HTTP endpoint runs at all. The URL scheme is always on.
@@ -890,6 +894,7 @@ extension Config {
         lowPowerSmoothRain = c.lenient(.lowPowerSmoothRain, d.lowPowerSmoothRain)
         musicVisualizer    = c.lenient(.musicVisualizer, d.musicVisualizer)
         songTint           = c.lenient(.songTint, d.songTint)
+        rays               = Array(c.lenient(.rays, d.rays).prefix(Signals.maxRays))
         automationPort     = c.lenient(.automationPort, d.automationPort)
         automationEnabled  = c.lenient(.automationEnabled, d.automationEnabled)
         lock               = c.lenient(.lock, d.lock)

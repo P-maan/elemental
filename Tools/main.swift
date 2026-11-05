@@ -796,6 +796,22 @@ if args["bass"] != nil || args["mid"] != nil || args["high"] != nil || args["bea
     Pulse.shared.feedSpectrum(spec, bass: num("bass", 0), mid: num("mid", 0), high: num("high", 0),
                               beat: args["beat"] != nil)
 }
+// --rays battery,cpu,zo,... : the rays as gauges. --signal name:value[:hexcolour]
+// (repeatable with commas) sets Zo signals; sys.* names set system readings.
+if let r = args["rays"] {
+    renderer.raySources = r.split(separator: ",").map(String.init)
+}
+if let sig = args["signal"] {
+    for item in sig.split(separator: ",") {
+        let f = item.split(separator: ":").map(String.init)
+        guard f.count >= 2, let v = Float(f[1]) else { continue }
+        var col: SIMD3<Float>?
+        if f.count > 2, let n = UInt32(f[2], radix: 16) {
+            col = SIMD3(Float((n >> 16) & 255), Float((n >> 8) & 255), Float(n & 255)) / 255
+        }
+        Signals.shared.set(f[0].hasPrefix("sys.") ? f[0] : "zo." + f[0], value: v, color: col)
+    }
+}
 // --tint r,g,b (0..255): the song's tinge at full strength, as if a cover
 // of that colour were playing.
 if let t = args["tint"]?.split(separator: ",").compactMap({ Float($0) }), t.count == 3 {
