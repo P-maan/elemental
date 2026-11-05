@@ -412,7 +412,7 @@ final class AutomationServer {
                 "surfaces": app.surfaceStats,
                 "music": ["enabled": c.musicVisualizer, "onAC": app.onACPower,
                           "running": app.music.running, "level": (app.music.level * 100).rounded() / 100,
-                          "economy": Pulse.shared.economy, "songTint": c.songTint,
+                          "songTint": c.songTint,
                           "error": app.music.lastError ?? NSNull()] as [String: Any]]
     }
 

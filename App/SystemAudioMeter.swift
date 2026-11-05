@@ -26,10 +26,13 @@
 //
 //  ---- When it runs
 //
-//  While the setting is on and the Mac is awake — on battery too — and only
-//  while another app is actually playing (`othersPlaying`, polled by the host
-//  every two seconds). Silent for ten seconds and there is no tap at all, not
-//  a paused one. The host calls `update(...)` whenever any of that changes.
+//  While the setting is on, the Mac is awake and on AC power outside Low
+//  Power, and only while another app is actually playing (`othersPlaying`,
+//  polled by the host every two seconds). Silent for ten seconds and there is
+//  no tap at all, not a paused one. On battery there is none either — a slow
+//  version drawn at five frames a second looked awful; there only the album
+//  cover's tinge remains (NowPlaying). The host calls `update(...)` whenever
+//  any of that changes.
 //
 //  ---- Threading
 //
@@ -71,32 +74,6 @@ final class SystemAudioMeter: @unchecked Sendable {
     private var lastDrop: CFAbsoluteTime = 0
     private var lastPost: CFAbsoluteTime = 0
     private var latest: Double = 0
-
-    private var economy = false        // on `queue`
-
-    /// ON BATTERY: the cheapest way to still hear the music. The audio arrives
-    /// in 4096-frame buffers instead of 512 — about twelve wake-ups a second
-    /// instead of ninety-odd — with one spectrum per buffer, envelopes slowed
-    /// to about half a second, no beat and no drop, posted six times a second.
-    /// What reaches the wall is the shape of the song, not its kick: exactly
-    /// what still reads at Low Power's five frames a second.
-    func setEconomy(_ on: Bool) {
-        queue.async { [weak self] in
-            guard let self, self.economy != on else { return }
-            self.economy = on
-            self.applyBufferSize()
-        }
-    }
-
-    /// On `queue`. Harmless if the device refuses: the hop below still follows.
-    private func applyBufferSize() {
-        guard aggID != kAudioObjectUnknown else { return }
-        var frames = UInt32(economy ? 4096 : 512)
-        var addr = AudioObjectPropertyAddress(mSelector: kAudioDevicePropertyBufferFrameSize,
-                                              mScope: kAudioObjectPropertyScopeGlobal,
-                                              mElement: kAudioObjectPropertyElementMain)
-        AudioObjectSetPropertyData(aggID, &addr, 0, nil, UInt32(MemoryLayout<UInt32>.size), &frames)
-    }
 
     /// The most recent level, 0..1. For status only.
     var level: Double { queue.sync { latest } }
@@ -152,7 +129,6 @@ final class SystemAudioMeter: @unchecked Sendable {
             return
         }
         aggID = agg
-        queue.sync { applyBufferSize() }
 
         if let sr = Self.tapSampleRate(tap) { queue.sync { sampleRate = sr } }
 
@@ -252,8 +228,8 @@ final class SystemAudioMeter: @unchecked Sendable {
                     // Only the last ring's worth survived the first channel;
                     // adding older ones would wrap and pile onto it.
                     if f < frames - fftN { continue }
-                    // Floored modulo: with 4096-frame buffers (economy) the
-                    // offset runs far below zero, and Swift's % keeps the sign.
+                    // Floored modulo: a large buffer runs the offset far below
+                    // zero, and Swift's % keeps the sign.
                     let at = ((ringPos - frames + f) % fftN + fftN) % fftN
                     ring[at] += m * w
                 } else {
@@ -263,7 +239,7 @@ final class SystemAudioMeter: @unchecked Sendable {
                 }
             }
         }
-        guard fresh >= (economy ? 4096 : 512) else { return }
+        guard fresh >= 512 else { return }
         fresh = 0
         spectrumHop()
     }
@@ -305,15 +281,13 @@ final class SystemAudioMeter: @unchecked Sendable {
         // (faster up top, where sounds are short), each against its own
         // decaying peak — but never against less than a fraction of the
         // loudest band, or a silent band would amplify its own noise.
-        // The slow peak forgets over ~15 s whatever the hop.
-        let peakDecay: Float = economy ? 0.9945 : 0.9993
+        let peakDecay: Float = 0.9993      // the slow peak forgets over ~15 s
         let loudest = bandPeak.max() ?? 1e-6
         var spec = [Float](repeating: 0, count: B)
         for k in 0..<B {
             let v = bands[k]
-            let fall: Float = economy ? 0.12 : (k < 8 ? 0.12 : (k < 16 ? 0.18 : 0.26))
-            let rise: Float = economy ? 0.45 : 0.6
-            bandEnv[k] += (v > bandEnv[k] ? rise : fall) * (v - bandEnv[k])
+            let fall: Float = k < 8 ? 0.12 : (k < 16 ? 0.18 : 0.26)
+            bandEnv[k] += (v > bandEnv[k] ? 0.6 : fall) * (v - bandEnv[k])
             bandPeak[k] = max(bandEnv[k], bandPeak[k] * peakDecay, 1e-6)
             spec[k] = min(1, bandEnv[k] / max(bandPeak[k], loudest * 0.08))
         }
@@ -330,7 +304,7 @@ final class SystemAudioMeter: @unchecked Sendable {
         // A BEAT: the bass jumping well above its half-second average.
         bassAvg += 0.05 * (env - bassAvg)
         var beat = false
-        if !economy && env > bassAvg * 1.35 && env > peak * 0.30 && now - lastBeat > 0.18 {
+        if env > bassAvg * 1.35 && env > peak * 0.30 && now - lastBeat > 0.18 {
             beat = true
             lastBeat = now
         }
@@ -340,7 +314,7 @@ final class SystemAudioMeter: @unchecked Sendable {
         if env < peak * 0.35 && peak > 1e-4 {
             if quietSince == nil { quietSince = now }
         } else if env > peak * 0.75 {
-            if !economy, let q = quietSince, now - q >= 3, now - lastDrop >= 40 {
+            if let q = quietSince, now - q >= 3, now - lastDrop >= 40 {
                 drop = true
                 lastDrop = now
             }
@@ -350,7 +324,7 @@ final class SystemAudioMeter: @unchecked Sendable {
         // Nothing playing: say nothing, so the wall settles.
         let total = bands.reduce(0, +)
         guard total > 1e-4 || drop else { return }
-        guard drop || beat || now - lastPost >= (economy ? 1.0 / 6 : 1.0 / 30) else { return }
+        guard drop || beat || now - lastPost >= 1.0 / 30 else { return }
         lastPost = now
         let out = spec
         DispatchQueue.main.async { [weak self] in

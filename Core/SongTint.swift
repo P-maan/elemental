@@ -24,6 +24,14 @@ final class SongTint: @unchecked Sendable {
     private var amt: Float = 0
     /// Render tool only: a fixed colour (0..1) at full strength.
     var forced: SIMD3<Float>?
+    private var trust = false
+
+    /// On battery the meter does not run, so nothing is "heard": the player
+    /// saying it is playing (NowPlaying only sets a cover then) is enough.
+    var trustPlayer: Bool {
+        get { lock.lock(); defer { lock.unlock() }; return trust }
+        set { lock.lock(); trust = newValue; lock.unlock() }
+    }
 
     /// How strong the tinge is at most: a hint, not a filter.
     static let strength: Float = 0.07
@@ -42,7 +50,7 @@ final class SongTint: @unchecked Sendable {
         let dt = Float(min(0.5, max(0, now - lastStep)))
         lastStep = now
         if spectrum.reduce(0, +) > 0.3 { lastHeard = now }
-        let on = art != nil && now - lastHeard < 2
+        let on = art != nil && (trust || now - lastHeard < 2)
         if let a = art { cur += (1 - exp(-dt / 1.5)) * (a - cur) }
         let goal: Float = on ? Self.strength : 0
         amt += (1 - exp(-dt / (on ? 1.5 : 4))) * (goal - amt)

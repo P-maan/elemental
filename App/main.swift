@@ -1018,8 +1018,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     }
 
     private func startMusicVisualizer() {
-        // Economy music never lifts the rate, so there is nothing to nudge.
-        music.onLevel = { [weak self] in if !Pulse.shared.economy { self?.pulseStarted() } }
+        music.onLevel = { [weak self] in self?.pulseStarted() }
         // Plugging in or unplugging changes whether it should run. IOKit calls
         // a C function, so it posts a notification rather than capturing.
         if let src = IOPSNotificationCreateRunLoopSource({ _ in
@@ -1037,12 +1036,16 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         cursorTracker.start()
     }
 
-    /// Run only while the setting is on, the Mac is awake, and something is
-    /// actually PLAYING. On battery too: the tap is cheap; what costs is an
-    /// aggregate device holding the audio hardware awake with nothing to hear,
-    /// and that is exactly what the silence gate removes. The tap is built
-    /// when another app starts sending sound to the output and torn down ten
-    /// seconds after the last one stops, so a quiet Mac carries no tap at all.
+    /// The meter runs only while the setting is on, the Mac is awake, it is
+    /// on AC outside Low Power, and something is actually PLAYING: the tap is
+    /// built when another app starts sending sound to the output and torn down
+    /// ten seconds after the last one stops, so a quiet Mac carries no tap.
+    ///
+    /// ON BATTERY there is no tap at all. A slowed-down version drawn at Low
+    /// Power's five frames a second was tried and looked awful; what stays is
+    /// the album cover's tinge, which moves over seconds and costs one Apple
+    /// Event every fifteen — the player says it is playing, so the tinge needs
+    /// no meter to know.
     func applyMusicSetting() {
         let wanted = config.musicVisualizer && !asleep
         if wanted && audioGateTimer == nil {
@@ -1054,20 +1057,17 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         } else if !wanted {
             audioGateTimer?.invalidate(); audioGateTimer = nil
         }
-        let heard = CFAbsoluteTimeGetCurrent() - lastAudioAt < 10
-        music.update(shouldRun: wanted && heard)
-        applyMusicEconomy()
+        applyMusicState()
     }
 
-    /// On battery or in Low Power the music is felt slowly and costs nothing
-    /// extra: no frame-rate lift, a meter that wakes a dozen times a second,
-    /// a cover checked every fifteen. See Pulse.economy.
-    private var musicEconomy: Bool { !onACPower || lowPowerActive }
-    private func applyMusicEconomy() {
-        let e = musicEconomy
-        Pulse.shared.economy = e
-        music.setEconomy(e)
-        nowPlaying.update(shouldRun: music.running && config.songTint, economy: e)
+    private var musicOnBattery: Bool { !onACPower || lowPowerActive }
+
+    private func applyMusicState() {
+        let heard = config.musicVisualizer && !asleep && CFAbsoluteTimeGetCurrent() - lastAudioAt < 10
+        let battery = musicOnBattery
+        music.update(shouldRun: heard && !battery)
+        SongTint.shared.trustPlayer = battery
+        nowPlaying.update(shouldRun: heard && config.songTint, economy: battery)
     }
 
     private var audioGateTimer: Timer?
@@ -1082,9 +1082,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
             DispatchQueue.main.async {
                 guard let self else { return }
                 if playing { self.lastAudioAt = CFAbsoluteTimeGetCurrent() }
-                self.music.update(shouldRun: self.config.musicVisualizer && !self.asleep
-                                  && CFAbsoluteTimeGetCurrent() - self.lastAudioAt < 10)
-                self.applyMusicEconomy()
+                self.applyMusicState()
             }
         }
     }
@@ -1240,7 +1238,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
                     NSDeviceDescriptionKey("NSScreenNumber")] as? NSNumber else { continue }
             surfaces[CGDirectDisplayID(num.uint32Value)]?.apply(config: drawingConfig, screen: screen)
         }
-        applyMusicEconomy()
+        applyMusicState()
         NSLog("Elemental: Low Power preset %@", low ? "ON" : "off")
     }
 

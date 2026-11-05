@@ -22,18 +22,7 @@ final class Pulse: @unchecked Sendable {
     private var heldMid: Double = 0
     private var heldHigh: Double = 0
     private var beatAt: CFAbsoluteTime = -100
-    private var economyOn = false
-
-    /// ON BATTERY (or Low Power): the music is felt slowly. The host does not
-    /// lift the frame rate for it, the meter posts a few times a second, and
-    /// levels are held over ~0.6 s instead of ~0.18 so they glide between
-    /// posts rather than flickering; no beat. A breath, a tinge and slow rays
-    /// read fine at five frames a second — a kick drum does not.
-    var economy: Bool {
-        get { lock.lock(); defer { lock.unlock() }; return economyOn }
-        set { lock.lock(); economyOn = newValue; lock.unlock() }
-    }
-    private var hold: Double { economyOn ? 0.6 : 0.18 }     // under `lock`
+    private let hold: Double = 0.18
     private var pattern: Pattern?
     private var patternT0: CFAbsoluteTime = 0
     private var lastSignal: CFAbsoluteTime = 0
@@ -90,9 +79,7 @@ final class Pulse: @unchecked Sendable {
         lock.lock(); defer { lock.unlock() }
         let now = CFAbsoluteTimeGetCurrent()
         held = max(0, min(1, bass)); heldMid = max(0, min(1, mid)); heldHigh = max(0, min(1, high))
-        heldAt = now
-        // Economy music does not count as motion: it must not lift the rate.
-        if !economyOn { lastSignal = now }
+        heldAt = now; lastSignal = now
         if beat { beatAt = now }
     }
 
@@ -131,7 +118,7 @@ final class Pulse: @unchecked Sendable {
         let message = pattern != nil && pattern != .drop
         let k = message ? 0.25 : 1.0
         let mid = Float(heldMid * fade * k), high = Float(heldHigh * fade * k)
-        let beat = economyOn ? 0 : Float(exp(-(now - beatAt) / 0.11) * k)
+        let beat = Float(exp(-(now - beatAt) / 0.11) * k)
         return (bass, max(0, min(1, mid)), max(0, min(1, high)), max(0, min(1, beat)))
     }
 

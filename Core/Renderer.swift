@@ -150,6 +150,8 @@ final class ElementalRenderer {
     /// The music's 24 bands (Pulse.spectrum), padded to 32. Bound at index 7
     /// in the cell, height and present passes.
     private var spectrumBuf: MTLBuffer!
+    private var slowSpec = [Float](repeating: 0, count: Pulse.bandCount)
+    private var slowSpecAt: CFAbsoluteTime = 0
 
     /// This surface's screen in global top-left points, and its scale, so the
     /// dragging pointer (Cursor.swift) can be placed in its pixels. Set by the
@@ -356,7 +358,7 @@ final class ElementalRenderer {
     private func buildBuffers() {
         let opt: MTLResourceOptions = .storageModeShared
         uniformBuf  = device.makeBuffer(length: MemoryLayout<Uniforms>.stride, options: opt)
-        spectrumBuf = device.makeBuffer(length: MemoryLayout<Float>.stride * 32, options: opt)
+        spectrumBuf = device.makeBuffer(length: MemoryLayout<Float>.stride * 64, options: opt)
         breatherBuf = device.makeBuffer(length: MemoryLayout<GPUBreather>.stride * 3, options: opt)
         starBuf     = device.makeBuffer(length: MemoryLayout<GPUStar>.stride * Self.maxStars, options: opt)
         streakBuf   = device.makeBuffer(length: MemoryLayout<GPUStreak>.stride * Self.maxStreaks, options: opt)
@@ -939,6 +941,15 @@ final class ElementalRenderer {
         let spec = Pulse.shared.spectrum()
         let sp = spectrumBuf.contents().assumingMemoryBound(to: Float.self)
         for k in 0..<32 { sp[k] = k < spec.count ? spec[k] : 0 }
+        // Slots 32..55: the same bands eased over ~0.4 s, for the sun's rays —
+        // read raw they flashed a few segments at a time round the disc.
+        let tNow = CFAbsoluteTimeGetCurrent()
+        let ease = Float(1 - exp(-min(0.5, tNow - slowSpecAt) / 0.4))
+        slowSpecAt = tNow
+        for k in 0..<Pulse.bandCount {
+            slowSpec[k] += ease * ((k < spec.count ? spec[k] : 0) - slowSpec[k])
+            sp[32 + k] = slowSpec[k]
+        }
         let tint = SongTint.shared.step(spectrum: spec)
         u.tintR = tint.rgb.x * 255; u.tintG = tint.rgb.y * 255; u.tintB = tint.rgb.z * 255
         u.tintAmt = tint.amount

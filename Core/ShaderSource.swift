@@ -1672,13 +1672,16 @@ fragment CellOut cellPass(VOut in [[stage_in]],
         // as far as its band is loud and falling back as it fades. Drawn per
         // cell like everything else, so the rays are stepped mosaic beams, and
         // gated exactly as the ripple is: only where the sun is actually seen.
-        // The whole burst turns very slowly so no ray is pinned in place.
+        // Each ray reads its band EASED over ~0.4 s (slots 32.., Renderer), so
+        // the rays grow and shrink with the song instead of flashing a few
+        // segments at a time; and the burst holds still — it used to turn,
+        // which with the flashing read as something chasing round the sun.
         if (U.pulse + U.pulseMid + U.pulseHigh > 0.01f) {
             float ang = atan2(dx, -dy);                                  // 0 = up, clockwise
-            float t = fract(ang / (2.0f * M_PI_F) + 1.0f + sec * 0.003f);
+            float t = fract(ang / (2.0f * M_PI_F) + 1.0f);
             const float N = 24.0f;
             float fi = t * N, k = floor(fi), off = fi - k - 0.5f;
-            float v = specAt(spec, (k + 0.5f) / N);
+            float v = specAt(spec + 32, (k + 0.5f) / N);
             float beam = fexp(-off * off / (2.0f * 0.13f * 0.13f));
             // Out past the glare: within a few disc radii the glow is already
             // near white and a ray there cannot be seen at all.
