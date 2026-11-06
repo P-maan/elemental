@@ -48,13 +48,21 @@ enum Palette {
     static let sidebar  = grey(light: 0.915, dark: 0.118)
     /// The rounded content panel.
     static let panel    = grey(light: 0.962, dark: 0.071)
+    /// Dark: see-through, so the wall shows through as on dormstand's
+    /// glass cards. The window is always dark now (SettingsWindow).
+    private static func glass(light: CGFloat, dark: CGFloat, alpha: CGFloat) -> NSColor {
+        NSColor(name: nil) { a in
+            a.bestMatch(from: [.darkAqua, .aqua]) == .darkAqua
+                ? NSColor(white: dark, alpha: alpha) : NSColor(white: light, alpha: 1)
+        }
+    }
     /// A group of rows.
-    static let card     = grey(light: 1.000, dark: 0.118)
+    static let card     = glass(light: 1.000, dark: 0.04, alpha: 0.50)
     /// A selected tile, a hovered row.
-    static let raised   = grey(light: 0.880, dark: 0.235)
+    static let raised   = glass(light: 0.880, dark: 1.00, alpha: 0.12)
     /// The navigation pill and other floating controls.
-    static let pill     = grey(light: 0.985, dark: 0.165)
-    static let hairline = grey(light: 0.890, dark: 0.175)
+    static let pill     = glass(light: 0.985, dark: 0.00, alpha: 0.35)
+    static let hairline = glass(light: 0.890, dark: 1.00, alpha: 0.08)
 }
 
 // MARK: - Metrics and type
@@ -72,10 +80,11 @@ enum UI {
     /// Fixed label column, so controls line up down the whole window.
     static let labelWidth: CGFloat = 96
 
-    static var headline: NSFont { .systemFont(ofSize: 13, weight: .semibold) }
-    static var body: NSFont { .systemFont(ofSize: 12, weight: .regular) }
-    static var caption: NSFont { .systemFont(ofSize: 11, weight: .regular) }
-    static var value: NSFont { .monospacedDigitSystemFont(ofSize: 11, weight: .regular) }
+    // Monospaced throughout, as dormstand's wall is.
+    static var headline: NSFont { .monospacedSystemFont(ofSize: 13, weight: .semibold) }
+    static var body: NSFont { .monospacedSystemFont(ofSize: 12, weight: .regular) }
+    static var caption: NSFont { .monospacedSystemFont(ofSize: 11, weight: .regular) }
+    static var value: NSFont { .monospacedSystemFont(ofSize: 11, weight: .regular) }
 
     /// Show or hide with a fade rather than a jump.
     ///

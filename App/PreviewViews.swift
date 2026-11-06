@@ -114,7 +114,7 @@ final class PreviewChoice: NSView {
         frameLayer.addSubview(tile)
 
         caption.stringValue = text
-        caption.font = .systemFont(ofSize: 10)
+        caption.font = .monospacedSystemFont(ofSize: 10, weight: .regular)
         caption.alignment = .center
         caption.textColor = .secondaryLabelColor
         caption.translatesAutoresizingMaskIntoConstraints = false
@@ -148,7 +148,7 @@ final class PreviewChoice: NSView {
             ? NSColor.controlAccentColor.cgColor
             : NSColor.clear.cgColor
         caption.textColor = isSelected ? .labelColor : .secondaryLabelColor
-        caption.font = .systemFont(ofSize: 10, weight: isSelected ? .semibold : .regular)
+        caption.font = .monospacedSystemFont(ofSize: 10, weight: isSelected ? .semibold : .regular)
         setAccessibilityValue(isSelected)
     }
 

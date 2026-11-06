@@ -631,7 +631,7 @@ final class LocationPane: Pane, NSSearchFieldDelegate, NSTableViewDataSource, NS
         if mode == .results {
             let c = results[row]
             let title = NSTextField(labelWithString: c.title)
-            title.font = .systemFont(ofSize: 13)
+            title.font = .monospacedSystemFont(ofSize: 13, weight: .regular)
             let sub = NSTextField(labelWithString: c.subtitle)
             sub.font = UI.caption
             sub.textColor = .secondaryLabelColor
@@ -655,7 +655,7 @@ final class LocationPane: Pane, NSSearchFieldDelegate, NSTableViewDataSource, NS
         // Primary line: the city. Secondary: what disambiguates it — its local
         // time for a saved city, its coordinates for a search hit.
         let title = NSTextField(labelWithString: place.name)
-        title.font = .systemFont(ofSize: 13, weight: isScene ? .semibold : .regular)
+        title.font = .monospacedSystemFont(ofSize: 13, weight: isScene ? .semibold : .regular)
 
         let sub = NSTextField(labelWithString: subtitle(for: place))
         sub.font = UI.caption

@@ -113,7 +113,7 @@ final class AppIconPicker: NSStackView {
             ring.addSubview(iv)
 
             let cap = NSTextField(labelWithString: style.title)
-            cap.font = .systemFont(ofSize: 10)
+            cap.font = .monospacedSystemFont(ofSize: 10, weight: .regular)
             cap.alignment = .center
             cap.translatesAutoresizingMaskIntoConstraints = false
 
@@ -146,7 +146,7 @@ final class AppIconPicker: NSStackView {
             t.ring.layer?.borderColor = on ? NSColor.controlAccentColor.cgColor
                                            : NSColor.clear.cgColor
             t.caption.textColor = on ? .labelColor : .secondaryLabelColor
-            t.caption.font = .systemFont(ofSize: 10, weight: on ? .semibold : .regular)
+            t.caption.font = .monospacedSystemFont(ofSize: 10, weight: on ? .semibold : .regular)
             t.ring.setAccessibilityValue(on)
         }
     }

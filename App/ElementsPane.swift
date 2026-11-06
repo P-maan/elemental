@@ -176,7 +176,7 @@ func AVFitRect(_ size: NSSize, in r: NSRect) -> NSRect {
 /// its keystrokes drawn as keys rather than written as words.
 func stepRow(_ n: Int, _ text: String, keys: [String] = []) -> NSView {
     let number = NSTextField(labelWithString: "\(n)")
-    number.font = .systemFont(ofSize: 10, weight: .bold)
+    number.font = .monospacedSystemFont(ofSize: 10, weight: .bold)
     number.alignment = .center
     number.textColor = .white
     number.translatesAutoresizingMaskIntoConstraints = false
@@ -225,7 +225,7 @@ func stepRow(_ n: Int, _ text: String, keys: [String] = []) -> NSView {
 /// A keystroke, drawn as a key.
 func keyCap(_ s: String) -> NSView {
     let f = NSTextField(labelWithString: s)
-    f.font = .systemFont(ofSize: 11, weight: .medium)
+    f.font = .monospacedSystemFont(ofSize: 11, weight: .medium)
     f.alignment = .center
     f.textColor = .labelColor
     f.translatesAutoresizingMaskIntoConstraints = false

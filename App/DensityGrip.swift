@@ -503,7 +503,7 @@ private final class GripOverlay: NSView {
         // pitch had to move a row to divide the display.
         let text = "\(g.actualRows) rows"
         let attrs: [NSAttributedString.Key: Any] = [
-            .font: NSFont.systemFont(ofSize: 10, weight: .semibold),
+            .font: NSFont.monospacedSystemFont(ofSize: 10, weight: .semibold),
             .foregroundColor: NSColor.labelColor,
         ]
         let str = NSAttributedString(string: text, attributes: attrs)

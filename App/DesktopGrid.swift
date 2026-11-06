@@ -297,7 +297,7 @@ final class DesktopGridView: NSView {
             let labelSize: CGFloat = big ? 11 : 8
             if r.height >= labelSize + 5, r.width >= labelSize * 3 {
                 let attrs: [NSAttributedString.Key: Any] = [
-                    .font: NSFont.systemFont(ofSize: labelSize, weight: e.wet ? .semibold : .regular),
+                    .font: NSFont.monospacedSystemFont(ofSize: labelSize, weight: e.wet ? .semibold : .regular),
                     .foregroundColor: e.wet ? NSColor.labelColor : NSColor.secondaryLabelColor,
                 ]
                 let str = NSAttributedString(string: e.label, attributes: attrs)

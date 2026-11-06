@@ -238,7 +238,7 @@ final class OnboardingController: NSObject {
 
     private static func label(size: CGFloat, weight: NSFont.Weight, alpha: CGFloat) -> NSTextField {
         let l = NSTextField(labelWithString: "")
-        l.font = .systemFont(ofSize: size, weight: weight)
+        l.font = .monospacedSystemFont(ofSize: size, weight: weight)
         l.textColor = NSColor.labelColor.withAlphaComponent(alpha)
         l.backgroundColor = .clear
         l.isBezeled = false

@@ -303,7 +303,7 @@ final class WidgetSetupCanvas: NSView {
 
     private func drawPill(_ title: String, sub: String, in r: NSRect, clip: Bool = true) {
         let titleAttrs: [NSAttributedString.Key: Any] = [
-            .font: NSFont.systemFont(ofSize: 12, weight: .semibold),
+            .font: NSFont.monospacedSystemFont(ofSize: 12, weight: .semibold),
             .foregroundColor: NSColor.white,
         ]
         let subAttrs: [NSAttributedString.Key: Any] = [
@@ -448,7 +448,7 @@ final class WidgetSetupCanvas: NSView {
 
     private func drawEmptyHint() {
         let attrs: [NSAttributedString.Key: Any] = [
-            .font: NSFont.systemFont(ofSize: 15, weight: .medium),
+            .font: NSFont.monospacedSystemFont(ofSize: 15, weight: .medium),
             .foregroundColor: NSColor.white.withAlphaComponent(0.8),
         ]
         let s = NSAttributedString(string: "Drag a rectangle over each of your widgets",
@@ -847,7 +847,7 @@ final class WidgetSetupOverlay: NSObject, NSWindowDelegate {
         hud.translatesAutoresizingMaskIntoConstraints = false
 
         let title = NSTextField(labelWithString: "Where are your widgets and your dock?")
-        title.font = .systemFont(ofSize: 13, weight: .semibold)
+        title.font = .monospacedSystemFont(ofSize: 13, weight: .semibold)
 
         let hint = NSTextField(wrappingLabelWithString:
             "Drag a rectangle over each widget — it snaps to the nearest real widget size, and ⌥ "
@@ -856,14 +856,14 @@ final class WidgetSetupOverlay: NSObject, NSWindowDelegate {
           + "presets, ⌫ removes one. The teal rectangle is your dock: macOS only reports how "
           + "THICK it is, so pull its end handles out to the length it really is — the numbers "
           + "above it are live. Everything here also moves on the little screen in Settings.")
-        hint.font = .systemFont(ofSize: 11)
+        hint.font = .monospacedSystemFont(ofSize: 11, weight: .regular)
         hint.textColor = .secondaryLabelColor
         hint.preferredMaxLayoutWidth = 520
         // Fixed rather than intrinsic, so the panel is one stable width and the
         // button rows below can be tied to it without the two fighting.
         hint.widthAnchor.constraint(equalToConstant: 520).isActive = true
 
-        noteLabel.font = .systemFont(ofSize: 11)
+        noteLabel.font = .monospacedSystemFont(ofSize: 11, weight: .regular)
         noteLabel.textColor = .secondaryLabelColor
         noteLabel.preferredMaxLayoutWidth = 520
 

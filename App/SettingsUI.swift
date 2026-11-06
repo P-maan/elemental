@@ -295,19 +295,20 @@ struct SettingsRoot: View {
             SettingsSidebar(store: store)
                 .frame(width: 236)
             SettingsDetail(store: store, pane: pane)
-                .background(RoundedRectangle(cornerRadius: 22, style: .continuous)
-                    .fill(Color(nsColor: Palette.panel).opacity(0.94)))
-                .clipShape(RoundedRectangle(cornerRadius: 22, style: .continuous))
-                .tileBevel(corner: 22)
+                .glassCard(corner: 22, depth: 1.4)
                 .padding(.vertical, 10)
                 .padding(.trailing, 10)
         }
-        // The window sits on the wall: today's sky, as the wallpaper drew it,
-        // shows through the sidebar and faintly through the panel.
+        // The window is a piece of the wall, the way dormstand is: today's
+        // mosaic, as the wallpaper drew it, behind everything, and the panel
+        // a slab of dark glass standing in front of it.
         .background(ZStack {
-            SkyBackdrop()
-            Color(nsColor: Palette.sidebar).opacity(0.66)
+            Color.black
+            SkyBackdrop().opacity(0.85)
+            LinearGradient(colors: [.black.opacity(0.30), .black.opacity(0.62)],
+                           startPoint: .top, endPoint: .bottom)
         })
+        .tint(Look.accent)
         .ignoresSafeArea()
     }
 }
@@ -344,7 +345,7 @@ struct SettingsSidebar: View {
                     }
                     if filtered.isEmpty {
                         Text("No matches")
-                            .font(.system(size: 13))
+                            .font(.system(size: 13, design: .monospaced))
                             .foregroundStyle(.secondary)
                             .padding(.horizontal, 12)
                     }
@@ -362,11 +363,11 @@ struct SearchField: View {
     var body: some View {
         HStack(spacing: 8) {
             Image(systemName: "magnifyingglass")
-                .font(.system(size: 14, weight: .medium))
+                .font(.system(size: 14, weight: .medium, design: .monospaced))
                 .foregroundStyle(.secondary)
             TextField("Search", text: $text)
                 .textFieldStyle(.plain)
-                .font(.system(size: 14))
+                .font(.system(size: 14, design: .monospaced))
             if !text.isEmpty {
                 Button { text = "" } label: {
                     Image(systemName: "xmark.circle.fill").foregroundStyle(.tertiary)
@@ -376,7 +377,8 @@ struct SearchField: View {
         }
         .padding(.horizontal, 12)
         .frame(height: 34)
-        .background(Capsule().fill(Color(nsColor: Palette.raised).opacity(0.7)))
+        .background(Capsule().fill(Color.black.opacity(0.35)))
+        .overlay(Capsule().strokeBorder(Color.white.opacity(0.08), lineWidth: 1))
     }
 }
 
@@ -391,14 +393,14 @@ struct SidebarRow: View {
             HStack(spacing: 11) {
                 Badge(symbol: page.symbol, tint: page.tint, size: 26)
                 Text(page.title)
-                    .font(.system(size: 14, weight: selected ? .semibold : .regular))
+                    .font(.system(size: 14, weight: selected ? .semibold : .regular, design: .monospaced))
                     .foregroundStyle(.primary)
                 Spacer(minLength: 0)
             }
             .padding(.horizontal, 8)
             .padding(.vertical, 5)
             .background(RoundedRectangle(cornerRadius: 9, style: .continuous)
-                .fill(Color(nsColor: Palette.raised).opacity(selected ? 1 : (hover.on ? 0.45 : 0)))
+                .fill(Color.white.opacity(selected ? 0.13 : (hover.on ? 0.06 : 0)))
                 .tileBevel(corner: 9, strength: selected ? 1 : 0))
             .contentShape(Rectangle())
         }
@@ -504,10 +506,17 @@ struct TopBar: View {
                 Rectangle().fill(Color(nsColor: Palette.hairline)).frame(width: 1, height: 18)
                 pillButton("chevron.right", enabled: store.canGoForward) { store.goForward() }
             }
-            .background(Capsule().fill(Color(nsColor: Palette.pill)))
+            .background(Capsule().fill(Color.black.opacity(0.35)))
+            .overlay(Capsule().strokeBorder(Color.white.opacity(0.08), lineWidth: 1))
 
-            Text(store.route.detail?.title ?? store.route.page.title)
-                .font(.system(size: 20, weight: .bold))
+            VStack(alignment: .leading, spacing: 2) {
+                Text(store.route.detail == nil ? "ELEMENTAL" : store.route.page.title.uppercased())
+                    .font(.system(size: 10, weight: .semibold, design: .monospaced))
+                    .tracking(2.6)
+                    .foregroundStyle(.secondary)
+                Text(store.route.detail?.title ?? store.route.page.title)
+                .font(.system(size: 20, weight: .bold, design: .monospaced))
+            }
             Spacer()
             LowPowerChip(store: store)
         }
@@ -516,7 +525,7 @@ struct TopBar: View {
     private func pillButton(_ symbol: String, enabled: Bool, _ action: @escaping () -> Void) -> some View {
         Button(action: action) {
             Image(systemName: symbol)
-                .font(.system(size: 14, weight: .semibold))
+                .font(.system(size: 14, weight: .semibold, design: .monospaced))
                 .frame(width: 40, height: 34)
                 .contentShape(Rectangle())
         }
@@ -535,17 +544,19 @@ struct LowPowerChip: View {
             HStack(spacing: 7) {
                 Image(systemName: on ? "leaf.fill" : "leaf")
                     .foregroundStyle(on ? Color.green : Color.secondary)
-                Text("Low Power")
-                    .font(.system(size: 14, weight: .semibold))
+                Text("LOW POWER")
+                    .font(.system(size: 11, weight: .semibold, design: .monospaced))
+                    .tracking(1.6)
                 if store.config.lowPower == .automatic {
-                    Text("Auto").font(.system(size: 11, weight: .medium)).foregroundStyle(.secondary)
+                    Text("AUTO").font(.system(size: 10, weight: .medium, design: .monospaced))
+                        .tracking(1.2).foregroundStyle(.secondary)
                 }
             }
-            .padding(.horizontal, 16)
-            .frame(height: 34)
-            .background(Capsule().fill(on ? Color.green.opacity(0.18) : Color(nsColor: Palette.pill)))
+            .padding(.horizontal, 14)
+            .frame(height: 30)
+            .background(Capsule().fill(on ? Color.green.opacity(0.18) : Color.black.opacity(0.35)))
             .overlay(Capsule().strokeBorder(on ? Color.green.opacity(0.45)
-                                               : Color(nsColor: Palette.hairline), lineWidth: 1))
+                                               : Color.white.opacity(0.08), lineWidth: 1))
             .contentShape(Capsule())
         }
         .buttonStyle(.plain)
@@ -560,14 +571,18 @@ struct Badge: View {
     let tint: Color
     var size: CGFloat = 26
     var body: some View {
+        // dormstand's icons: white on a dark raised block, the mosaic's grid
+        // across it, the page's colour only as light from inside.
         RoundedRectangle(cornerRadius: size * 0.22, style: .continuous)
-            .fill(tint.gradient)
+            .fill(LinearGradient(colors: [tint.opacity(0.42), Color(white: 0.10)],
+                                 startPoint: .topLeading, endPoint: .bottomTrailing))
+            .overlay(DotGrid(pitch: max(3, size / 9)).clipShape(RoundedRectangle(cornerRadius: size * 0.22, style: .continuous)))
             .frame(width: size, height: size)
             .tileBevel(corner: size * 0.22, strength: 2.2)
             .overlay(Image(systemName: symbol)
-                .font(.system(size: size * 0.5, weight: .semibold))
+                .font(.system(size: size * 0.48, weight: .bold))
                 .foregroundStyle(.white)
-                .shadow(color: .black.opacity(0.25), radius: 0.5, y: 0.5))
+                .shadow(color: .black.opacity(0.5), radius: 0.5, y: 1))
     }
 }
 
@@ -577,7 +592,10 @@ struct SectionTitle: View {
     init(_ text: String, info: String? = nil) { self.text = text; self.info = info }
     var body: some View {
         HStack(spacing: 6) {
-            Text(text).font(.system(size: 15, weight: .semibold)).foregroundStyle(.secondary)
+            Text(text.uppercased())
+                .font(.system(size: 11, weight: .semibold, design: .monospaced))
+                .tracking(2.4)
+                .foregroundStyle(.secondary)
             if let info { InfoButton(text: info) }
         }
         .padding(.leading, 4)
@@ -591,13 +609,13 @@ struct InfoButton: View {
     var body: some View {
         Button { shown.on.toggle() } label: {
             Image(systemName: "info.circle.fill")
-                .font(.system(size: 14))
+                .font(.system(size: 14, design: .monospaced))
                 .foregroundStyle(.tertiary)
         }
         .buttonStyle(.plain)
         .popover(isPresented: $shown.on, arrowEdge: .bottom) {
             Text(text)
-                .font(.system(size: 13))
+                .font(.system(size: 13, design: .monospaced))
                 .padding(16)
                 .frame(width: 300, alignment: .leading)
                 .fixedSize(horizontal: false, vertical: true)
@@ -610,13 +628,55 @@ struct RowsCard<Content: View>: View {
     var body: some View {
         VStack(alignment: .leading, spacing: 0) { content }
             .frame(maxWidth: .infinity, alignment: .leading)
-            .background(RoundedRectangle(cornerRadius: 16, style: .continuous)
-                .fill(Color(nsColor: Palette.card)))
-            .tileBevel(corner: 16)
+            .glassCard(corner: 16)
     }
 }
 
 // MARK: - The wall's own look
+//
+// Matched to dormstand, his wall display (6 Nov 2026: "revamp the settings
+// to be like how Elemental is and how dormstand looks"): noir, the mosaic
+// behind everything, dark frosted glass slabs with a lit top-left edge,
+// monospaced text, letter-spaced uppercase labels, white with one accent.
+
+enum Look {
+    /// The one accent: the colour of a clear sky on the wall.
+    static let accent = Color(red: 0.56, green: 0.76, blue: 1.0)
+}
+
+/// The mosaic's grid, drawn faintly over a surface.
+struct DotGrid: View {
+    var pitch: CGFloat = 4
+    var body: some View {
+        Canvas { ctx, size in
+            var p = Path()
+            var x: CGFloat = pitch
+            while x < size.width { p.addRect(CGRect(x: x, y: 0, width: 0.6, height: size.height)); x += pitch }
+            var y: CGFloat = pitch
+            while y < size.height { p.addRect(CGRect(x: 0, y: y, width: size.width, height: 0.6)); y += pitch }
+            ctx.fill(p, with: .color(.black.opacity(0.22)))
+        }
+        .allowsHitTesting(false)
+    }
+}
+
+extension View {
+    /// A slab of dark frosted glass, as dormstand's cards: the wall blurred
+    /// through it, darker toward the bottom right, its top-left edge lit.
+    func glassCard(corner: CGFloat, depth: Double = 1) -> some View {
+        let shape = RoundedRectangle(cornerRadius: corner, style: .continuous)
+        return background(ZStack {
+            shape.fill(.ultraThinMaterial)
+            shape.fill(LinearGradient(colors: [Color(white: 0.20).opacity(0.55), Color.black.opacity(0.72)],
+                                      startPoint: .topLeading, endPoint: .bottomTrailing))
+        })
+        .clipShape(shape)
+        .overlay(shape.strokeBorder(LinearGradient(colors: [.white.opacity(0.22), .white.opacity(0.04), .white.opacity(0.02)],
+                                                   startPoint: .topLeading, endPoint: .bottomTrailing),
+                                    lineWidth: 1))
+        .shadow(color: .black.opacity(0.45), radius: 14 * depth, x: 0, y: 8 * depth)
+    }
+}
 
 extension View {
     /// A block of the mosaic: lit from the upper left like the wallpaper's own
@@ -683,10 +743,10 @@ struct RowLabel: View {
     var subtitle: String? = nil
     var body: some View {
         VStack(alignment: .leading, spacing: 3) {
-            Text(title).font(.system(size: 14, weight: .medium))
+            Text(title).font(.system(size: 14, weight: .medium, design: .monospaced))
             if let subtitle {
                 Text(subtitle)
-                    .font(.system(size: 12))
+                    .font(.system(size: 12, design: .monospaced))
                     .foregroundStyle(.secondary)
                     .fixedSize(horizontal: false, vertical: true)
             }
@@ -724,7 +784,7 @@ struct SliderRow: View {
                 RowLabel(title: title, subtitle: subtitle)
                 Spacer(minLength: 12)
                 Text(format(value))
-                    .font(.system(size: 13, weight: .medium).monospacedDigit())
+                    .font(.system(size: 13, weight: .medium, design: .monospaced).monospacedDigit())
                     .foregroundStyle(.secondary)
             }
             Slider(value: $value, in: range).controlSize(.small)
@@ -782,11 +842,11 @@ struct NavRow: View {
                 RowLabel(title: title, subtitle: subtitle)
                 Spacer(minLength: 0)
                 Image(systemName: "chevron.right")
-                    .font(.system(size: 13, weight: .semibold))
+                    .font(.system(size: 13, weight: .semibold, design: .monospaced))
                     .foregroundStyle(.tertiary)
             }
             .rowPadding()
-            .background(Color(nsColor: Palette.raised).opacity(hover.on ? 0.35 : 0))
+            .background(Color.white.opacity(hover.on ? 0.05 : 0))
             .contentShape(Rectangle())
         }
         .buttonStyle(.plain)
@@ -813,7 +873,7 @@ struct TileCard: View {
         VStack(spacing: 0) {
             if let title {
                 HStack(spacing: 6) {
-                    Text(title).font(.system(size: 15, weight: .semibold))
+                    Text(title).font(.system(size: 15, weight: .semibold, design: .monospaced))
                     if let info { InfoButton(text: info) }
                     Spacer()
                 }
@@ -827,12 +887,12 @@ struct TileCard: View {
                     }
                     Button { tap(o.id) } label: {
                         HStack(spacing: 8) {
-                            if let s = o.symbol { Image(systemName: s).font(.system(size: 15)) }
-                            Text(o.title).font(.system(size: 14, weight: .medium))
+                            if let s = o.symbol { Image(systemName: s).font(.system(size: 15, design: .monospaced)) }
+                            Text(o.title).font(.system(size: 14, weight: .medium, design: .monospaced))
                                 .lineLimit(1).minimumScaleFactor(0.8)
                         }
                         .frame(maxWidth: .infinity, maxHeight: .infinity)
-                        .background(Color(nsColor: Palette.raised).opacity(isOn(o.id) ? 1 : 0))
+                        .background(Color.white.opacity(isOn(o.id) ? 0.13 : 0))
                         .contentShape(Rectangle())
                     }
                     .buttonStyle(.plain)
@@ -841,9 +901,7 @@ struct TileCard: View {
             }
             .frame(height: 50)
         }
-        .background(Color(nsColor: Palette.card))
-        .clipShape(RoundedRectangle(cornerRadius: 16, style: .continuous))
-        .tileBevel(corner: 16)
+        .glassCard(corner: 16)
     }
 }
 
@@ -852,7 +910,7 @@ struct Footnote: View {
     init(_ text: String) { self.text = text }
     var body: some View {
         Text(text)
-            .font(.system(size: 12))
+            .font(.system(size: 12, design: .monospaced))
             .foregroundStyle(.secondary)
             .fixedSize(horizontal: false, vertical: true)
             .padding(.horizontal, 6)
@@ -914,7 +972,7 @@ struct HeroHeader: View {
             // height became the whole window's minimum, which then grew to
             // twice the screen.
             Text(caption)
-                .font(.system(size: 13))
+                .font(.system(size: 13, design: .monospaced))
                 .foregroundStyle(.secondary)
                 .fixedSize(horizontal: false, vertical: true)
                 .frame(width: 260, alignment: .leading)
@@ -937,7 +995,7 @@ struct ThumbChoice: View {
                         .strokeBorder(selected ? Color.accentColor : .clear, lineWidth: 2.5)
                         .padding(-4))
                 Text(caption)
-                    .font(.system(size: 12, weight: selected ? .semibold : .regular))
+                    .font(.system(size: 12, weight: selected ? .semibold : .regular, design: .monospaced))
                     .foregroundStyle(selected ? .primary : .secondary)
             }
             .padding(6)
@@ -1005,9 +1063,9 @@ struct GridSummary: View {
         let g = SettingsStore.geometry(rows)
         VStack(alignment: .leading, spacing: 4) {
             Text("\(g.rows) rows × \(g.cols) columns")
-                .font(.system(size: 17, weight: .semibold).monospacedDigit())
+                .font(.system(size: 17, weight: .semibold, design: .monospaced).monospacedDigit())
             Text(String(format: "%.1f px cells on this display", g.pitch))
-                .font(.system(size: 12).monospacedDigit())
+                .font(.system(size: 12, design: .monospaced).monospacedDigit())
                 .foregroundStyle(.secondary)
         }
     }
@@ -1636,7 +1694,7 @@ struct AutomationPage: View {
                         Text(k.name).font(.system(size: 13, weight: .semibold, design: .monospaced))
                         Text(k.type).font(.system(size: 12, design: .monospaced)).foregroundStyle(.secondary)
                     }
-                    Text(k.detail).font(.system(size: 12)).foregroundStyle(.secondary)
+                    Text(k.detail).font(.system(size: 12, design: .monospaced)).foregroundStyle(.secondary)
                         .fixedSize(horizontal: false, vertical: true)
                 }
                 .padding(.horizontal, 18)
@@ -1698,9 +1756,9 @@ struct PageHeader: View {
         VStack(spacing: 10) {
             Badge(symbol: page.symbol, tint: page.tint, size: 76)
                 .shadow(color: page.tint.opacity(0.35), radius: 12, y: 4)
-            Text(page.title).font(.system(size: 28, weight: .bold))
+            Text(page.title).font(.system(size: 28, weight: .bold, design: .monospaced))
             Text(subtitle)
-                .font(.system(size: 14))
+                .font(.system(size: 14, design: .monospaced))
                 .foregroundStyle(.secondary)
                 .multilineTextAlignment(.center)
         }
@@ -1721,9 +1779,9 @@ struct AboutPage: View {
             Image(nsImage: NSApp.applicationIconImage)
                 .resizable()
                 .frame(width: 96, height: 96)
-            Text("Elemental").font(.system(size: 28, weight: .bold))
+            Text("Elemental").font(.system(size: 28, weight: .bold, design: .monospaced))
             Text("Version \(v) (\(b))\(Config.isPreRelease ? " — pre-release" : "")")
-                .font(.system(size: 13))
+                .font(.system(size: 13, design: .monospaced))
                 .foregroundStyle(.secondary)
         }
         .frame(maxWidth: .infinity)
@@ -1846,7 +1904,9 @@ final class SettingsWindowController: NSObject, NSWindowDelegate {
         w.titleVisibility = .hidden
         w.titlebarAppearsTransparent = true
         w.isMovableByWindowBackground = true
-        w.backgroundColor = Palette.sidebar
+        w.backgroundColor = .black
+        // Noir, like the wall: the settings are always the dark side.
+        w.appearance = NSAppearance(named: .darkAqua)
         w.isReleasedWhenClosed = false
         w.delegate = self
         w.minSize = NSSize(width: 860, height: 580)
