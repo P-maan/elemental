@@ -31,6 +31,9 @@ struct AstroState {
     /// Where and when, for the SEASON: how far into the fall the trees are
     /// (SceneSimulation.leafSeason). Latitude in degrees, day of the year 1-366.
     var latitude: Float = 0
+    var longitude: Float = 0
+    /// The instant this was computed for (the festivals' calendar reads it).
+    var date: Date = Date()
     var dayOfYear: Float = 0
 }
 
@@ -329,6 +332,8 @@ enum Astro {
     static func update(lat: Double, lon: Double, facingAz: Double = 0, date: Date = Date()) -> AstroState {
         var s = AstroState()
         s.latitude = Float(lat)
+        s.longitude = Float(lon)
+        s.date = date
         s.dayOfYear = Float(Calendar.current.ordinality(of: .day, in: .year, for: date) ?? 1)
         let sun = sunPosition(lat: lat, lon: lon, date: date)
         let moon = moonPosition(lat: lat, lon: lon, date: date)

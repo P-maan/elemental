@@ -187,6 +187,10 @@ final class ElementalRenderer {
     private(set) var gpuMs: Double = 0
     /// Show Zo's reminders in the sky (Config.zoInSky).
     var showZo = true
+    /// Festivals (Config.festivals / festivalsIndian).
+    var festivals: (on: Bool, indian: Bool) = (true, false) {
+        didSet { sim.festivalsOn = festivals.on; sim.festivalsIndian = festivals.indian }
+    }
     private var zoEased: Float = 0
     private var slowSpecAt: CFAbsoluteTime = 0
 

@@ -102,6 +102,8 @@ enum AutomationSchema {
         Key(name: "lowPowerFPS", type: "int 4…30", detail: "Steady frame rate while Low Power is in force. Default 5 (about 1% CPU)."),
         Key(name: "musicVisualizer", type: "bool", detail: "Move with what this Mac is playing, only while something plays. Default true."),
         Key(name: "songTint", type: "bool", detail: "A very faint tinge of the playing song's album cover (Music or Spotify). Default true."),
+        Key(name: "festivals", type: "bool", detail: "Festivals on the wall: diyas and fireworks at Diwali, kites at Sankranti, gulal at Holi, lights at Christmas, fireworks at New Year. Default true."),
+        Key(name: "festivalsIndian", type: "bool", detail: "Add the Indian festivals wherever the sky is, not only over India. Default false."),
         Key(name: "zoInSky", type: "bool", detail: "Show Zo's reminders (POST /v1/signal) through the sky's own effects: the sun's ripple, the cloud's glow, the moon's halo, the stars. Default true."),
         Key(name: "lowPowerSmoothRain", type: "bool", detail: "Steady 20 fps in Low Power while rain or snow is falling. Default true."),
         Key(name: "syncLockScreen", type: "bool", detail: "Show the scene on the lock screen."),
@@ -452,6 +454,8 @@ final class AutomationServer {
                 "music": ["enabled": c.musicVisualizer, "onAC": app.onACPower,
                           "running": app.music.running, "level": (app.music.level * 100).rounded() / 100,
                           "songTint": c.songTint,
+                          "festivals": c.festivals,
+                          "festivalsIndian": c.festivalsIndian,
                           "error": app.music.lastError ?? NSNull()] as [String: Any]]
     }
 

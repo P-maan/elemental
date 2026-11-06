@@ -3011,6 +3011,8 @@ fragment float4 heightPass(VOut in [[stage_in]],
                 h = min(1.0f, h + 0.14f * a);
             } else if (kind == 14) {
                 h = min(1.0f, h + 0.18f * a);             // a leaf lies on top
+            } else if (kind == 15) {
+                h = min(1.0f, h + 0.16f * a);             // a diya, a kite: a little proud
             }
         }
     }
@@ -4212,6 +4214,25 @@ fragment float4 presentPass(VOut in [[stage_in]],
                     float wetL = (U.code >= 51 && U.code <= 99) ? 0.72f : 1.0f;
                     col = mix(col, leaf * shade * wetL, k * 0.92f);
                     lum = mix(lum, lumv * 0.9f, k * 0.5f);
+
+                } else if (kind == 15) {
+                    // A FESTIVAL LIGHT (Festivals.swift): a diya's flame, a
+                    // spark, a bulb on a string — or, not glowing, a clay
+                    // bowl, a kite, a drift of gulal. The colour is packed in
+                    // z, five bits a channel, plus 32768 if it glows. A glow
+                    // is its own light, bright on a black night sky; the rest
+                    // take the light like the tile they lie on.
+                    float zi = floor(gcell.z + 0.5f);
+                    bool glows = zi >= 32768.0f;
+                    if (glows) zi -= 32768.0f;
+                    float3 lc = float3(floor(zi / 1024.0f), fmod(floor(zi / 32.0f), 32.0f), fmod(zi, 32.0f)) / 31.0f;
+                    if (glows) {
+                        col = mix(col, lc, k * 0.80f) + lc * k * 0.30f;
+                        lum = saturate(lum + k * 0.30f);
+                    } else {
+                        col = mix(col, lc * (0.50f + 0.80f * lumv), k * 0.90f);
+                        lum = mix(lum, lumv, k * 0.4f);
+                    }
 
                 } else if (kind == 9) {
                     // Frost. Crystalline and MATTE — the opposite of glaze,

@@ -395,6 +395,12 @@ struct Config: Codable, Equatable {
     /// Zo's reminders shown by the sky's own effects (Signals.swift).
     var zoInSky: Bool = true
 
+    /// Festivals on the wall (Festivals.swift): those of the place the sky
+    /// is over: American in America, Indian in India, European in Europe.
+    /// `festivalsIndian` adds the Indian ones anywhere; off by default.
+    var festivals: Bool = true
+    var festivalsIndian: Bool = false
+
     /// The address the automation endpoint listens on, 127.0.0.1 only.
     var automationPort: Int = 7417
     /// Whether the local HTTP endpoint runs at all. The URL scheme is always on.
@@ -894,6 +900,8 @@ extension Config {
         musicVisualizer    = c.lenient(.musicVisualizer, d.musicVisualizer)
         songTint           = c.lenient(.songTint, d.songTint)
         zoInSky            = c.lenient(.zoInSky, d.zoInSky)
+        festivals          = c.lenient(.festivals, d.festivals)
+        festivalsIndian    = c.lenient(.festivalsIndian, d.festivalsIndian)
         automationPort     = c.lenient(.automationPort, d.automationPort)
         automationEnabled  = c.lenient(.automationEnabled, d.automationEnabled)
         lock               = c.lenient(.lock, d.lock)

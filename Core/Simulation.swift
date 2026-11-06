@@ -604,7 +604,30 @@ final class SceneSimulation {
 
     /// Something is in the air after a shake — the frame rate should be up
     /// for the second or two it takes to land.
-    var hasDebris: Bool { !clumps.isEmpty || drops.contains { $0.splashLife > 0 } }
+    var hasDebris: Bool { !clumps.isEmpty || drops.contains { $0.splashLife > 0 } || fest.hasParticles }
+
+    /// Festivals (Festivals.swift): on, and the Indian ones wherever the sky is.
+    let fest = FestivalFX()
+    var festivalsOn = true
+    var festivalsIndian = false
+    private var festClock: Float = 1e9
+    private func updateFestivals(dt: Float, state: SceneState) {
+        festClock += dt
+        if festClock > 30 {
+            festClock = 0
+            if festivalsOn {
+                let l = Festivals.look(at: state.astro.date, lat: Double(state.astro.latitude),
+                                       lon: Double(state.astro.longitude), indianEverywhere: festivalsIndian)
+                fest.nightLook = l.night; fest.dayLook = l.day
+            } else {
+                fest.nightLook = FestivalLook(); fest.dayLook = FestivalLook()
+            }
+        }
+        let alt = state.astro.sunAlt
+        fest.nightK = max(0, min(1, (-alt - 1) / 5))      // from just after sunset
+        fest.dayK = max(0, min(1, (alt + 2) / 6))
+        fest.step(dt: dt, W: W, H: H, SP: SP, crossWind: crossWind, surfaces: surfaces)
+    }
 
     /// A surface MOVED — a window dragged, a widget rearranged — and shook off
     /// some of what lay on it: the water on its top edge is thrown up and off
@@ -672,16 +695,18 @@ final class SceneSimulation {
     /// How far into leaf fall it is, 0..1 — from where (latitude) and when (day
     /// of the year). Leaf fall peaks around the 23rd of October at 42°N, a
     /// couple of days earlier per degree further north; the southern
-    /// hemisphere has it in April. Only between about 26° and 64°, where the
-    /// trees that turn are.
+    /// hemisphere has it in April. Only where there IS an autumn — the trees
+    /// that turn grow from about 35° to 64°, thinning out below 37° and gone
+    /// by 32°: Amherst has a fall, Greater Noida does not (6 Nov 2026: "back
+    /// home autumn leaves will not be there").
     static func leafSeason(latitude: Float, dayOfYear: Float) -> Float {
         let a = abs(latitude)
-        guard a > 26, a < 64, dayOfYear > 0 else { return 0 }
+        guard a > 32, a < 64, dayOfYear > 0 else { return 0 }
         let peak = 296 - (a - 42) * 2.2
         var d = dayOfYear
         if latitude < 0 { d = (d + 182).truncatingRemainder(dividingBy: 365) }
         let x = (d - peak) / 16
-        let edge = min(1, (a - 26) / 6) * min(1, (64 - a) / 6)
+        let edge = min(1, (a - 32) / 5) * min(1, (64 - a) / 6)
         return exp(-x * x) * edge
     }
 
@@ -3107,6 +3132,7 @@ final class SceneSimulation {
         glassQuads.removeAll(keepingCapacity: true)
         let dt = min(0.05, rawDT)
         updateLeaves(dt: dt, state: state)
+        updateFestivals(dt: dt, state: state)
         updateClumps(dt: dt)
         let w = state.weather
         // Measured, not classified. The code alone used to be enough to soak
@@ -3609,6 +3635,7 @@ final class SceneSimulation {
         static let matte: Float = 11    // drizzle's flat film
         static let bloom: Float = 13    // condensation: scattering, not glossy
         static let leaf: Float = 14     // a fallen leaf; its colour in z
+        static let light: Float = 15    // a festival light: colour packed in z, w 1 if it glows
     }
 
     /// Draw what has collected on each piece of furniture into the cells around
@@ -4207,6 +4234,18 @@ final class SceneSimulation {
             stamp(x: c.x, y: c.y, r: c.r, kind: Deposit.snow, strength: 0.95)
         }
         // A leaf is one tile in its colour (hue in z), wherever it is now.
+        // The festival, glowing: diyas, sparks, kites, gulal (kind 15).
+        if fest.active {
+            fest.stamp(W: W, H: H, SP: SP, cols: cols, rows: rows, time: simSec, surfaces: surfaces,
+                       marks: { [unowned self] k in self.marks(k) }) { cx, cy, a, code, glows in
+                guard cx >= 0, cx < cols, cy >= 0, cy < rows, a > 0.02 else { return }
+                let idx = cy * cols + cx
+                if glassCells[idx].y == Deposit.light && glassCells[idx].x >= a { return }
+                // w is the deposit's uncovered top fraction (stampFurniture's
+                // `by`), so the glow rides in z: 32768 added to the colour.
+                glassCells[idx] = SIMD4<Float>(min(1, a), Deposit.light, code + (glows ? 32768 : 0), 0)
+            }
+        }
         for c in clumps where c.leaf {
             let cx = Int(c.x / SP), cy = Int(c.y / SP)
             guard cx >= 0, cx < cols, cy >= 0, cy < rows else { continue }

@@ -1174,6 +1174,21 @@ struct GeneralPage: View {
                       isOn: store.binding(\.songTint))
         }
 
+        SectionTitle("Festivals", info: "Each place keeps its own, drawn with the wall's own tiles. India: diyas from "
+                     + "Dhanteras to Bhai Dooj with fireworks building to Diwali night; bonfires at Lohri, Holika Dahan and "
+                     + "Dussehra; kites at Makar Sankranti and on 15 August; gulal at Holi; lights at Navratri and Christmas. "
+                     + "America: the Fourth of July, Halloween's lanterns, Christmas lights. Europe: Christmas-market lights all "
+                     + "December, Bonfire Night in Britain, Bastille Day in France, Midsummer bonfires in the north. "
+                     + "Everywhere: fireworks at midnight on New Year's Eve.")
+        RowsCard {
+            ToggleRow(title: "Festivals",
+                      subtitle: "The festivals of the place the sky is over.",
+                      isOn: store.binding(\.festivals))
+            ToggleRow(title: "Indian festivals everywhere",
+                      subtitle: "Add Diwali, Holi, Lohri and the rest even when the sky is not over India.",
+                      isOn: store.binding(\.festivalsIndian))
+        }
+
         SectionTitle("Setup")
         RowsCard {
             ButtonRow(title: "First-run setup",

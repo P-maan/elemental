@@ -200,6 +200,7 @@ final class WallpaperSurface: NSObject, CAMetalDisplayLinkDelegate {
         renderer.playbackOnWake = config.playbackOnWake
         renderer.playbackMaxSeconds = config.playbackMaxSeconds
         renderer.showZo = config.zoInSky
+        renderer.festivals = (config.festivals, config.festivalsIndian)
         // Hidden switch for diagnosis: `defaults write com.prakritmaan.elemental
         // keptFrames -bool NO` shades every pixel every frame.
         renderer.keptFrames = UserDefaults.standard.object(forKey: "keptFrames") as? Bool ?? true
