@@ -34,11 +34,36 @@ final class CursorTracker {
         if let m = NSEvent.addGlobalMonitorForEvents(matching: [.leftMouseUp], handler: { [weak self] _ in
             self?.onDesktop = false
         }) { monitors.append(m) }
+        // A plain HOVER too: the pointer passing over the desktop disturbs
+        // what lies and falls there (Cursor.hover). At most thirty times a
+        // second, and the window under it is asked at most ten.
+        if let m = NSEvent.addGlobalMonitorForEvents(matching: [.mouseMoved], handler: { [weak self] _ in
+            self?.handleHover()
+        }) { monitors.append(m) }
     }
 
     func stop() {
         monitors.forEach { NSEvent.removeMonitor($0) }
         monitors.removeAll()
+    }
+
+    private var lastHover: CFAbsoluteTime = 0
+    private var lastHoverCheck: CFAbsoluteTime = 0
+    private var hoverOnDesktop = false
+
+    private func handleHover() {
+        let now = CFAbsoluteTimeGetCurrent()
+        guard now - lastHover > 1.0 / 30 else { return }
+        lastHover = now
+        if now - lastHoverCheck > 0.1 {
+            lastHoverCheck = now
+            hoverOnDesktop = Self.desktopUnderPointer()
+        }
+        guard hoverOnDesktop else { return }
+        let m = NSEvent.mouseLocation
+        let primaryH = NSScreen.screens.first?.frame.height ?? 0
+        Cursor.shared.hovered(to: CGPoint(x: m.x, y: primaryH - m.y))
+        onDrag?()
     }
 
     private func handleDrag() {

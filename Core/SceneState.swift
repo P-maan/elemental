@@ -115,9 +115,9 @@ struct Uniforms {
     var cursorX: Float = -1e5, cursorY: Float = -1e5
     var cursorVX: Float = 0, cursorVY: Float = 0
     var drag: Float = 0
-    /// How many rays are showing SIGNALS (Signals.swift); 0 = the music.
-    /// Took what was cursorPad0.
-    var rayCount: Float = 0
+    /// How strongly Zo's reminder shows right now, 0..1 (Signals.glow);
+    /// its colour rides in the spectrum buffer. Took what was cursorPad0.
+    var zoGlow: Float = 0
     var cursorPad1: Float = 0, cursorPad2: Float = 0
     // ---- A sixth block, 304 -> 320 bytes: the song's tinge (SongTint.swift),
     // colour 0..255 and how much of it. Append only — trap 5.

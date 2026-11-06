@@ -102,7 +102,7 @@ enum AutomationSchema {
         Key(name: "lowPowerFPS", type: "int 4…30", detail: "Steady frame rate while Low Power is in force. Default 5 (about 1% CPU)."),
         Key(name: "musicVisualizer", type: "bool", detail: "Move with what this Mac is playing, only while something plays. Default true."),
         Key(name: "songTint", type: "bool", detail: "A very faint tinge of the playing song's album cover (Music or Spotify). Default true."),
-        Key(name: "rays", type: "array", detail: "What the sky shows (the sky decides how): any of battery, cpu, memory, day, zo, zo:NAME, music.bass, music.mid, music.high. Empty: the sun's rays answer the music."),
+        Key(name: "zoInSky", type: "bool", detail: "Show Zo's reminders (POST /v1/signal) through the sky's own effects: the sun's ripple, the cloud's glow, the moon's halo, the stars. Default true."),
         Key(name: "lowPowerSmoothRain", type: "bool", detail: "Steady 20 fps in Low Power while rain or snow is falling. Default true."),
         Key(name: "syncLockScreen", type: "bool", detail: "Show the scene on the lock screen."),
         Key(name: "renderWhenOccluded", type: "bool", detail: "Keep drawing behind fullscreen apps."),
@@ -375,7 +375,7 @@ final class AutomationServer {
             Pulse.shared.feed(lv); app.pulseStarted()
             return (200, ["ok": true])
 
-        // Zo's SIGNALS (Signals.swift): a named value the rays can show — a
+        // Zo's SIGNALS (Signals.swift): a reminder the sky shows — a
         // reminder, a countdown, anything. {"name": "class", "value": 0..1,
         // "color": "#ff8800", "label": "CLASS 2:10", "seconds": optional}.
         // It stays until Zo clears it (DELETE) or its seconds run out.
@@ -387,7 +387,7 @@ final class AutomationServer {
                 let list = Signals.shared.zoSignals().map { s -> [String: Any] in
                     ["name": s.name, "value": s.signal.value, "label": s.signal.label ?? NSNull()]
                 }
-                return (200, ["signals": list, "rays": app.currentConfig.rays])
+                return (200, ["signals": list, "shown": app.currentConfig.zoInSky])
             }
             let obj = (try? JSONSerialization.jsonObject(with: r.body)) as? [String: Any]
             guard let name = ((obj?["name"] as? String) ?? r.query["name"])?

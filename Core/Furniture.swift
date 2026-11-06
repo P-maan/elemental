@@ -332,11 +332,17 @@ enum Furniture {
         let top = primaryH - f.maxY
         var out: [WidgetRect] = []
         for w in list {
+            // ANY layer, not only the desktop's own. Clicking the wallpaper
+            // to show the desktop brings the widgets FORWARD, out of the
+            // negative layer — and requiring it made every widget vanish at
+            // that moment, taking its leaves and snow with it. Notification
+            // banners are the same owner but far too short to pass the size
+            // test; the Notification Center panel is the full screen.
             guard (w[kCGWindowOwnerName as String] as? String) == "Notification Center",
-                  let layer = w[kCGWindowLayer as String] as? Int, layer < 0,
+                  (w[kCGWindowName as String] as? String) != "Notification Center",
                   let b = w[kCGWindowBounds as String] as? [String: Double],
                   let x = b["X"], let y = b["Y"], let bw = b["Width"], let bh = b["Height"],
-                  bw >= 60, bh >= 60, bw < f.width * 0.9, bh < f.height * 0.9 else { continue }
+                  bw >= 140, bh >= 140, bw < f.width * 0.9, bh < f.height * 0.9 else { continue }
             // On this screen?
             let cx = x + bw / 2 - f.minX, cy = y + bh / 2 - top
             guard cx >= 0, cx <= f.width, cy >= 0, cy <= f.height else { continue }

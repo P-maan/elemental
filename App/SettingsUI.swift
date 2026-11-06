@@ -60,7 +60,7 @@ enum SettingsPage: String, CaseIterable, Identifiable {
         case .lock: "Lock Screen"
         case .saver: "Screen Saver"
         case .elements: "Elements"
-        case .signals: "Signals"
+        case .signals: "Zo in the Sky"
         case .location: "Location"
         case .automation: "Automation"
         case .about: "About"
@@ -109,7 +109,7 @@ enum SettingsPage: String, CaseIterable, Identifiable {
         case .lock: "lock screen still password"
         case .saver: "screen saver idle"
         case .elements: "dock widgets menu bar furniture rain glass water"
-        case .signals: "rays sun moon signals battery cpu memory zo reminders information gauge"
+        case .signals: "zo reminders signals sky sun moon clouds stars"
         case .location: "city place search location services"
         case .automation: "api endpoint http url scheme curl shortcuts script automation"
         case .about: "version update icon github"
@@ -1529,27 +1529,21 @@ struct SurfacePage: View {
 
 // MARK: - Signals
 
-/// What the sky tells you (Signals.swift). Sources are switched on; the sky
-/// decides how to show them — nothing numbered, nothing laid out by hand.
+/// Zo's reminders in the sky (Signals.swift).
 struct SignalsPage: View {
     @ObservedObject var store: SettingsStore
 
     var body: some View {
-        SectionTitle("What the sky tells you",
-                     info: "Each thing switched on here is shown by the sky itself, in its own colour, "
-                         + "as large as its value: rays from the sun on a clear day, lights inside the "
-                         + "clouds when it is overcast, rings round the moon at night, an aurora when "
-                         + "there is no moon. Never under your widgets and windows.")
+        SectionTitle("Zo in the sky",
+                     info: "When Zo puts up a reminder, the sky shows it with what it already has: "
+                         + "the sun's ripple on a clear day, the cloud glowing from within when it is "
+                         + "overcast, the moon's halo at night, the stars when there is no moon — "
+                         + "stronger the more it matters, leaning faintly toward the reminder's colour. "
+                         + "Several take turns. Each goes when Zo clears it.")
         RowsCard {
-            ForEach(Array(Signals.sources.enumerated()), id: \.offset) { i, src in
-                ToggleRow(title: src.title, subtitle: src.detail,
-                          isOn: Binding(get: { store.config.rays.contains(src.id) },
-                                        set: { on in store.update { c in
-                                            c.rays.removeAll { $0 == src.id }
-                                            if on { c.rays.append(src.id) }
-                                        } }))
-                if i < Signals.sources.count - 1 { RowDivider() }
-            }
+            ToggleRow(title: "Show Zo's reminders",
+                      subtitle: "Through the sun, the clouds, the moon and the stars — nothing drawn on top.",
+                      isOn: store.binding(\.zoInSky))
         }
 
         SectionTitle("From Zo")

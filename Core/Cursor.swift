@@ -17,16 +17,28 @@ final class Cursor: @unchecked Sendable {
     private var pos = CGPoint(x: -1e5, y: -1e5)
     private var vel = CGVector(dx: 0, dy: 0)
     private var lastMove: CFAbsoluteTime = -100
+    /// The last move was a plain HOVER (no button held), not a drag.
+    private var hovering = false
 
     struct State {
         /// Position and velocity in this surface's pixels (velocity per second).
         var x: Float, y: Float, vx: Float, vy: Float
         /// 0..1, how alive the drag is.
         var drag: Float
+        /// 0..1, how alive a plain hover is. Only the things lying and falling
+        /// feel it (the simulation); the sky does not part for a passing
+        /// pointer, only for a drag.
+        var hover: Float = 0
+        /// What the simulation answers to: a drag fully, a hover gently.
+        var stir: Float { max(drag, hover * 0.75) }
     }
 
-    func dragged(to p: CGPoint) {
+    func dragged(to p: CGPoint) { moved(to: p, hover: false) }
+    func hovered(to p: CGPoint) { moved(to: p, hover: true) }
+
+    private func moved(to p: CGPoint, hover: Bool) {
         lock.lock(); defer { lock.unlock() }
+        hovering = hover
         let now = CFAbsoluteTimeGetCurrent()
         let dt = now - lastMove
         if dt > 0.001 && dt < 0.25 {
@@ -55,9 +67,10 @@ final class Cursor: @unchecked Sendable {
         guard age < 2, frame.insetBy(dx: -80, dy: -80).contains(pos) else {
             return State(x: -1e5, y: -1e5, vx: 0, vy: 0, drag: 0)
         }
+        let alive = Float(exp(-age / 0.33))
         return State(x: Float((pos.x - frame.minX) * scale),
                      y: Float((pos.y - frame.minY) * scale),
                      vx: Float(vel.dx * scale), vy: Float(vel.dy * scale),
-                     drag: Float(exp(-age / 0.33)))
+                     drag: hovering ? 0 : alive, hover: hovering ? alive : 0)
     }
 }

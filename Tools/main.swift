@@ -799,9 +799,6 @@ if args["bass"] != nil || args["mid"] != nil || args["high"] != nil || args["bea
 if args["nokept"] != nil { renderer.keptFrames = false }
 // --rays battery,cpu,zo,... : the rays as gauges. --signal name:value[:hexcolour]
 // (repeatable with commas) sets Zo signals; sys.* names set system readings.
-if let r = args["rays"] {
-    renderer.raySources = r.split(separator: ",").map(String.init)
-}
 if let sig = args["signal"] {
     for item in sig.split(separator: ",") {
         let f = item.split(separator: ":").map(String.init)

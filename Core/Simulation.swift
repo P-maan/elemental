@@ -233,10 +233,17 @@ struct SurfaceFilm: Codable {
     /// Water that has to go somewhere. Drives the drips off the underside.
     var runoff: Float = 0
 
-    /// Fallen leaves lying on the lip, 0..1 (SceneSimulation, leaves). Not
-    /// persisted: CodingKeys below leave it out, so a saved snapshot from
-    /// before it existed still decodes and its snow is not lost.
+    /// Fallen leaves lying on the lip, 0..1, and how long they have lain, in
+    /// days — they brown as they age (SceneSimulation, leaves). Remembered
+    /// through FurnitureMemory, not this struct's own coding.
     var leaves: Float = 0
+    var leafAge: Float = 0
+    /// Changes whenever a leaf lands or leaves, so the scatter drawn on the
+    /// lip is reshuffled — the pile visibly settles rather than sitting as a
+    /// fixed stencil.
+    var leafSeed: UInt32 = 0
+    /// Where along the lip the pile has been pushed, -1 (left end) .. 1.
+    var leafLean: Float = 0
 
     /// Everything wet added up — what the shader needs for one band.
     var anyWater: Float { max(max(wet, lip), max(glaze, steam)) }
@@ -458,12 +465,24 @@ final class SceneSimulation {
     private struct Clump {
         var x, y, vx, vy, r: Float
         var leaf = false
-        var hue: Float = 0          // leaves: crimson .. orange .. gold .. brown
+        var hue: Float = 0          // leaves: crimson .. orange .. gold
         var phase: Float = 0        // leaves: where in its flutter
+        var age: Float = 0          // leaves: days lain, before it was lifted
     }
     private var clumps: [Clump] = []
-    /// Leaves lying along the bottom of the screen, per column, 0..1.
+    /// Leaves lying along the bottom of the screen, per column, 0..1, and how
+    /// many days they have lain.
     private var groundLeaves: [Float] = []
+    private var groundLeafAge: [Float] = []
+    /// The wind's gusts, which is what actually strips a tree: leaves come
+    /// down in flurries with the gusts and hardly at all between them.
+    private var gustLeft: Float = 0          // seconds of the current gust
+    private var nextGust: Float = 8
+    /// How much the trees shed today, set each step (leafClearPerDay uses it).
+    private var leafSeasonNow: Float = 0
+    /// How fast lying leaves clear, in cover per day: barely in the season —
+    /// they pile up — then over a couple of weeks once the trees are bare.
+    private var leafClearPerDay: Float { leafSeasonNow > 0.15 ? 0.01 : 0.07 }
 
     /// Something is in the air after a shake — the frame rate should be up
     /// for the second or two it takes to land.
@@ -477,9 +496,20 @@ final class SceneSimulation {
     private func shake(_ i: Int, from old: Surface, by distance: Float) {
         guard i < films.count, SP > 0 else { return }
         var f = films[i]
-        let k = min(0.85, 0.25 + distance / SP * 0.06)
+        release(&f, from: old, share: min(0.85, 0.25 + distance / SP * 0.06))
+        films[i] = f
+    }
+
+    /// Throw `share` of what lies on `f` off the top of `old`: water as spray
+    /// that lands on the pane and runs, snow as clumps, leaves as leaves. A
+    /// share of 1 is everything — a window closed or swept away by Show
+    /// Desktop does not take its weather with it; it all comes down.
+    private func release(_ f: inout SurfaceFilm, from old: Surface, share k: Float) {
+        guard SP > 0 else { return }
         let water = (f.wet + f.lip) * k
-        let n = min(10, Int(water * 14))
+        // A small share (the pointer brushing past, every frame) rounds by
+        // chance, so a brush knocks off a drop now and then, not one a frame.
+        let n = min(10, Int(water * 14 + (k < 0.2 ? rnd() : 0)))
         for _ in 0..<n where drops.count < Self.maxDrops {
             let r = SP * (0.22 + rnd() * 0.30)
             drops.append(GlassDrop(x: old.left + rnd() * old.w, y: old.top - r,
@@ -489,7 +519,8 @@ final class SceneSimulation {
         }
         f.wet *= 1 - k; f.lip *= 1 - k; f.runoff *= 1 - k
         if f.snow > 0.05 && f.snowSpan > 0.05 {
-            let c = min(14, Int(f.snow * f.snowSpan * 8 * k) + 2)
+            let c = k < 0.2 ? Int(f.snow * f.snowSpan * 30 * k + rnd())
+                            : min(14, Int(f.snow * f.snowSpan * 8 * k) + 2)
             for _ in 0..<c where clumps.count < 40 {
                 clumps.append(Clump(x: old.left + (0.5 + (rnd() - 0.5) * f.snowSpan) * old.w,
                                     y: old.top - SP * 0.5 * rnd(),
@@ -500,10 +531,9 @@ final class SceneSimulation {
         }
         if f.leaves > 0.04 {
             let c = min(8, Int(f.leaves * 16 * k) + 1)
-            for _ in 0..<c { launchLeaf(x: old.left + rnd() * old.w, y: old.top - SP * 0.4, lift: true) }
+            for _ in 0..<c { launchLeaf(x: old.left + rnd() * old.w, y: old.top - SP * 0.4, lift: true, age: f.leafAge) }
             f.leaves *= 1 - k
         }
-        films[i] = f
     }
 
     // MARK: Leaves
@@ -531,88 +561,201 @@ final class SceneSimulation {
         return exp(-x * x) * edge
     }
 
-    private func launchLeaf(x: Float, y: Float, lift: Bool = false) {
-        guard clumps.count < 60 else { return }
+    /// A leaf in the air. `age` is days it has already lain (a lifted one is
+    /// as brown as it was on the ground); a fresh one carries its colour.
+    /// A leaf's colour for the shader: its fresh hue (0..1) in the fraction,
+    /// its age in two-day steps (0..7) in the whole part.
+    static func leafCode(hue: Float, age: Float) -> Float {
+        Float(min(7, Int(max(0, age) / 2))) + min(0.999, max(0, hue))
+    }
+
+    private func launchLeaf(x: Float, y: Float, lift: Bool = false, age: Float = 0) {
+        guard clumps.count < 30 else { return }
         clumps.append(Clump(x: x, y: y, vx: (rnd() - 0.5) * 60, vy: lift ? -40 - rnd() * 60 : 20,
-                            r: SP * 0.45, leaf: true, hue: rnd(), phase: rnd() * 6.28))
+                            r: SP * 0.45, leaf: true, hue: rnd(), phase: rnd() * 6.28, age: age))
     }
 
     /// Bring leaves down, lift them back off, and age what is lying about.
+    ///
+    /// Leaves do not RAIN. A tree lets go of them in flurries when a gust
+    /// shakes it, and between gusts only the odd one drifts down; a calm day
+    /// in the middle of the season sees a few a minute. They come from where
+    /// the trees are — off the top of the screen, or carried in from the
+    /// upwind side — never conjured mid-air.
     private func updateLeaves(dt: Float, state: SceneState) {
-        if groundLeaves.count != cols { groundLeaves = [Float](repeating: 0, count: cols) }
+        if groundLeaves.count != cols {
+            groundLeaves = [Float](repeating: 0, count: cols)
+            groundLeafAge = [Float](repeating: 0, count: cols)
+        }
         let season = Self.leafSeason(latitude: state.astro.latitude, dayOfYear: state.astro.dayOfYear)
+        leafSeasonNow = season
         let w = state.weather
-        let gust = min(1, max(0, (w.wind - 8) / 30))
-        let wet = w.isPrecipitating
-        if season > 0.02 {
-            // The wind strips the trees; rain knocks them down too.
-            let rate = season * (0.25 + gust * 1.6 + (wet ? 0.35 : 0))
+        let wind = max(0, w.wind)
+        let wet = w.isPrecipitating || films.contains { $0.wet > 0.4 }
+
+        // ---- gusts: a few seconds of stronger wind every so often, more
+        // often and harder the windier the day.
+        if gustLeft > 0 { gustLeft -= dt } else {
+            nextGust -= dt
+            if nextGust <= 0 {
+                gustLeft = 1.5 + rnd() * 3
+                nextGust = (wind > 25 ? 6 : wind > 12 ? 14 : 40) * (0.5 + rnd())
+            }
+        }
+        let gusting = gustLeft > 0
+        let gust = gusting ? min(1, 0.3 + wind / 35) : 0
+
+        // ---- off the trees. Only the WIND brings them down: in still air a
+        // leaf hangs on, and lying ones stay exactly where they are. A breeze
+        // lets the odd one go; a gust, a flurry.
+        if season > 0.02 && wind > 6 {
+            let rate = season * (gusting ? 1.0 + wind / 12 : (wind - 6) / 250)
             if rnd() < rate * dt {
                 let cw = crossWind
-                if abs(cw) > 15 && rnd() < 0.6 {
-                    // Blown in from the side the wind comes from.
-                    launchLeaf(x: cw > 0 ? -SP : W + SP, y: rnd() * H * 0.6)
+                if abs(cw) > 8 && rnd() < 0.7 {
+                    launchLeaf(x: cw > 0 ? -SP : W + SP, y: H * (0.05 + rnd() * 0.45))
                 } else {
                     launchLeaf(x: rnd() * W, y: -SP)
                 }
             }
         }
-        // A gust lifts DRY leaves off where they lie; wet ones stay stuck.
-        if gust > 0.35 && !wet {
-            for i in 0..<min(films.count, surfaces.count) where films[i].leaves > 0.08 && films[i].wet < 0.3 {
-                if rnd() < films[i].leaves * gust * dt * 1.2 {
+
+        // ---- lying leaves. A gust lifts DRY ones off and skitters the ones
+        // along the bottom downwind; wet ones are plastered down and stay.
+        if gusting && !wet && gust > 0.3 {
+            for i in 0..<min(films.count, surfaces.count) where films[i].leaves > 0.08 {
+                if rnd() < films[i].leaves * gust * dt * 0.8 {
                     let s = surfaces[i]
-                    launchLeaf(x: s.left + rnd() * s.w, y: s.top - SP * 0.3, lift: true)
-                    films[i].leaves = max(0, films[i].leaves - 0.05)
+                    launchLeaf(x: s.left + rnd() * s.w, y: s.top - SP * 0.3, lift: true, age: films[i].leafAge)
+                    films[i].leaves = max(0, films[i].leaves - 0.04)
                 }
             }
-            if rnd() < gust * dt * 0.8 {
+            // Skitter: some of each column slides a column downwind.
+            let dir = crossWind >= 0 ? 1 : -1
+            let move = gust * dt * 0.6
+            var next = groundLeaves
+            for c in 0..<cols where groundLeaves[c] > 0.05 {
+                let to = c + dir
+                guard to >= 0, to < cols else { continue }
+                let m = groundLeaves[c] * move
+                next[c] -= m; next[to] = min(1, next[to] + m)
+            }
+            groundLeaves = next
+            if rnd() < gust * dt * 0.5 {
                 let c = Int(rnd() * Float(cols))
-                if c < groundLeaves.count, groundLeaves[c] > 0.1 {
-                    launchLeaf(x: (Float(c) + 0.5) * SP, y: H - SP, lift: true)
-                    groundLeaves[c] = max(0, groundLeaves[c] - 0.1)
+                if groundLeaves[c] > 0.15 {
+                    launchLeaf(x: (Float(c) + 0.5) * SP, y: H - SP, lift: true, age: groundLeafAge[c])
+                    groundLeaves[c] = max(0, groundLeaves[c] - 0.08)
                 }
             }
         }
+        // ---- along the lip. Wind pushes a dry pile toward the downwind end,
+        // and what reaches the end goes over it, falling down past the corner
+        // — into the gap between widgets, onto whatever is below. Snow does
+        // the same in a strong wind when it is dry and cold: it blows off the
+        // edge in clumps. Wet leaves and wet snow stay put.
+        let cw = crossWind
+        let push = max(-1, min(1, cw / 30))
+        for i in 0..<min(films.count, surfaces.count) {
+            let s = surfaces[i]
+            guard s.kind != .menuBar else { continue }
+            var f = films[i]
+            if f.leaves > 0.03 {
+                let dry = f.wet < 0.3 && !w.isPrecipitating
+                let target = dry ? push * (gusting ? 1 : 0.6) : f.leafLean
+                f.leafLean += (target - f.leafLean) * min(1, dt * (gusting ? 0.8 : 0.15))
+                if dry && abs(cw) > 10 && rnd() < f.leaves * abs(push) * dt * (gusting ? 1.5 : 0.15) {
+                    let x = push > 0 ? s.right + SP * 0.3 : s.left - SP * 0.3
+                    launchLeaf(x: x, y: s.top - SP * 0.2, lift: false, age: f.leafAge)
+                    f.leaves = max(0, f.leaves - 0.03)
+                    f.leafSeed &+= 1
+                }
+            }
+            if f.snow > 0.2, w.temperature < -2, f.wet < 0.2, abs(cw) > 25,
+               rnd() < f.snow * (abs(cw) - 25) / 60 * dt, clumps.count < 40 {
+                let x = cw > 0 ? s.right + SP * 0.2 : s.left - SP * 0.2
+                clumps.append(Clump(x: x, y: s.top - SP * 0.5, vx: cw * 2, vy: 0,
+                                    r: SP * (0.3 + rnd() * 0.3)))
+                f.snow = max(0, f.snow - 0.02)
+            }
+            films[i] = f
+        }
+
+        // The pointer passing along a top edge knocks off what is under it —
+        // a little of the water, snow, ice-free slush and leaves just there,
+        // falling from that spot. A drag knocks off more than a hover.
+        if cursor.stir > 0.2 && SP > 0 {
+            for i in 0..<min(films.count, surfaces.count) {
+                let s = surfaces[i]
+                guard s.kind != .menuBar, cursor.x > s.left, cursor.x < s.right,
+                      abs(cursor.y - s.top) < SP * 1.5 else { continue }
+                var f = films[i]
+                guard f.anyWater > 0.08 || f.snow > 0.08 else { continue }
+                var spot = s
+                spot.x = max(s.left, cursor.x - SP * 1.2)
+                spot.w = min(s.right, cursor.x + SP * 1.2) - spot.x
+                let speed = min(1, (abs(cursor.vx) + abs(cursor.vy)) / (SP * 30))
+                let share = cursor.stir * speed * dt * 2.5
+                guard share > 0.003 else { continue }
+                let leaves = f.leaves
+                f.leaves = 0                     // leaves are handled just below
+                release(&f, from: spot, share: min(0.5, share))
+                f.leaves = leaves
+                films[i] = f
+            }
+        }
+
         // A drag across the desktop scuffs up what lies near the pointer.
-        if cursor.drag > 0.3 {
+        if cursor.stir > 0.3 {
             for i in 0..<min(films.count, surfaces.count) where films[i].leaves > 0.05 {
                 let s = surfaces[i]
                 guard cursor.x > s.left, cursor.x < s.right, abs(cursor.y - s.top) < SP * 2 else { continue }
                 if rnd() < dt * 8 {
-                    launchLeaf(x: cursor.x, y: s.top - SP * 0.3, lift: true)
+                    launchLeaf(x: cursor.x, y: s.top - SP * 0.3, lift: true, age: films[i].leafAge)
                     films[i].leaves = max(0, films[i].leaves - 0.04)
                 }
             }
             let c = Int(cursor.x / SP)
             if cursor.y > H - SP * 2, c >= 0, c < groundLeaves.count, groundLeaves[c] > 0.05, rnd() < dt * 8 {
-                launchLeaf(x: cursor.x, y: H - SP, lift: true)
+                launchLeaf(x: cursor.x, y: H - SP, lift: true, age: groundLeafAge[c])
                 groundLeaves[c] = max(0, groundLeaves[c] - 0.08)
             }
         }
-        // Lying leaves go over hours — blown off, broken up, raked; out of
-        // season, quicker.
-        let fade = dt / (season > 0.1 ? 7200 : 1800)
-        for i in films.indices where films[i].leaves > 0 { films[i].leaves = max(0, films[i].leaves - fade) }
-        for c in groundLeaves.indices where groundLeaves[c] > 0 { groundLeaves[c] = max(0, groundLeaves[c] - fade) }
+
+        // ---- age and clear. They brown over days; once the trees are bare
+        // they thin out over a couple of weeks. Snow lying on them keeps them.
+        let day = dt / 86400
+        let clear = leafClearPerDay * day
+        for i in films.indices where films[i].leaves > 0 {
+            films[i].leafAge += day
+            if films[i].snow < 0.1 { films[i].leaves = max(0, films[i].leaves - clear) }
+        }
+        for c in groundLeaves.indices where groundLeaves[c] > 0 {
+            groundLeafAge[c] += day
+            groundLeaves[c] = max(0, groundLeaves[c] - clear)
+        }
     }
 
     /// One leaf's flight. True when it has landed or left.
     private func flyLeaf(_ k: Int, dt: Float) -> Bool {
         var l = clumps[k]
-        // Pushed toward the wind's speed, with a flutter that swings it from
-        // side to side and checks its fall as it turns.
-        let wind = crossWind * W * 0.0016
-        let flut = sin(simSec * 1.7 + l.phase)
-        l.vx += (wind + flut * 45 - l.vx) * min(1, dt * 1.4)
-        let terminal = H * 0.045 * (0.75 + 0.5 * abs(sin(simSec * 2.3 + l.phase * 1.3)))
-        l.vy += (terminal - l.vy) * min(1, dt * 1.8)
+        // A falling leaf is a PENDULUM, not a stone: it glides one way,
+        // stalls as it tips over, drops, and glides back — falling slowest at
+        // the bottom of each swing, when it is flat, and fastest at the ends,
+        // when it is edge-on. About a metre a second on average, a swing
+        // every second or so; the air around it carries it with the wind.
+        l.phase += dt * (5.2 + 1.5 * sin(l.hue * 9))
+        let swing = cos(l.phase), edge = abs(sin(l.phase))
+        let wind = crossWind * W * 0.0016 * (gustLeft > 0 ? 1.6 : 1)
+        l.vx += (wind + swing * SP * 2.2 - l.vx) * min(1, dt * 3)
+        let terminal = H * 0.04 * (0.35 + 1.3 * edge)
+        l.vy += (terminal - l.vy) * min(1, dt * 2.5)
         // The pointer, dragging through the air, sweeps them along.
-        if cursor.drag > 0.2 {
+        if cursor.stir > 0.2 {
             let dx = l.x - cursor.x, dy = l.y - cursor.y
             if dx * dx + dy * dy < (SP * 5) * (SP * 5) {
-                l.vx += cursor.vx * cursor.drag * dt * 3
-                l.vy += cursor.vy * cursor.drag * dt * 3
+                l.vx += cursor.vx * cursor.stir * dt * 3
+                l.vy += cursor.vy * cursor.stir * dt * 3
             }
         }
         let prevY = l.y
@@ -623,13 +766,29 @@ final class SceneSimulation {
         for i in 0..<min(films.count, surfaces.count) where surfaces[i].kind != .menuBar {
             let s = surfaces[i]
             if l.x > s.left, l.x < s.right, prevY < s.top, l.y >= s.top {
-                films[i].leaves = min(1, films[i].leaves + 0.06)
+                // Caught on the very edge, it tips off and carries on down —
+                // into the gap between two widgets, or past the corner.
+                let fromEnd = min(l.x - s.left, s.right - l.x)
+                if fromEnd < SP * 0.6 {
+                    clumps[k].x = l.x < (s.left + s.right) / 2 ? s.left - SP * 0.4 : s.right + SP * 0.4
+                    clumps[k].vy = max(clumps[k].vy, 30)
+                    return false
+                }
+                films[i].leafSeed &+= 1
+                // A fresh leaf on old ones: the pile's age is what most of it is.
+                let had = films[i].leaves
+                films[i].leaves = min(1, had + 0.06)
+                films[i].leafAge = (films[i].leafAge * had + l.age * 0.06) / max(had + 0.06, 0.001)
                 return true
             }
         }
         if l.y > H - SP * 0.5 {
             let c = Int(l.x / SP)
-            if c >= 0, c < groundLeaves.count { groundLeaves[c] = min(1, groundLeaves[c] + 0.25) }
+            if c >= 0, c < groundLeaves.count {
+                let had = groundLeaves[c]
+                groundLeaves[c] = min(1, had + 0.25)
+                groundLeafAge[c] = (groundLeafAge[c] * had + l.age * 0.25) / max(had + 0.25, 0.001)
+            }
             return true
         }
         return l.x < -SP * 3 || l.x > W + SP * 3
@@ -703,6 +862,9 @@ final class SceneSimulation {
         /// grid or resolution.
         var cx: Float, cy: Float
         var snow: Float, snowSpan: Float, glaze: Float, frost: Float, grime: Float
+        /// Optional so a snapshot written before leaves existed still decodes.
+        var leaves: Float? = nil
+        var leafAge: Float? = nil
     }
 
     struct FurnitureSnapshot: Codable {
@@ -711,20 +873,29 @@ final class SceneSimulation {
         var uv: Float
         var wind: Float
         var items: [FurnitureMemory]
+        /// Leaves lying along the bottom of the screen, per column across it
+        /// (resampled on restore), and their age in days.
+        var ground: [Float]? = nil
+        var groundAge: [Float]? = nil
     }
 
     func furnitureSnapshot(now: Date = Date()) -> FurnitureSnapshot? {
         guard films.count == surfaces.count, W > 0, H > 0 else { return nil }
         let items: [FurnitureMemory] = surfaces.indices.compactMap { i in
             let f = films[i], s = surfaces[i]
-            guard f.snow > 0.01 || f.glaze > 0.01 || f.frost > 0.01 || f.grime > 0.01 else { return nil }
+            guard f.snow > 0.01 || f.glaze > 0.01 || f.frost > 0.01 || f.grime > 0.01
+                    || f.leaves > 0.01 else { return nil }
             return FurnitureMemory(kind: s.kind.rawValue,
                                    cx: (s.left + s.w / 2) / W, cy: (s.top + s.h / 2) / H,
                                    snow: f.snow, snowSpan: f.snowSpan, glaze: f.glaze,
-                                   frost: f.frost, grime: f.grime)
+                                   frost: f.frost, grime: f.grime,
+                                   leaves: f.leaves, leafAge: f.leafAge)
         }
+        let anyGround = groundLeaves.contains { $0 > 0.01 }
         return FurnitureSnapshot(saved: now, temperature: lastWeather.temperature,
-                                 uv: lastWeather.uv, wind: lastWeather.wind, items: items)
+                                 uv: lastWeather.uv, wind: lastWeather.wind, items: items,
+                                 ground: anyGround ? groundLeaves : nil,
+                                 groundAge: anyGround ? groundLeafAge : nil)
     }
 
     /// Held until the furniture exists to put it on.
@@ -761,7 +932,24 @@ final class SceneSimulation {
             f.glaze = max(f.glaze, max(0, m.glaze - away * (Self.glazeThaw(temp: snap.temperature, uv: uv) + 0.00002)))
             f.frost = max(f.frost, snap.temperature < 0 && away < 6 * 3600 ? m.frost : 0)
             f.grime = max(f.grime, m.grime)
+            // Leaves wait where they were, a little older — the days away
+            // counted, and thinned only by the slow clearing (leafClearing).
+            if let l = m.leaves, l > f.leaves {
+                let days = away / 86400
+                f.leaves = max(0, l - days * leafClearPerDay)
+                f.leafAge = (m.leafAge ?? 0) + days
+            }
             films[best] = f
+        }
+        if let g = snap.ground, !g.isEmpty, cols > 0 {
+            let days = away / 86400
+            groundLeaves = (0..<cols).map { c in
+                max(0, g[min(g.count - 1, c * g.count / cols)] - days * leafClearPerDay)
+            }
+            let ga = snap.groundAge ?? []
+            groundLeafAge = (0..<cols).map { c in
+                (ga.isEmpty ? 0 : ga[min(ga.count - 1, c * ga.count / cols)]) + days
+            }
         }
     }
 
@@ -799,6 +987,13 @@ final class SceneSimulation {
                 }
             }
             films = next
+            // Whatever lay on a piece that is GONE — closed, minimised, swept
+            // aside by Show Desktop — falls from where it was.
+            for (j, o) in oldValue.enumerated()
+                where j < oldFilms.count && !used.contains(j) && o.kind != .dock && o.kind != .menuBar {
+                var f = oldFilms[j]
+                if f.anyWater > 0.05 || f.snow > 0.05 || f.leaves > 0.04 { release(&f, from: o, share: 1) }
+            }
             applyPendingMemory()
             for m in moved where surfaces[m.i].kind != .dock && surfaces[m.i].kind != .menuBar {
                 shake(m.i, from: m.from, by: m.by)
@@ -1537,13 +1732,13 @@ final class SceneSimulation {
 
             // DRAG. The pointer is an UMBRELLA to rain — drops swerve round it
             // to either side — and a hand stirring snow, which swirls round it.
-            if cursor.drag > 0.02 {
+            if cursor.stir > 0.02 {
                 let hx = (streaks[i].c + 0.5) * SP, hy = streaks[i].y * SP
                 let ddx = hx - cursor.x, ddy = hy - cursor.y
                 let dist = (ddx * ddx + ddy * ddy).squareRoot()
                 let R = SP * 7
                 if dist < R && dist > 1 {
-                    let k = cursor.drag * (1 - dist / R) * f
+                    let k = cursor.stir * (1 - dist / R) * f
                     let pf = lastWeather.precipForm
                     if pf == .snow || pf == .snowGrains || pf == .graupel {
                         streaks[i].c += (-ddy / dist) * k * 0.6
@@ -2753,13 +2948,13 @@ final class SceneSimulation {
         // why water accumulated forever with no decay path at all.
         ageTrails(dt: dt, evaporation: w.evaporationRate)
         // DRAG: and wipes the wet film clean where it passes, like a wiper.
-        if cursor.drag > 0.02, !trailCells.isEmpty {
+        if cursor.stir > 0.02, !trailCells.isEmpty {
             let R = SP * 3
             let c0 = max(0, Int((cursor.x - R) / SP)), c1 = min(cols - 1, Int((cursor.x + R) / SP))
             let r0 = max(0, Int((cursor.y - R) / SP)), r1 = min(rows - 1, Int((cursor.y + R) / SP))
             if c0 <= c1, r0 <= r1 {
                 for cy in r0...r1 { for cx in c0...c1 {
-                    trailCells[cy * cols + cx] *= 1 - min(1, cursor.drag * dt * 6)
+                    trailCells[cy * cols + cx] *= 1 - min(1, cursor.stir * dt * 6)
                 } }
             }
         }
@@ -2890,12 +3085,12 @@ final class SceneSimulation {
                 d.r = max(d.r * (1 - dt * 0.10) - dt * SP * 0.03 * evaporation, SP * 0.02)
             }
             // ---- DRAG: a finger across the glass smears the water with it.
-            if cursor.drag > 0.02 && d.ride < 0 {
+            if cursor.stir > 0.02 && d.ride < 0 {
                 let ddx = d.x - cursor.x, ddy = d.y - cursor.y
                 let R = SP * 4
                 let dist = (ddx * ddx + ddy * ddy).squareRoot()
                 if dist < R {
-                    let k = cursor.drag * (1 - dist / R)
+                    let k = cursor.stir * (1 - dist / R)
                     d.x += cursor.vx * dt * 0.55 * k
                     d.y += cursor.vy * dt * 0.55 * k
                     if !d.falling && k > 0.3 { d.falling = true }
@@ -3496,14 +3691,18 @@ final class SceneSimulation {
             // ---- leaves, under the snow and over the water: a scatter along
             // the lip, some cells bare, each in its own autumn colour.
             if f.leaves > 0.04 {
+                let seed = Float(f.leafSeed % 997) * 0.731
                 for cx in c0...c1 {
-                    let g = jitter(Float(cx) * 3.1 + Float(i) * 1.7)
-                    guard g < f.leaves * 1.3 else { continue }
+                    // Banked toward where the wind has pushed them.
+                    let t = span <= 1 ? 0 : (Float(cx - c0) + 0.5) / span * 2 - 1
+                    let bank = max(0.15, 1 + f.leafLean * t * 0.9)
+                    let g = jitter(Float(cx) * 3.1 + Float(i) * 1.7 + seed)
+                    guard g < f.leaves * 1.3 * bank else { continue }
                     put(cx, lipRow, 0.55 + 0.40 * f.leaves, Deposit.leaf,
-                        jitter(Float(cx) * 5.3 + Float(i) * 2.9), 0)
-                    if f.leaves > 0.6 && g < f.leaves * 0.5 {
+                        Self.leafCode(hue: jitter(Float(cx) * 5.3 + Float(i) * 2.9 + seed), age: f.leafAge), 0)
+                    if f.leaves > 0.6 && g < f.leaves * 0.5 * bank {
                         put(cx, lipRow - 1, 0.45 + 0.4 * f.leaves, Deposit.leaf,
-                            jitter(Float(cx) * 7.1 + Float(i)), 0)
+                            Self.leafCode(hue: jitter(Float(cx) * 7.1 + Float(i) + seed), age: f.leafAge), 0)
                     }
                 }
             }
@@ -3727,7 +3926,7 @@ final class SceneSimulation {
             let cx = Int(c.x / SP), cy = Int(c.y / SP)
             guard cx >= 0, cx < cols, cy >= 0, cy < rows else { continue }
             let idx = cy * cols + cx
-            if glassCells[idx].x < 0.9 { glassCells[idx] = SIMD4<Float>(0.9, Deposit.leaf, c.hue, 0) }
+            if glassCells[idx].x < 0.9 { glassCells[idx] = SIMD4<Float>(0.9, Deposit.leaf, Self.leafCode(hue: c.hue, age: c.age), 0) }
         }
         // Leaves lying along the bottom, a row or two deep where they pile.
         for cx in 0..<min(cols, groundLeaves.count) where groundLeaves[cx] > 0.06 {
@@ -3737,7 +3936,8 @@ final class SceneSimulation {
             for k in 0..<deep {
                 let idx = (rows - 1 - k) * cols + cx
                 let a = min(0.9, 0.35 + v * 0.55) * (k == 0 ? 1 : 0.7)
-                if a > glassCells[idx].x { glassCells[idx] = SIMD4<Float>(a, Deposit.leaf, (hue + Float(k) * 0.37).truncatingRemainder(dividingBy: 1), 0) }
+                let age = cx < groundLeafAge.count ? groundLeafAge[cx] : 0
+                if a > glassCells[idx].x { glassCells[idx] = SIMD4<Float>(a, Deposit.leaf, Self.leafCode(hue: (hue + Float(k) * 0.37).truncatingRemainder(dividingBy: 1), age: age), 0) }
             }
         }
         for d in drops {
