@@ -1185,7 +1185,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         guard pulseTimer == nil else { return }
         surfaces.values.forEach { $0.applyFrameRate() }
         pulseTimer = Timer.scheduledTimer(withTimeInterval: 0.5, repeats: true) { [weak self] t in
-            guard let self, !Pulse.shared.active, !Cursor.shared.active else { return }
+            guard let self, !Pulse.shared.active, !Cursor.shared.active, !Cursor.shared.hoverActive else { return }
             t.invalidate(); self.pulseTimer = nil
             self.surfaces.values.forEach { $0.applyFrameRate() }
         }

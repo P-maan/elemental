@@ -57,7 +57,14 @@ final class Cursor: @unchecked Sendable {
     /// played with and needs its full frame rate.
     var active: Bool {
         lock.lock(); defer { lock.unlock() }
-        return CFAbsoluteTimeGetCurrent() - lastMove < 1.5
+        return !hovering && CFAbsoluteTimeGetCurrent() - lastMove < 1.5
+    }
+
+    /// The pointer HOVERED over the desktop just now: things are being
+    /// disturbed, which wants motion (thirty frames), not the full rate.
+    var hoverActive: Bool {
+        lock.lock(); defer { lock.unlock() }
+        return hovering && CFAbsoluteTimeGetCurrent() - lastMove < 1.5
     }
 
     /// `frame` is the surface's screen in global top-left points.

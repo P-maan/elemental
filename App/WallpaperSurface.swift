@@ -427,7 +427,8 @@ final class WallpaperSurface: NSObject, CAMetalDisplayLinkDelegate {
         // A pulse (Pulse.swift) is a beat; at six frames a second it is not one.
         // So is a drag on the desktop: at six frames a second the clouds
         // parting under the pointer arrive in visible jumps, a beat behind it.
-        let playing = Pulse.shared.active || Cursor.shared.active || renderer.hasDebris
+        let playing = Pulse.shared.active || Cursor.shared.active || Cursor.shared.hoverActive
+            || renderer.hasDebris
         let moving = w.isPrecipitating || w.isThundering || w.wind > 30 || playing
         let hi = moving ? ceiling : min(ceiling, preferred + 4)
 
@@ -489,7 +490,8 @@ final class WallpaperSurface: NSObject, CAMetalDisplayLinkDelegate {
             // changed in it, so a frame nobody needs is pure heat.
             let rate: Float
             if Cursor.shared.active || w.isThundering { rate = ceiling }
-            else { rate = min(ceiling, max(need, (Pulse.shared.active || renderer.hasDebris) ? 30 : 0)) }
+            else { rate = min(ceiling, max(need, (Pulse.shared.active || renderer.hasDebris
+                                                 || Cursor.shared.hoverActive) ? 30 : 0)) }
             link?.preferredFrameRateRange = CAFrameRateRange(minimum: rate, maximum: rate,
                                                              preferred: rate)
         } else {
