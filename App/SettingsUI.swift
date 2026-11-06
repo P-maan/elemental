@@ -542,8 +542,8 @@ struct LowPowerChip: View {
         let on = store.lowPowerActive
         Button { store.toggleLowPower() } label: {
             HStack(spacing: 7) {
-                Image(systemName: on ? "leaf.fill" : "leaf")
-                    .foregroundStyle(on ? Color.green : Color.secondary)
+                PixelIcon(symbol: "leaf.fill", accent: on ? .green : Color(white: 0.5), size: 15)
+                    .opacity(on ? 1 : 0.7)
                 Text("LOW POWER")
                     .font(.system(size: 11, weight: .semibold, design: .monospaced))
                     .tracking(1.6)
@@ -571,18 +571,9 @@ struct Badge: View {
     let tint: Color
     var size: CGFloat = 26
     var body: some View {
-        // dormstand's icons: white on a dark raised block, the mosaic's grid
-        // across it, the page's colour only as light from inside.
-        RoundedRectangle(cornerRadius: size * 0.22, style: .continuous)
-            .fill(LinearGradient(colors: [tint.opacity(0.42), Color(white: 0.10)],
-                                 startPoint: .topLeading, endPoint: .bottomTrailing))
-            .overlay(DotGrid(pitch: max(3, size / 9)).clipShape(RoundedRectangle(cornerRadius: size * 0.22, style: .continuous)))
-            .frame(width: size, height: size)
-            .tileBevel(corner: size * 0.22, strength: 2.2)
-            .overlay(Image(systemName: symbol)
-                .font(.system(size: size * 0.48, weight: .bold))
-                .foregroundStyle(.white)
-                .shadow(color: .black.opacity(0.5), radius: 0.5, y: 1))
+        // dormstand's own icons: a pixel sprite raised off the wall, its
+        // accent pixels in the page's colour (PixelIcons).
+        PixelIcon(symbol: symbol, accent: tint, size: size)
     }
 }
 
@@ -887,7 +878,10 @@ struct TileCard: View {
                     }
                     Button { tap(o.id) } label: {
                         HStack(spacing: 8) {
-                            if let s = o.symbol { Image(systemName: s).font(.system(size: 15, design: .monospaced)) }
+                            if let s = o.symbol {
+                                if PixelIcons.has(s) { PixelIcon(symbol: s, size: 17) }
+                                else { Image(systemName: s).font(.system(size: 15)) }
+                            }
                             Text(o.title).font(.system(size: 14, weight: .medium, design: .monospaced))
                                 .lineLimit(1).minimumScaleFactor(0.8)
                         }
