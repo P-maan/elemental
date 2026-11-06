@@ -668,7 +668,6 @@ final class SceneSimulation {
                     let x = push > 0 ? s.right + SP * 0.3 : s.left - SP * 0.3
                     launchLeaf(x: x, y: s.top - SP * 0.2, lift: false, age: f.leafAge)
                     f.leaves = max(0, f.leaves - 0.03)
-                    f.leafSeed &+= 1
                 }
             }
             if f.snow > 0.2, w.temperature < -2, f.wet < 0.2, abs(cw) > 25,
@@ -774,7 +773,6 @@ final class SceneSimulation {
                     clumps[k].vy = max(clumps[k].vy, 30)
                     return false
                 }
-                films[i].leafSeed &+= 1
                 // A fresh leaf on old ones: the pile's age is what most of it is.
                 let had = films[i].leaves
                 films[i].leaves = min(1, had + 0.06)
@@ -3703,11 +3701,16 @@ final class SceneSimulation {
             // ---- leaves, under the snow and over the water: a scatter along
             // the lip, some cells bare, each in its own autumn colour.
             if f.leaves > 0.04 {
-                let seed = Float(f.leafSeed % 997) * 0.731
+                // STABLE: a cell's leaf stays put until the pile really
+                // changes. The pattern used to be reshuffled at every landing
+                // and re-banked every frame as the wind's push eased, so the
+                // whole row flickered. The lean is used in whole quarters.
+                let seed: Float = 0
+                let lean = (f.leafLean * 4).rounded() / 4
                 for cx in c0...c1 {
                     // Banked toward where the wind has pushed them.
                     let t = span <= 1 ? 0 : (Float(cx - c0) + 0.5) / span * 2 - 1
-                    let bank = max(0.15, 1 + f.leafLean * t * 0.9)
+                    let bank = max(0.15, 1 + lean * t * 0.9)
                     let g = jitter(Float(cx) * 3.1 + Float(i) * 1.7 + seed)
                     guard g < f.leaves * 1.3 * bank else { continue }
                     put(cx, lipRow, 0.55 + 0.40 * f.leaves, Deposit.leaf,

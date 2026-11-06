@@ -200,6 +200,9 @@ final class WallpaperSurface: NSObject, CAMetalDisplayLinkDelegate {
         renderer.playbackOnWake = config.playbackOnWake
         renderer.playbackMaxSeconds = config.playbackMaxSeconds
         renderer.showZo = config.zoInSky
+        // Hidden switch for diagnosis: `defaults write com.prakritmaan.elemental
+        // keptFrames -bool NO` shades every pixel every frame.
+        renderer.keptFrames = UserDefaults.standard.object(forKey: "keptFrames") as? Bool ?? true
         renderer.requestFullRedraw()
         // The cursor arrives in global top-left points (the window list's
         // space); AppKit frames are bottom-left from the primary display.

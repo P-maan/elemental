@@ -2829,6 +2829,22 @@ fragment float4 heightPass(VOut in [[stage_in]],
     }
     m1 *= 0.125f; m2 *= 0.125f;
 
+    // The SHIMMER is light travelling over the wall, not the wall moving: take
+    // it back out of the luminance before it becomes height. Left in, every
+    // block's height drifted a hair every frame and the pixel on each block's
+    // edge kept tipping between its top and its side — one-pixel lines
+    // blinking all over the wall. The same field cellPass adds, cell for cell;
+    // it varies over many cells, so the surround loses the same amount.
+    if (U.shimmer > 0.001f) {
+        float2 SPs = float2(U.pixW / max(U.cols, 1.0f), U.pixH / max(U.rows, 1.0f));
+        float x = floor(p.x) * SPs.x, y = floor(p.y) * SPs.y, sec = U.time;
+        float sh = sin(x * 0.0021f + y * 0.0017f + sec * 0.80f)
+                 + 0.70f * sin(x * 0.0037f - y * 0.0029f + sec * 0.52f + 2.1f)
+                 + 0.50f * sin(x * 0.0009f + y * 0.0043f + sec * 1.27f + 4.3f);
+        float off = sh * 2.6f * U.shimmer / 255.0f;
+        l = saturate(l - off); m1 -= off; m2 -= off;
+    }
+
     // How far this cell stands above its surroundings, at whichever scale sees
     // it best. Never below zero: a cell in a hollow is not pushed further in,
     // it simply has nothing to add.
@@ -3031,7 +3047,13 @@ inline float cellHeight(texture2d<float> heights, sampler s, float2 ci,
                         float cols, float rows, float hmax)
 {
     float2 cc = clamp(ci, float2(0.0f), float2(cols - 1.0f, rows - 1.0f));
-    return heights.sample(s, cc + 0.5f).r * hmax;
+    // In steps of a sixtieth. The heights drift a hair every frame (shimmer,
+    // the rise easing), and at full precision that tipped the pixel on a
+    // block's very edge between its top and its side every few frames — a
+    // one-pixel line blinking on tile edges all over the wall. A step is far
+    // below what the eye reads as height, and only a real change crosses one.
+    float h = heights.sample(s, cc + 0.5f).r;
+    return (floor(h * 60.0f + 0.5f) / 60.0f) * hmax;
 }
 
 /// What the eye actually lands on at one pixel.
