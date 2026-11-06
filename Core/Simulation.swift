@@ -797,7 +797,8 @@ final class SceneSimulation {
                 nextGust = (wind > 25 ? 6 : wind > 12 ? 14 : 40) * (0.5 + rnd())
             }
         }
-        let gusting = gustLeft > 0
+        // No wind, no gust: in still air lying leaves stay exactly put.
+        let gusting = gustLeft > 0 && wind > 6
         let gust = gusting ? min(1, 0.3 + wind / 35) : 0
 
         // ---- off the trees. Only the WIND brings them down: in still air a
