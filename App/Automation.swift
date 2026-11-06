@@ -102,7 +102,7 @@ enum AutomationSchema {
         Key(name: "lowPowerFPS", type: "int 4…30", detail: "Steady frame rate while Low Power is in force. Default 5 (about 1% CPU)."),
         Key(name: "musicVisualizer", type: "bool", detail: "Move with what this Mac is playing, only while something plays. Default true."),
         Key(name: "songTint", type: "bool", detail: "A very faint tinge of the playing song's album cover (Music or Spotify). Default true."),
-        Key(name: "rays", type: "array", detail: "What each sun/moon ray shows, up to 12: battery, cpu, memory, day, zo, zo:NAME, music.bass, music.mid, music.high, off. Empty: the music."),
+        Key(name: "rays", type: "array", detail: "What the sky shows (the sky decides how): any of battery, cpu, memory, day, zo, zo:NAME, music.bass, music.mid, music.high. Empty: the sun's rays answer the music."),
         Key(name: "lowPowerSmoothRain", type: "bool", detail: "Steady 20 fps in Low Power while rain or snow is falling. Default true."),
         Key(name: "syncLockScreen", type: "bool", detail: "Show the scene on the lock screen."),
         Key(name: "renderWhenOccluded", type: "bool", detail: "Keep drawing behind fullscreen apps."),

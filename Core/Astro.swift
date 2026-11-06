@@ -27,6 +27,11 @@ struct AstroState {
     /// the scene can show it at the right minute of the right night whether or
     /// not the machine has ever been online.
     var lunarEclipse: Float = 0
+
+    /// Where and when, for the SEASON: how far into the fall the trees are
+    /// (SceneSimulation.leafSeason). Latitude in degrees, day of the year 1-366.
+    var latitude: Float = 0
+    var dayOfYear: Float = 0
 }
 
 struct Coordinate: Codable, Equatable {
@@ -323,6 +328,8 @@ enum Astro {
     /// once a minute; nothing here is per-frame work.
     static func update(lat: Double, lon: Double, facingAz: Double = 0, date: Date = Date()) -> AstroState {
         var s = AstroState()
+        s.latitude = Float(lat)
+        s.dayOfYear = Float(Calendar.current.ordinality(of: .day, in: .year, for: date) ?? 1)
         let sun = sunPosition(lat: lat, lon: lon, date: date)
         let moon = moonPosition(lat: lat, lon: lon, date: date)
         s.sunAlt = Float(sun.alt);  s.sunAz = Float(sun.az)

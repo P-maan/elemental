@@ -1529,36 +1529,26 @@ struct SurfacePage: View {
 
 // MARK: - Signals
 
-/// The rays as gauges (Signals.swift): choose what each one shows.
+/// What the sky tells you (Signals.swift). Sources are switched on; the sky
+/// decides how to show them — nothing numbered, nothing laid out by hand.
 struct SignalsPage: View {
     @ObservedObject var store: SettingsStore
 
     var body: some View {
-        let n = store.config.rays.count
-        SectionTitle("Rays", info: "The rays round the sun — round the moon at night — can show "
-                     + "information instead of the music. Each ray reaches out as far as its value and "
-                     + "is drawn in its own colour, through cloud and at any hour. Zo can put reminders "
-                     + "and anything else on a ray, and clears them when they are done.")
+        SectionTitle("What the sky tells you",
+                     info: "Each thing switched on here is shown by the sky itself, in its own colour, "
+                         + "as large as its value: rays from the sun on a clear day, lights inside the "
+                         + "clouds when it is overcast, rings round the moon at night, an aurora when "
+                         + "there is no moon. Never under your widgets and windows.")
         RowsCard {
-            MenuRow(title: "The rays show",
-                    subtitle: n == 0 ? "The music: one ray per band, lowest straight up, rising clockwise."
-                                     : "\(n) gauges, the first straight up, the rest clockwise.",
-                    selection: Binding(get: { store.config.rays.count },
-                                       set: { k in store.update { $0.rays = Self.resized($0.rays, to: k) } }),
-                    options: [(0, "The music"), (4, "4 signals"), (6, "6 signals"),
-                              (8, "8 signals"), (12, "12 signals")])
-        }
-
-        if n > 0 {
-            SectionTitle("Each ray")
-            RowsCard {
-                ForEach(0..<n, id: \.self) { i in
-                    MenuRow(title: "Ray \(i + 1)", subtitle: Self.position(i, of: n),
-                            selection: Binding(get: { store.config.rays.indices.contains(i) ? store.config.rays[i] : "off" },
-                                               set: { v in store.update { if $0.rays.indices.contains(i) { $0.rays[i] = v } } }),
-                            options: sourceOptions(including: store.config.rays[i]))
-                    if i < n - 1 { RowDivider() }
-                }
+            ForEach(Array(Signals.sources.enumerated()), id: \.offset) { i, src in
+                ToggleRow(title: src.title, subtitle: src.detail,
+                          isOn: Binding(get: { store.config.rays.contains(src.id) },
+                                        set: { on in store.update { c in
+                                            c.rays.removeAll { $0 == src.id }
+                                            if on { c.rays.append(src.id) }
+                                        } }))
+                if i < Signals.sources.count - 1 { RowDivider() }
             }
         }
 
@@ -1567,34 +1557,10 @@ struct SignalsPage: View {
             let live = Signals.shared.zoSignals()
             RowLabel(title: live.isEmpty ? "Nothing from Zo right now" : live.map { s in
                         s.signal.label ?? s.name }.joined(separator: " · "),
-                     subtitle: "Zo sets a signal with POST /v1/signal and clears it with DELETE. "
-                             + "A ray set to \"Zo — next signal\" shows them in order.")
+                     subtitle: "Zo puts a reminder up with POST /v1/signal and takes it down with "
+                             + "DELETE when it is done.")
                 .rowPadding()
         }
-    }
-
-    private func sourceOptions(including current: String) -> [(String, String)] {
-        var opts = Signals.sources.map { ($0.id, $0.title) }
-        let named = Signals.shared.zoSignals().map { ("zo:" + $0.name, "Zo — " + ($0.signal.label ?? $0.name)) }
-        opts.insert(contentsOf: named, at: opts.count - 1)
-        if !opts.contains(where: { $0.0 == current }) {
-            opts.insert((current, current.hasPrefix("zo:") ? "Zo — " + current.dropFirst(3) : current),
-                        at: opts.count - 1)
-        }
-        return opts
-    }
-
-    /// Where a ray points, as a clock position.
-    static func position(_ i: Int, of n: Int) -> String {
-        let hour = (Double(i) * 12 / Double(n))
-        let h = Int(hour.rounded()) % 12
-        return "Toward \(h == 0 ? 12 : h) o'clock"
-    }
-
-    /// Keep what is set, fill new rays from the default layout.
-    static func resized(_ rays: [String], to n: Int) -> [String] {
-        if n <= rays.count { return Array(rays.prefix(n)) }
-        return rays + Signals.defaultLayout[rays.count..<n]
     }
 }
 

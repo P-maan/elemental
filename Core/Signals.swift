@@ -3,21 +3,22 @@ import Foundation
 /// Live values the wall can SHOW — system readings, and anything Zo sends.
 ///
 /// Asked for 5 Nov 2026: "use the elements themselves to show information …
-/// a page in settings to lay out what all the rays show, allowing users to
-/// customise each ray … system information, critical information, literally
-/// everything." The sun's rays (the moon's, at night) become gauges: each ray
-/// is given a SOURCE in Settings, and reaches out as far as that source's
-/// value, in that source's colour.
+/// system information, critical information, literally everything" — then
+/// "don't number signals, be really creative with it", and "when it's cloudy
+/// use the clouds". Settings turns SOURCES on; nothing is numbered or laid
+/// out by hand. Each one is a value 0..1 and a colour, and the sky shows it in
+/// whatever it has (Scene.metal, SIGNALS): rays from the sun on a clear day,
+/// lights inside the cloud on an overcast, the moon's rings at night, an
+/// aurora when there is no moon.
 ///
 /// Sources, by id:
-///   music.bass / music.mid / music.high   the music, if the meter is running
 ///   battery   charge, red when low through to green
 ///   cpu       load across all cores
 ///   memory    how much of RAM is in use
 ///   day       how far through the local day it is
-///   zo        the next of Zo's signals not already on another ray
+///   zo        every signal Zo has set, each its own
 ///   zo:NAME   one of Zo's signals by name
-///   off       an empty ray
+///   music.bass / music.mid / music.high   the music, if the meter is running
 ///
 /// Zo sets a signal with a value, an optional colour and label, and clears it
 /// when it is done (POST / DELETE /v1/signal). It stays until cleared, or until
@@ -35,15 +36,18 @@ final class Signals: @unchecked Sendable {
     }
     private var map: [String: Signal] = [:]
 
-    static let maxRays = 12
-    /// What a fresh "Signals" layout starts with, ray by ray.
-    static let defaultLayout = ["battery", "cpu", "memory", "day", "zo", "zo",
-                                "zo", "zo", "music.bass", "music.mid", "music.high", "off"]
-    static let sources: [(id: String, title: String)] = [
-        ("battery", "Battery"), ("cpu", "CPU load"), ("memory", "Memory in use"),
-        ("day", "Time through the day"), ("zo", "Zo — next signal"),
-        ("music.bass", "Music — bass"), ("music.mid", "Music — mids"), ("music.high", "Music — highs"),
-        ("off", "Off"),
+    /// At most this many shown at once — the sky has room for that many.
+    static let maxShown = 8
+    static let maxRays = 12      // stored ids, for Config
+    static let sources: [(id: String, title: String, detail: String)] = [
+        ("zo", "Reminders from Zo", "Whatever Zo puts on the wall, until Zo clears it."),
+        ("battery", "Battery", "Red when low, green when full."),
+        ("cpu", "CPU load", "Amber, reaching out as the Mac works harder."),
+        ("memory", "Memory in use", "Violet."),
+        ("day", "Time of day", "Gold, growing from midnight to midnight."),
+        ("music.bass", "Music — bass", "Rose, with the low notes."),
+        ("music.mid", "Music — mids", "Green, with the voice and the chords."),
+        ("music.high", "Music — highs", "Blue, with the cymbals."),
     ]
 
     func set(_ name: String, value: Float, color: SIMD3<Float>? = nil, label: String? = nil,
@@ -81,31 +85,30 @@ final class Signals: @unchecked Sendable {
         let snapshot = map
         lock.unlock()
         let zo = snapshot.filter { $0.key.hasPrefix("zo.") }.sorted { $0.value.setAt < $1.value.setAt }
-        let named = Set(layout.filter { $0.hasPrefix("zo:") }.map { "zo." + $0.dropFirst(3) })
-        var free = zo.filter { !named.contains($0.key) }.makeIterator()
-
         let zoDefault = SIMD3<Float>(0.45, 0.85, 1.0)
-        return layout.prefix(Self.maxRays).map { id -> (Float, SIMD3<Float>) in
+        var out: [(Float, SIMD3<Float>)] = []
+        for id in layout {
             switch id {
             case "battery":
                 let v = snapshot["sys.battery"]?.value ?? 0
-                return (v, Self.hsv(0.33 * v, 0.85, 1))       // red when low, green when full
-            case "cpu":    return (snapshot["sys.cpu"]?.value ?? 0, SIMD3(1.0, 0.68, 0.25))
-            case "memory": return (snapshot["sys.memory"]?.value ?? 0, SIMD3(0.72, 0.5, 1.0))
-            case "day":    return (Self.dayFraction(), SIMD3(1.0, 0.86, 0.45))
-            case "music.bass": return (music.bass, SIMD3(1.0, 0.45, 0.55))
-            case "music.mid":  return (music.mid, SIMD3(0.55, 1.0, 0.6))
-            case "music.high": return (music.high, SIMD3(0.6, 0.75, 1.0))
+                out.append((v, Self.hsv(0.33 * v, 0.85, 1)))       // red when low, green when full
+            case "cpu":    out.append((snapshot["sys.cpu"]?.value ?? 0, SIMD3(1.0, 0.68, 0.25)))
+            case "memory": out.append((snapshot["sys.memory"]?.value ?? 0, SIMD3(0.72, 0.5, 1.0)))
+            case "day":    out.append((Self.dayFraction(), SIMD3(1.0, 0.86, 0.45)))
+            case "music.bass": out.append((music.bass, SIMD3(1.0, 0.45, 0.55)))
+            case "music.mid":  out.append((music.mid, SIMD3(0.55, 1.0, 0.6)))
+            case "music.high": out.append((music.high, SIMD3(0.6, 0.75, 1.0)))
             case "zo":
-                guard let s = free.next()?.value else { return (0, zoDefault) }
-                return (s.value, s.color ?? zoDefault)
+                // Every reminder Zo has up, each its own — nothing while
+                // there are none, so a quiet day shows nothing from Zo.
+                for z in zo { out.append((z.value.value, z.value.color ?? zoDefault)) }
             default:
                 if id.hasPrefix("zo:"), let s = snapshot["zo." + id.dropFirst(3)] {
-                    return (s.value, s.color ?? zoDefault)
+                    out.append((s.value, s.color ?? zoDefault))
                 }
-                return (0, zoDefault)
             }
         }
+        return Array(out.prefix(Self.maxShown))
     }
 
     static func hsv(_ h: Float, _ s: Float, _ v: Float) -> SIMD3<Float> {

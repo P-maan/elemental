@@ -413,7 +413,7 @@ final class ElementalRenderer {
     private func buildBuffers() {
         let opt: MTLResourceOptions = .storageModeShared
         uniformBuf  = device.makeBuffer(length: MemoryLayout<Uniforms>.stride, options: opt)
-        spectrumBuf = device.makeBuffer(length: MemoryLayout<Float>.stride * 128, options: opt)
+        spectrumBuf = device.makeBuffer(length: MemoryLayout<Float>.stride * 192, options: opt)
         breatherBuf = device.makeBuffer(length: MemoryLayout<GPUBreather>.stride * 3, options: opt)
         starBuf     = device.makeBuffer(length: MemoryLayout<GPUStar>.stride * Self.maxStars, options: opt)
         starQuadBuf = device.makeBuffer(length: MemoryLayout<Float>.stride * 8 * Self.maxStars, options: opt)
@@ -1113,6 +1113,41 @@ final class ElementalRenderer {
         for (i, r) in rays.enumerated() {
             sp[64 + i] = r.value
             sp[76 + 3 * i] = r.rgb.x; sp[77 + 3 * i] = r.rgb.y; sp[78 + 3 * i] = r.rgb.z
+        }
+        // Slots 112..127: where each signal's cloud light or aurora fold sits —
+        // spread across the upper sky and NEVER under a widget or window
+        // (those draw over the wallpaper, so anything beneath them is lost).
+        if !rays.isEmpty {
+            let pw = u.pixW, ph = u.pixH, pitch = pw / Float(max(1, sim.cols))
+            let blocked = sim.surfaces.map { s in
+                (s.left - pitch * 2, s.top - pitch * 2, s.right + pitch * 2, s.bottom + pitch * 2)
+            }
+            func free(_ x: Float, _ y: Float) -> Bool {
+                !blocked.contains { x > $0.0 && x < $0.2 && y > $0.1 && y < $0.3 }
+            }
+            let n = Float(rays.count)
+            for k in 0..<rays.count {
+                let fx = pw * (0.12 + 0.76 * (Float(k) + 0.5) / n)
+                var at = SIMD2<Float>(fx, ph * 0.2)
+                search: for ring in 0..<6 {
+                    for dy in [Float(0), 0.08, -0.06, 0.16] {
+                        for dx in [Float(0), 1, -1] {
+                            let x = fx + dx * Float(ring) * pitch * 3
+                            let y = ph * (0.18 + (k % 2 == 0 ? 0 : 0.06) + dy)
+                            if x > 0, x < pw, y > 0, free(x, y) { at = [x, y]; break search }
+                        }
+                    }
+                }
+                sp[112 + 2 * k] = at.x; sp[113 + 2 * k] = at.y
+            }
+        }
+        // Slots 128..175: up to twelve furniture rects (l, t, r, b) the
+        // signals must keep clear of; 176 is how many.
+        let furn = sim.surfaces.filter { $0.kind != .menuBar && $0.kind != .dock }.prefix(12)
+        sp[176] = Float(furn.count)
+        for (k, f) in furn.enumerated() {
+            sp[128 + 4 * k] = f.left; sp[129 + 4 * k] = f.top
+            sp[130 + 4 * k] = f.right; sp[131 + 4 * k] = f.bottom
         }
         let tint = SongTint.shared.step(spectrum: spec)
         u.tintR = tint.rgb.x * 255; u.tintG = tint.rgb.y * 255; u.tintB = tint.rgb.z * 255

@@ -1776,8 +1776,14 @@ fragment CellOut cellPass(VOut in [[stage_in]],
                              // DRAG: a star the pointer passes near is tickled.
                              + 2.0f * dragNear(U, sp, SP * 10.0f);
                     // Brighter than it was (55): the stars were hard to find.
-                    L += starVis * stars[si].br * 85.0f * twinkle * seeThrough
-                       * max(0.0f, 1.0f - sqrt(ddx * ddx + ddy * ddy));
+                    float sl = starVis * stars[si].br * twinkle * seeThrough
+                             * max(0.0f, 1.0f - sqrt(ddx * ddx + ddy * ddy));
+                    L += sl * 85.0f;
+                    // WHITE, not sky-tinted. A star's cell used to take the
+                    // night's blue like every dark cell does, so the stars
+                    // read as coloured tiles; starlight claims its own cell.
+                    float sa = saturate(sl * 3.0f);
+                    if (sa > w) { w = sa; cr = 236.0f; cg = 238.0f; cb = 242.0f; }
                 }
             }
         }
@@ -2287,58 +2293,63 @@ fragment CellOut cellPass(VOut in [[stage_in]],
         if (qx * qx + qy * qy < SP * SP * 2.0f) L += 150.0f * sin(M_PI_F * a2);
     }
 
-    // ---- SIGNALS (Signals.swift): the elements as gauges. Each signal has a
-    // value 0..1 and a colour, and the sky shows it in whichever element is
-    // there to carry it — each in its own way, never one shape everywhere:
+    // ---- SIGNALS (Signals.swift): what the sky tells you. Each signal is a
+    // value 0..1 and a colour, and the sky shows it with whatever it has —
+    // the elements that are already there, never a widget drawn on top:
     //
-    //   RAYS     the sun on screen and not under a deck: a ray from the disc,
-    //            as long as the value.
-    //   SHAFTS   daytime under an overcast, or the sun off screen (a fixed
-    //            heading looking away from it): light breaking down through
-    //            the cloud from the top of the wall, leaning away from where
-    //            the sun is; a shaft reaches as far down as the value.
-    //   RINGS    night, the moon on screen: a ring round the moon per signal,
-    //            lit clockwise from the top as far as the value, over a faint
-    //            track so the whole ring can be read.
-    //   COMETS   night with no moon to use (set, new, off screen): a comet per
-    //            signal across the upper sky, its tail as long as the value.
+    //   RAYS     a clear day: rays from the sun, as long as the value. A fixed
+    //            heading that looks away from the sun brings them in from the
+    //            edge nearest it.
+    //   CLOUD    an overcast, day or night: lights INSIDE the cloud, the deck
+    //            glowing in the signal's colour like a storm cloud lit from
+    //            within, wider and brighter with the value.
+    //   RINGS    a clear night with the moon up: rings of its light, lit
+    //            clockwise from the top as far as the value.
+    //   AURORA   a clear night without one: a curtain of aurora along the sky,
+    //            one fold per signal, as tall as its value.
     //
-    // Drawn after the cloud and faded by it, never hidden: a reminder must not
-    // vanish because it clouded over. Signal 0 is the first ray / the left
-    // shaft / the inner ring / the left comet.
+    // The lights and the folds sit where the CPU put them (Renderer: slots
+    // 112..), clear of every widget and window. Drawn after the cloud and
+    // blended over it — a reminder must not vanish because it clouded over.
+    float sigA = 0.0f;                 // how much this cell is a signal, for
+    float3 sigCol = float3(0.0f);      // the colour pass at the end (below)
     if (U.rayCount > 0.5f) {
-        int RC = min(int(U.rayCount + 0.5f), 12);
+        int RC = min(int(U.rayCount + 0.5f), 8);
         float N = float(RC);
         float2 pc = float2(cxp, cyp);
         bool day = U.sunAlt > -4.0f;
-        bool sunOn = day && all(sunP > float2(-0.02f) * float2(W, H)) && all(sunP < float2(1.02f) * float2(W, H));
+        bool overcast = deckOpaque(U) > 0.75f;
         bool moonOn = !day && moonAbove && U.moonIllum > 3.0f
                    && all(moonP > float2(0.0f)) && all(moonP < float2(W, H));
-        int mode = (sunOn && deckOpaque(U) < 0.75f) ? 0 : (day ? 1 : (moonOn ? 2 : 3));
+        int mode = overcast ? 1 : (day ? 0 : (moonOn ? 2 : 3));
         float sg = 0.0f;
         int k = 0;
         if (mode == 0) {
-            float ox = cxp - sunP.x, oy = cyp - sunP.y, od = sqrt(ox * ox + oy * oy);
+            float2 o = clamp(sunP, float2(0.0f), float2(W, H));
+            float ox = cxp - o.x, oy = cyp - o.y, od = sqrt(ox * ox + oy * oy);
             float fi = fract(atan2(ox, -oy) / (2.0f * M_PI_F) + 1.0f + 0.5f / N) * N;
             k = min(int(fi), RC - 1);
             float off = fi - float(k) - 0.5f, v = spec[64 + k];
             float base = sunDiscR * 1.1f, len = base + sunDiscR * (0.8f + 11.0f * v);
-            sg = fexp(-off * off / (2.0f * 0.09f * 0.09f))
+            // About a tile wide wherever it is and however few there are —
+            // measured across the ray in pixels, not as a slice of the circle.
+            float offPx = off * (2.0f * M_PI_F / N) * od;
+            float bw = SP * 0.8f;
+            sg = fexp(-offPx * offPx / (2.0f * bw * bw))
                * smoothstep(base, base + sunDiscR * 0.7f, od)
                * (1.0f - smoothstep(len - SP * 1.5f, len, od)) * step(0.004f, v);
         } else if (mode == 1) {
-            float cx = clamp(sunP.x, W * 0.3f, W * 0.7f);
-            float lean = clamp((cx - sunP.x) / max(W, 1.0f), -0.4f, 0.4f) * 0.35f;
-            float spacing = min(W * 0.6f / N, SP * 7.0f);
-            float x0 = cx - spacing * (N - 1.0f) * 0.5f;
-            float xs = cxp - lean * cyp;                     // into the shafts' own frame
-            k = clamp(int(round((xs - x0) / spacing)), 0, RC - 1);
-            float v = spec[64 + k];
-            float dist = abs(xs - (x0 + spacing * float(k)));
-            float wdt = SP * 0.8f + cyp * 0.015f;            // a shaft widens as it falls
-            float len = H * 0.85f * v;
-            sg = fexp(-dist * dist / (wdt * wdt) * 2.0f)
-               * (1.0f - smoothstep(len - SP * 1.5f, len, cyp)) * step(0.004f, v);
+            for (int c = 0; c < RC; ++c) {
+                float v = spec[64 + c];
+                if (v < 0.004f) continue;
+                float2 at = float2(spec[112 + 2 * c], spec[113 + 2 * c]);
+                float R = SP * (1.8f + 5.0f * v);
+                float2 d = (pc - at) / float2(R * 1.5f, R);    // a cloud's light spreads sideways
+                // Ragged, like light diffusing through a billow, not a disc.
+                float edge = 0.75f + 0.25f * sin(cxp * 0.011f + cyp * 0.017f + float(c) * 2.1f + sec * 0.2f);
+                float sc = fexp(-dot(d, d) * 2.2f / edge) * (0.55f + 0.45f * v);
+                if (sc > sg) { sg = sc; k = c; }
+            }
         } else if (mode == 2) {
             float ox = cxp - moonP.x, oy = cyp - moonP.y, od = sqrt(ox * ox + oy * oy);
             float gap = max(SP * 1.3f, moonR * 0.22f);
@@ -2353,39 +2364,48 @@ fragment CellOut cellPass(VOut in [[stage_in]],
                 sg = across * (t < v ? 1.0f : 0.14f);
             }
         } else {
-            float2 dir = normalize(float2(-0.94f, -0.34f));  // tails stream up and to the left
+            // Each fold hangs from the upper sky at its own x, its curtain
+            // rising as tall as the value and swaying slowly.
+            float best = 1e9f;
             for (int c = 0; c < RC; ++c) {
-                float v = spec[64 + c];
-                if (v < 0.004f) continue;
-                float2 head = float2(W * (0.12f + 0.76f * (float(c) + 0.5f) / N),
-                                     H * (0.16f + 0.18f * fract(float(c) * 0.618034f)));
-                float2 rel = pc - head;
-                float along = dot(rel, dir), perp = abs(dot(rel, float2(-dir.y, dir.x)));
-                float len = SP * 3.0f + v * W * 0.28f;
-                if (along < -SP * 1.5f || along > len) continue;
-                float a = saturate(along / len);
-                float wdt = SP * (0.9f + 0.7f * a);
-                float sc = fexp(-perp * perp / (wdt * wdt) * 2.0f) * (1.0f - a * 0.6f)
-                         + (length(rel) < SP * 1.3f ? 1.0f : 0.0f);
-                if (sc > sg) { sg = saturate(sc); k = c; }
+                float dx = abs(cxp - spec[112 + 2 * c]);
+                if (dx < best) { best = dx; k = c; }
             }
+            float v = spec[64 + k];
+            float2 at = float2(spec[112 + 2 * k], spec[113 + 2 * k]);
+            float sway = sin(cyp * 0.012f + sec * 0.35f + float(k)) * SP * 1.2f;
+            float halfW = SP * (1.6f + 1.4f * v);
+            float across = 1.0f - smoothstep(halfW * 0.5f, halfW, abs(cxp - at.x - sway));
+            float foot = at.y + SP * 4.0f, top = foot - SP * (3.0f + 14.0f * v);
+            float up = saturate((foot - cyp) / max(foot - top, 1.0f));
+            float rays = 0.7f + 0.3f * sin(cxp * 0.09f + sec * 0.6f);
+            sg = across * step(top, cyp) * step(cyp, foot) * (1.0f - up * 0.8f) * rays * step(0.004f, v);
+        }
+        // Never under a widget or window: it would be drawn and lost. A
+        // cell's worth of margin, so a ring passing one breaks cleanly.
+        for (int f = 0; f < min(int(spec[176] + 0.5f), 12) && sg > 0.002f; ++f) {
+            float4 r = float4(spec[128 + 4 * f], spec[129 + 4 * f], spec[130 + 4 * f], spec[131 + 4 * f]);
+            if (cxp > r.x - SP && cxp < r.z + SP && cyp > r.y - SP && cyp < r.w + SP) sg = 0.0f;
         }
         if (sg > 0.002f) {
-            float vis = mix(0.45f, 1.0f, seeThrough);
+            float vis = mode == 1 ? 1.0f : mix(0.45f, 1.0f, seeThrough);
             float3 col = float3(spec[76 + 3 * k], spec[77 + 3 * k], spec[78 + 3 * k]);
             // Carried by COLOUR more than light: by day the rays cross the
             // sun's white glare, where added brightness alone cannot be seen.
             // At night the composite admits colour only in proportion to the
             // cell's own light (max(0.25, lum/210)), so a dark gauge is a grey
             // one: night gauges carry more light to keep their colour.
-            L += sg * (day ? 30.0f : 60.0f) * vis;
-            float a = sg * 0.85f * vis;
+            // An aurora is light itself, not a tint on the sky: it carries
+            // most of it.
+            L += sg * (day ? 30.0f : (mode == 3 ? 120.0f : 60.0f)) * vis;
+            float a = min(0.95f, sg * (day && mode == 0 ? 1.15f : 0.85f) * vis);
             float bc = day ? 245.0f : 200.0f;
             // BLENDED over whatever is there, not swapped in where it wins:
             // under a full deck the cloud already claims the cell at w = 1,
             // and a gauge that must out-weigh it never showed at all.
             cr = mix(cr, col.r * bc, a); cg = mix(cg, col.g * bc, a); cb = mix(cb, col.b * bc, a);
             w = max(w, a);
+            sigA = a; sigCol = col * bc;
         }
     }
 
@@ -2623,6 +2643,13 @@ fragment CellOut cellPass(VOut in [[stage_in]],
         sw = max(sw, 0.94f * cirrusGlow);
         g += (float3(R0, G0, B0) - g) * sw;
     }
+    // A signal keeps ITS colour. The admission above scales an element's
+    // colour by the cell's own brightness, which is right for cloud and wrong
+    // for light: at night it handed every signal back the sky's blue.
+    // Night only: by day the cell is bright and the composite already lets
+    // the colour through.
+    float nightOnly = 1.0f - saturate((U.sunAlt + 4.0f) / 6.0f);
+    if (sigA > 0.01f) g = mix(g, sigCol * (0.6f + 0.4f * saturate(lum / 160.0f)), sigA * 0.8f * nightOnly);
     if (U.flashAmp > 0.0f) {
         float fa = U.flashAmp * 0.8f;
         g += (255.0f - g) * fa;
@@ -3063,6 +3090,8 @@ fragment float4 heightPass(VOut in [[stage_in]],
                 h = min(1.0f, h + 0.22f + 0.40f * a);
             } else if (kind == 7 || kind == 8 || kind == 5 || kind == 2) {
                 h = min(1.0f, h + 0.14f * a);
+            } else if (kind == 14) {
+                h = min(1.0f, h + 0.18f * a);             // a leaf lies on top
             }
         }
     }
@@ -4234,6 +4263,20 @@ fragment float4 presentPass(VOut in [[stage_in]],
                     col += k * (0.06f + 0.16f * pow(gl, 3.0f));
                     lum = saturate(lum + k * 0.26f);
 
+                } else if (kind == 14) {
+                    // A FALLEN LEAF. Its colour rides in z: crimson, through
+                    // orange and gold, to the brown of one that has been down a
+                    // while. A leaf is matte and takes the light like the tile
+                    // it lies on; wet, it darkens and deepens, as wet leaves do.
+                    float hu = gcell.z;
+                    float3 leaf = hu < 0.33f ? mix(float3(0.58f, 0.10f, 0.08f), float3(0.86f, 0.36f, 0.08f), hu / 0.33f)
+                                : hu < 0.66f ? mix(float3(0.86f, 0.36f, 0.08f), float3(0.88f, 0.64f, 0.14f), (hu - 0.33f) / 0.33f)
+                                             : mix(float3(0.88f, 0.64f, 0.14f), float3(0.42f, 0.26f, 0.12f), (hu - 0.66f) / 0.34f);
+                    float shade = 0.55f + 0.75f * lumv;          // lit like what it lies on
+                    float wetL = (U.code >= 51 && U.code <= 99) ? 0.72f : 1.0f;
+                    col = mix(col, leaf * shade * wetL, k * 0.92f);
+                    lum = mix(lum, lumv * 0.9f, k * 0.5f);
+
                 } else if (kind == 9) {
                     // Frost. Crystalline and MATTE — the opposite of glaze,
                     // which is why the two never look alike however cold it is.
@@ -4685,9 +4728,8 @@ fragment float4 starFS(SOut in [[stage_in]],
     float edge = min(min(uv.x, uv.y), min(1.0f - uv.x, 1.0f - uv.y));
     float bevel = mix(0.55f, 1.0f, smoothstep(0.0f, 0.22f, edge))
                 * (1.0f + 0.15f * step(uv.x + uv.y, 0.5f));      // lit from the upper left
-    float warm = fract(si * 0.381966f);
-    float3 tint = mix(float3(0.86f, 0.92f, 1.0f), float3(1.0f, 0.93f, 0.82f), warm);
-    return float4(tint * l * bevel, 1.0f);
+    // White. (They were tinted per star, blue-white to warm; not liked.)
+    return float4(float3(0.96f, 0.97f, 1.0f) * l * bevel, 1.0f);
 }
 
 // ================================================================ DIRTY CELLS
