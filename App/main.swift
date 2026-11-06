@@ -488,6 +488,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
             lockStill?.start(configProvider: { [weak self] in self?.config.lockConfig ?? Config() },
                              astroProvider: { [weak self] in self?.lockAstro() ?? AstroState() },
                              weatherProvider: { [weak self] in self?.weather.latest ?? WeatherState() })
+            lockStill?.furnitureProvider = { [weak self] in
+                self?.surfaces.values.first?.furnitureSnapshot()
+            }
         } else {
             lockStill?.stop()
             lockStill = nil

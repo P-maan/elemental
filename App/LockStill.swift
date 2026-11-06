@@ -163,6 +163,10 @@ final class LockStillExporter {
         request(config: configProvider(), astro: astroProvider())
     }
 
+    /// What lies on the desktop right now — its fallen leaves above all — so
+    /// the still shows the same ground the wallpaper does, not a blank one.
+    var furnitureProvider: () -> SceneSimulation.FurnitureSnapshot? = { nil }
+
     private var configProvider: () -> Config = { Config() }
     private var astroProvider: () -> AstroState = { AstroState() }
 
@@ -243,6 +247,7 @@ final class LockStillExporter {
         // queue; only the AppKit reads stay here.
         let screens = NSScreen.screens
         let weather = weatherProvider()
+        let furniture = furnitureProvider()
         exporting = true
         exportQueue.async { [weak self] in
             guard let self else { return }
@@ -278,6 +283,7 @@ final class LockStillExporter {
             // thumbnail in System Settings, which has no login UI over it.
             renderer.surfaces = Furniture.lockScreen(width: Float(w), height: Float(h),
                                                      includeLoginBox: true)
+            if let snap = furniture { renderer.restoreFurniture(snap) }
             renderer.render(to: tex, waitForCompletion: true)
 
             // Everything past here is bytes and files, not Metal, and none of it is
