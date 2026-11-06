@@ -1030,6 +1030,9 @@ final class SceneSimulation {
     private(set) var rainDuration: Float = 0
     /// Depth of standing water at the bottom edge, in cells.
     private(set) var poolDepth: Float = 0
+    /// Rings spreading on the standing water where rain lands in it: x in
+    /// pixels, age in seconds.
+    private var ripples: [(x: Float, t: Float)] = []
 
     /// How deep the pool is allowed to get.
     ///
@@ -2962,6 +2965,15 @@ final class SceneSimulation {
         // took it away before: measured, a pool left by a shower was still
         // there after three hours of dry afternoon. Same physical rate as the
         // film — about twenty minutes to go in dry air, over an hour in humid.
+        // Rings where the rain lands in the pool.
+        for k in ripples.indices.reversed() {
+            ripples[k].t += dt
+            if ripples[k].t > 0.7 { ripples.remove(at: k) }
+        }
+        if wet && poolDepth > 0.3 && (form == .rain || form == .drizzle) && ripples.count < 24 {
+            let n = rainIntensity * Float(cols) * 0.08 * dt
+            if rnd() < n { ripples.append((x: rnd() * W, t: 0)) }
+        }
         if !wet && poolDepth > 0 {
             poolDepth = max(0, poolDepth - dt * (0.00012 + w.evaporationRate * 0.0022))
         }
@@ -3895,6 +3907,24 @@ final class SceneSimulation {
                     let idx = cy * cols + cx
                     let v = 0.30 + depth * 0.45
                     if v > glassCells[idx].x { glassCells[idx] = SIMD4<Float>(v, 5, 0, 0) }
+                }
+            }
+            // Rain landing in it: a ring that opens out across the surface
+            // and fades, a cell or two wide — z carries how much it catches
+            // the light (the shader's kind 5).
+            let surface = max(0, Int(top.rounded(.down)))
+            for r in ripples {
+                let rad = r.t / 0.7 * 1.8
+                let fade = max(0, 1 - r.t / 0.7)
+                let c = r.x / SP
+                for cx in max(0, Int(c - rad - 1))...min(cols - 1, Int(c + rad + 1)) {
+                    let d = abs(Float(cx) + 0.5 - c)
+                    let ring = max(0, 1 - abs(d - rad) * 1.6) * fade
+                    guard ring > 0.05 else { continue }
+                    for cy in surface..<min(rows, surface + 2) {
+                        let idx = cy * cols + cx
+                        if glassCells[idx].y == 5 { glassCells[idx].z = max(glassCells[idx].z, ring * (cy == surface ? 1 : 0.5)) }
+                    }
                 }
             }
         }

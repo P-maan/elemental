@@ -4028,6 +4028,11 @@ fragment float4 presentPass(VOut in [[stage_in]],
                 float3 sky = cells.sample(nearestS, mirror + 0.5f).rgb;
                 col = mix(col, mix(col * 0.86f, sky, 0.62f), wetness);
                 lum = saturate(lum * 0.92f);
+                // A raindrop's ring opening across it catches the light.
+                if (gcell.z > 0.01f) {
+                    col = mix(col, float3(0.92f, 0.95f, 1.0f), gcell.z * 0.45f);
+                    lum = saturate(lum + gcell.z * 0.25f);
+                }
             } else if (kind >= 7) {
                 // ---- WEATHER ON THE FURNITURE.
                 //

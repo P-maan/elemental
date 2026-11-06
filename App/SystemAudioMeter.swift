@@ -150,7 +150,9 @@ final class SystemAudioMeter: @unchecked Sendable {
             return
         }
         running = true
-        NSLog("Elemental: music visualizer listening to system audio")
+        let lag = max(0, Self.outputLatency() - 0.06)
+        queue.async { [weak self] in self?.syncDelay = lag }
+        NSLog("Elemental: music visualizer listening to system audio (in step %.0f ms later)", lag * 1000)
     }
 
     private func stop() {
@@ -327,7 +329,12 @@ final class SystemAudioMeter: @unchecked Sendable {
         guard drop || beat || now - lastPost >= 1.0 / 30 else { return }
         lastPost = now
         let out = spec
-        DispatchQueue.main.async { [weak self] in
+        // In step with what is HEARD, not with what is played: the tap hears
+        // the sound before the output does, and AirPods take ~170-250 ms to
+        // play it. Held back by the output's latency less what the picture
+        // itself takes to reach the screen (~60 ms), so a beat on the wall
+        // lands on the beat in the ear.
+        DispatchQueue.main.asyncAfter(deadline: .now() + syncDelay) { [weak self] in
             if drop { Pulse.shared.play(.drop) }
             Pulse.shared.feedSpectrum(out, bass: bass, mid: mid, high: high, beat: beat)
             self?.onLevel?()
@@ -361,6 +368,56 @@ final class SystemAudioMeter: @unchecked Sendable {
             if AudioObjectGetPropertyData(id, &addr, 0, nil, &rs, &run) == noErr, run != 0 { return true }
         }
         return false
+    }
+
+    /// Seconds to hold the visuals back (see the post above). Read when the
+    /// meter starts, i.e. whenever playback begins after silence.
+    private var syncDelay: Double = 0
+
+    /// How long the default output takes to play what it is handed, seconds:
+    /// device latency, safety offset, its buffer and its stream's latency —
+    /// plus what Bluetooth adds beyond what it reports.
+    private static func outputLatency() -> Double {
+        var dev = AudioObjectID(kAudioObjectUnknown)
+        var size = UInt32(MemoryLayout<AudioObjectID>.size)
+        var addr = AudioObjectPropertyAddress(mSelector: kAudioHardwarePropertyDefaultOutputDevice,
+                                              mScope: kAudioObjectPropertyScopeGlobal,
+                                              mElement: kAudioObjectPropertyElementMain)
+        guard AudioObjectGetPropertyData(AudioObjectID(kAudioObjectSystemObject), &addr, 0, nil,
+                                         &size, &dev) == noErr else { return 0 }
+        func u32(_ sel: AudioObjectPropertySelector, _ scope: AudioObjectPropertyScope) -> UInt32 {
+            var v: UInt32 = 0, s = UInt32(4)
+            var a = AudioObjectPropertyAddress(mSelector: sel, mScope: scope, mElement: kAudioObjectPropertyElementMain)
+            return AudioObjectGetPropertyData(dev, &a, 0, nil, &s, &v) == noErr ? v : 0
+        }
+        var rate: Float64 = 48_000
+        var rs = UInt32(MemoryLayout<Float64>.size)
+        addr.mSelector = kAudioDevicePropertyNominalSampleRate
+        AudioObjectGetPropertyData(dev, &addr, 0, nil, &rs, &rate)
+        var frames = u32(kAudioDevicePropertyLatency, kAudioObjectPropertyScopeOutput)
+            + u32(kAudioDevicePropertySafetyOffset, kAudioObjectPropertyScopeOutput)
+            + u32(kAudioDevicePropertyBufferFrameSize, kAudioObjectPropertyScopeGlobal)
+        // The output stream's own latency.
+        var ss = UInt32(0)
+        addr = AudioObjectPropertyAddress(mSelector: kAudioDevicePropertyStreams,
+                                          mScope: kAudioObjectPropertyScopeOutput,
+                                          mElement: kAudioObjectPropertyElementMain)
+        if AudioObjectGetPropertyDataSize(dev, &addr, 0, nil, &ss) == noErr, ss >= 4 {
+            var streams = [AudioStreamID](repeating: 0, count: Int(ss) / 4)
+            if AudioObjectGetPropertyData(dev, &addr, 0, nil, &ss, &streams) == noErr, let st = streams.first {
+                var l: UInt32 = 0, ls = UInt32(4)
+                var la = AudioObjectPropertyAddress(mSelector: kAudioStreamPropertyLatency,
+                                                    mScope: kAudioObjectPropertyScopeGlobal,
+                                                    mElement: kAudioObjectPropertyElementMain)
+                if AudioObjectGetPropertyData(st, &la, 0, nil, &ls, &l) == noErr { frames += l }
+            }
+        }
+        var secs = Double(frames) / max(rate, 8000)
+        let transport = u32(kAudioDevicePropertyTransportType, kAudioObjectPropertyScopeGlobal)
+        if transport == kAudioDeviceTransportTypeBluetooth || transport == kAudioDeviceTransportTypeBluetoothLE {
+            secs += 0.05
+        }
+        return min(0.5, secs)
     }
 
     private static func defaultOutputUID() -> String? {
