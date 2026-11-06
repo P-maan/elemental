@@ -2882,7 +2882,8 @@ fragment float4 heightPass(VOut in [[stage_in]],
                            constant Star     *stars [[buffer(2)]],
                            constant float    *spec  [[buffer(7)]],
                            texture2d<float>   cells [[texture(0)]],
-                           texture2d<float>   aux   [[texture(1)]])
+                           texture2d<float>   aux   [[texture(1)]],
+                           texture2d<float>   glass [[texture(2)]])
 {
     constexpr sampler ns(coord::pixel, filter::nearest, address::clamp_to_edge);
     float2 p = in.pos.xy;
@@ -3033,6 +3034,32 @@ fragment float4 heightPass(VOut in [[stage_in]],
         float2 SPv = float2(W / max(U.cols, 1.0f), H / max(U.rows, 1.0f));
         float r = length((floor(p) + 0.5f) * SPv - moonScreen(U, W, H)) / (min(W, H) * 0.10f);
         if (r < 1.0f) h += 0.22f * U.beat * (1.0f - r * r);
+    }
+
+    // ---- WATER AND SNOW STAND PROUD OF THE WALL. They were drawn as flat
+    // colour in their cells, so on the glass and along a window's edge they
+    // read as paint while every tile round them was a raised block — "it
+    // feels too 2D". Now they are geometry: a bead is a dome, highest at its
+    // centre (the bead vector the sim writes says where in the drop this cell
+    // sits), lying snow is a mound, and a sheen of water or ice is a thin skin
+    // over whatever it covers. The relief lighting then shades them like
+    // everything else — lit on the side toward the light, shadowed behind.
+    {
+        float4 gl = glass.sample(ns, p);
+        int kind = int(gl.y + 0.5f);
+        float a = saturate(gl.x);
+        if (a > 0.02f) {
+            // ON TOP of what is there, never instead of it: water lies on a
+            // tile, so it must stand above that tile and its neighbours.
+            if (kind == 1 || kind == 12) {
+                float dome = sqrt(saturate(1.0f - dot(gl.zw, gl.zw)));
+                h = min(1.0f, h + a * (0.22f + 0.38f * dome));
+            } else if (kind == 6) {
+                h = min(1.0f, h + 0.22f + 0.40f * a);
+            } else if (kind == 7 || kind == 8 || kind == 5 || kind == 2) {
+                h = min(1.0f, h + 0.14f * a);
+            }
+        }
     }
 
     // ---- DRAG: PIN ART. The pointer presses the blocks under it in, and the

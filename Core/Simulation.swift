@@ -442,6 +442,59 @@ final class SceneSimulation {
 
     // glass layer
     private var drops: [GlassDrop] = []
+
+    /// Snow knocked off something that moved, falling as clumps (shake()).
+    private struct Clump { var x, y, vx, vy, r: Float }
+    private var clumps: [Clump] = []
+
+    /// Something is in the air after a shake — the frame rate should be up
+    /// for the second or two it takes to land.
+    var hasDebris: Bool { !clumps.isEmpty || drops.contains { $0.splashLife > 0 } }
+
+    /// A surface MOVED — a window dragged, a widget rearranged — and shook off
+    /// some of what lay on it: the water on its top edge is thrown up and off
+    /// as spray that lands on the pane and runs, and lying snow slides off in
+    /// clumps that fall away. The further it went, the more comes off, as a
+    /// jolt does; a nudge sheds a little, a fling most of it.
+    private func shake(_ i: Int, from old: Surface, by distance: Float) {
+        guard i < films.count, SP > 0 else { return }
+        var f = films[i]
+        let k = min(0.85, 0.25 + distance / SP * 0.06)
+        let water = (f.wet + f.lip) * k
+        let n = min(10, Int(water * 14))
+        for _ in 0..<n where drops.count < Self.maxDrops {
+            let r = SP * (0.22 + rnd() * 0.30)
+            drops.append(GlassDrop(x: old.left + rnd() * old.w, y: old.top - r,
+                                   r: r, v: -30 - rnd() * 70,
+                                   rCrit: SP * (0.5 + rnd() * 0.4), falling: true,
+                                   vx: (rnd() - 0.5) * 140, splashLife: 0.45 + rnd() * 0.4))
+        }
+        f.wet *= 1 - k; f.lip *= 1 - k; f.runoff *= 1 - k
+        if f.snow > 0.05 && f.snowSpan > 0.05 {
+            let c = min(14, Int(f.snow * f.snowSpan * 8 * k) + 2)
+            for _ in 0..<c where clumps.count < 40 {
+                clumps.append(Clump(x: old.left + (0.5 + (rnd() - 0.5) * f.snowSpan) * old.w,
+                                    y: old.top - SP * 0.5 * rnd(),
+                                    vx: (rnd() - 0.5) * 70, vy: -15 - rnd() * 35,
+                                    r: SP * (0.35 + rnd() * 0.45)))
+            }
+            f.snow *= 1 - k
+        }
+        films[i] = f
+    }
+
+    private func updateClumps(dt: Float) {
+        guard !clumps.isEmpty else { return }
+        for k in clumps.indices.reversed() {
+            clumps[k].vy += 1100 * dt
+            clumps[k].vx *= 1 - dt * 0.8
+            clumps[k].x += clumps[k].vx * dt
+            clumps[k].y += clumps[k].vy * dt
+            // Snow falling through air sheds itself: the clump crumbles.
+            clumps[k].r *= 1 - dt * 0.25
+            if clumps[k].y > H + clumps[k].r || clumps[k].r < SP * 0.12 { clumps.remove(at: k) }
+        }
+    }
     private var spots: [GlassSpot] = []
     private var vortices: [GlassVortex] = []
     private(set) var glassWet: Float = 0
@@ -574,6 +627,7 @@ final class SceneSimulation {
             let span = max(W, H, 1)
             var used = Set<Int>()
             var next = [SurfaceFilm](repeating: SurfaceFilm(), count: surfaces.count)
+            var moved: [(i: Int, from: Surface, by: Float)] = []
             for (i, s) in surfaces.enumerated() {
                 var best = -1, bestD = span * 0.15
                 for (j, o) in oldValue.enumerated()
@@ -583,10 +637,16 @@ final class SceneSimulation {
                     let d = (dx * dx + dy * dy).squareRoot()
                     if d < bestD { bestD = d; best = j }
                 }
-                if best >= 0 { used.insert(best); next[i] = oldFilms[best] }
+                if best >= 0 {
+                    used.insert(best); next[i] = oldFilms[best]
+                    if bestD > SP * 0.4 { moved.append((i, oldValue[best], bestD)) }
+                }
             }
             films = next
             applyPendingMemory()
+            for m in moved where surfaces[m.i].kind != .dock && surfaces[m.i].kind != .menuBar {
+                shake(m.i, from: m.from, by: m.by)
+            }
         }
     }
 
@@ -2452,6 +2512,7 @@ final class SceneSimulation {
     private func updateGlass(dt rawDT: Float, state: SceneState) {
         glassQuads.removeAll(keepingCapacity: true)
         let dt = min(0.05, rawDT)
+        updateClumps(dt: dt)
         let w = state.weather
         // Measured, not classified. The code alone used to be enough to soak
         // the pane on a dry day.
@@ -3484,6 +3545,9 @@ final class SceneSimulation {
                           r: SP * 0.22, kind: 4, strength: fade * 0.22)
                 }
             }
+        }
+        for c in clumps {
+            stamp(x: c.x, y: c.y, r: c.r, kind: Deposit.snow, strength: 0.95)
         }
         for d in drops {
             // The wet track a running drop leaves behind it.

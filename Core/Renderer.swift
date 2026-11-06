@@ -59,6 +59,8 @@ final class ElementalRenderer {
     private(set) var dirtyShare: Double = 1
     /// Ask for every cell to be redrawn next frame — after a setting changes.
     func requestFullRedraw() { fullRedrawPending = true }
+    /// Something knocked off a moved surface is still in the air.
+    var hasDebris: Bool { sim.hasDebris }
     var gridCols: Int { sim.cols }
     var gridRows: Int { sim.rows }
     /// Off: shade every pixel every frame (the render tool's --nokept, to
@@ -801,6 +803,8 @@ final class ElementalRenderer {
                 // Cloud occlusion per cell, so relief can follow WHAT IS IN
                 // FRONT rather than what is brightest — see heightPass.
                 e.setFragmentTexture(auxTex, index: 1)
+                // Water and snow stand proud of the wall (heightPass).
+                e.setFragmentTexture(glassTex, index: 2)
                 e.drawPrimitives(type: .triangle, vertexStart: 0, vertexCount: 3)
                 e.endEncoding()
                 heightPrimed = true
