@@ -41,11 +41,23 @@ final class SongTint: @unchecked Sendable {
         lock.lock(); art = c; lock.unlock()
     }
 
+    /// What is showing now, without stepping — for LiveRelay.
+    var current: (rgb: SIMD3<Float>, amount: Float) {
+        lock.lock(); defer { lock.unlock() }; return (cur, amt)
+    }
+
+    /// The screen saver: the tinge relayed from the app (LiveRelay).
+    private var relayed: (rgb: SIMD3<Float>, amount: Float, at: CFAbsoluteTime)?
+    func relay(rgb: SIMD3<Float>, amount: Float) {
+        lock.lock(); relayed = (rgb, amount, CFAbsoluteTimeGetCurrent()); lock.unlock()
+    }
+
     /// Called once per frame per surface. Easing is on wall-clock time since the
     /// last call from ANY surface, so two displays do not ease twice as fast.
     func step(spectrum: [Float]) -> (rgb: SIMD3<Float>, amount: Float) {
         lock.lock(); defer { lock.unlock() }
         if let f = forced { return (f, Self.strength) }
+        if let r = relayed, CFAbsoluteTimeGetCurrent() - r.at < 1 { return (r.rgb, r.amount) }
         let now = CFAbsoluteTimeGetCurrent()
         let dt = Float(min(0.5, max(0, now - lastStep)))
         lastStep = now

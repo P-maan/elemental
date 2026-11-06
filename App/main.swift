@@ -1034,6 +1034,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         // a global monitor sees mouse events, only keys need Accessibility.
         cursorTracker.onDrag = { [weak self] in self?.pulseStarted() }
         cursorTracker.start()
+        startSaverRelay()
     }
 
     /// The meter runs only while the setting is on, the Mac is awake, it is
@@ -1058,6 +1059,32 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
             audioGateTimer?.invalidate(); audioGateTimer = nil
         }
         applyMusicState()
+    }
+
+    // MARK: The screen saver's live feed — see Core/LiveRelay.swift
+
+    private var saverRelayTimer: Timer?
+
+    /// While macOS shows the screen saver, post it what is live — the music,
+    /// Zo's reminder, the album tinge — twenty times a second. Nothing at all
+    /// otherwise.
+    private func startSaverRelay() {
+        let dnc = DistributedNotificationCenter.default()
+        dnc.addObserver(forName: Notification.Name("com.apple.screensaver.didstart"), object: nil,
+                        queue: .main) { [weak self] _ in
+            guard let self, self.saverRelayTimer == nil else { return }
+            let t = Timer(timeInterval: 1.0 / 20, repeats: true) { _ in
+                DistributedNotificationCenter.default().postNotificationName(
+                    LiveRelay.name, object: LiveRelay.pack(), userInfo: nil, deliverImmediately: true)
+            }
+            t.tolerance = 0.01
+            RunLoop.main.add(t, forMode: .common)
+            self.saverRelayTimer = t
+        }
+        dnc.addObserver(forName: Notification.Name("com.apple.screensaver.didstop"), object: nil,
+                        queue: .main) { [weak self] _ in
+            self?.saverRelayTimer?.invalidate(); self?.saverRelayTimer = nil
+        }
     }
 
     private var musicOnBattery: Bool { !onACPower || lowPowerActive }

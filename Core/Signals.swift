@@ -62,8 +62,16 @@ final class Signals: @unchecked Sendable {
 
     /// The reminder showing now, eased: its strength 0..1 and colour 0..1.
     /// Several take turns, eight seconds each, fading through each other.
+    /// The screen saver: Zo's glow relayed from the app (LiveRelay).
+    private var relayed: (value: Float, rgb: SIMD3<Float>, at: CFAbsoluteTime)?
+    func relay(value: Float, rgb: SIMD3<Float>) {
+        lock.lock(); relayed = (value, rgb, CFAbsoluteTimeGetCurrent()); lock.unlock()
+    }
+
     func glow() -> (value: Float, rgb: SIMD3<Float>) {
-        lock.lock(); prune()
+        lock.lock()
+        if let r = relayed, CFAbsoluteTimeGetCurrent() - r.at < 1 { lock.unlock(); return (r.value, r.rgb) }
+        prune()
         let zo = map.filter { $0.key.hasPrefix("zo.") }.sorted { $0.value.setAt < $1.value.setAt }
         lock.unlock()
         guard !zo.isEmpty else { return (0, SIMD3(1, 1, 1)) }

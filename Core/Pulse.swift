@@ -147,9 +147,18 @@ final class Pulse: @unchecked Sendable {
     /// A message pattern's value right now, music excluded; 0 when none plays.
     func message() -> Float {
         lock.lock(); defer { lock.unlock() }
-        guard let p = pattern, p != .drop else { return 0 }
-        let t = CFAbsoluteTimeGetCurrent() - patternT0
-        return t < p.seconds ? Float(max(0, min(1, p.value(t)))) : 0
+        let now = CFAbsoluteTimeGetCurrent()
+        let relayed = now - relayedAt < 0.5 ? relayed : 0
+        guard let p = pattern, p != .drop else { return relayed }
+        let t = now - patternT0
+        return max(relayed, t < p.seconds ? Float(max(0, min(1, p.value(t)))) : 0)
+    }
+
+    /// The screen saver: a message's value relayed from the app (LiveRelay).
+    private var relayed: Float = 0
+    private var relayedAt: CFAbsoluteTime = 0
+    func relayMessage(_ v: Float) {
+        lock.lock(); relayed = v; relayedAt = CFAbsoluteTimeGetCurrent(); lock.unlock()
     }
 
     /// Something is pulsing, or did within the last two seconds - the frame rate

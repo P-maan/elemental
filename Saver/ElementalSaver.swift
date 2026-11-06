@@ -92,7 +92,21 @@ final class ElementalSaverView: ScreenSaverView {
                                 facingAz: self.loadedConfig.facingAz, date: date)
         }
         resizeIfNeeded()
+        // The music, Zo's reminder and the album tinge, relayed by the app
+        // while this runs (LiveRelay) — the saver cannot see any of them.
+        relayObserver = DistributedNotificationCenter.default().addObserver(
+            forName: LiveRelay.name, object: nil, queue: .main) { [weak self] note in
+            guard let s = note.object as? String else { return }
+            LiveRelay.apply(s)
+            self?.relayCount += 1
+        }
         NSLog("Elemental.saver: ready (%.0fx%.0f)", bounds.width, bounds.height)
+    }
+
+    private var relayObserver: NSObjectProtocol?
+    private var relayCount = 0
+    deinit {
+        if let o = relayObserver { DistributedNotificationCenter.default().removeObserver(o) }
     }
 
     /// Load the same settings the desktop wallpaper is using, so signing out
@@ -210,6 +224,7 @@ final class ElementalSaverView: ScreenSaverView {
             "grout \(r.grout)",
             "shadow \(r.shadow)",
             "poster \(r.poster)",
+            "relayed \(relayCount)",
         ].joined(separator: "; ")
         // Through ScreenSaverDefaults, the same object the config is READ with.
         // A raw CFPreferencesSetValue to the domain string wrote nothing at all
