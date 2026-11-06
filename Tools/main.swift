@@ -796,6 +796,7 @@ if args["bass"] != nil || args["mid"] != nil || args["high"] != nil || args["bea
     Pulse.shared.feedSpectrum(spec, bass: num("bass", 0), mid: num("mid", 0), high: num("high", 0),
                               beat: args["beat"] != nil)
 }
+if args["nokept"] != nil { renderer.keptFrames = false }
 // --rays battery,cpu,zo,... : the rays as gauges. --signal name:value[:hexcolour]
 // (repeatable with commas) sets Zo signals; sys.* names set system readings.
 if let r = args["rays"] {
@@ -825,6 +826,47 @@ let dryFrames = int("dryfor", 0)
 
 for i in 0..<total {
     renderer.render(to: tex, waitForCompletion: dryFrames == 0 && i == total - 1)
+}
+// --bench N: N more frames, each waited on, and the mean GPU+wall time.
+if let n = args["bench"].flatMap(Int.init), n > 0 {
+    let t0 = CFAbsoluteTimeGetCurrent()
+    for i in 0..<n { renderer.render(to: tex, waitForCompletion: i == n - 1) }
+    let ms = (CFAbsoluteTimeGetCurrent() - t0) * 1000 / Double(n)
+    print(String(format: "  bench     %.2f ms/frame over %d frames", ms, n))
+}
+// --verifykept: the kept (dirty-cell) frame against a full redraw of the very
+// next frame. Any real difference is a stale cell.
+if args["verifykept"] != nil {
+    func grab() -> [UInt8] {
+        var b = [UInt8](repeating: 0, count: width * height * 4)
+        b.withUnsafeMutableBytes { tex.getBytes($0.baseAddress!, bytesPerRow: width * 4,
+                                                from: MTLRegionMake2D(0, 0, width, height), mipmapLevel: 0) }
+        return b
+    }
+    renderer.render(to: tex, waitForCompletion: true)
+    let kept = grab()
+    renderer.requestFullRedraw()
+    renderer.repeatFrame = true
+    renderer.render(to: tex, waitForCompletion: true)
+    let full = grab()
+    var mx = 0, over = 0
+    var worst = (0, 0)
+    for i in 0..<kept.count where i % 4 != 3 {
+        let d = abs(Int(kept[i]) - Int(full[i]))
+        if d > mx { mx = d; worst = ((i / 4) % width, (i / 4) / width) }
+        if d > 6 { over += 1 }
+    }
+    print("  verify    max \(mx) at \(worst)  values>6: \(over)")
+    var byCell: [Int: Int] = [:]
+    let cw = Double(width) / Double(renderer.gridCols), ch = Double(height) / Double(renderer.gridRows)
+    for i in stride(from: 0, to: kept.count, by: 4) {
+        let d = max(abs(Int(kept[i]) - Int(full[i])), abs(Int(kept[i+1]) - Int(full[i+1])))
+        if d > 6 {
+            let x = (i / 4) % width, y = (i / 4) / width
+            byCell[Int(Double(y) / ch) * 1000 + Int(Double(x) / cw), default: 0] += 1
+        }
+    }
+    print("  cells    ", byCell.sorted { $0.value > $1.value }.prefix(12).map { "(\($0.key % 1000),\($0.key / 1000)):\($0.value)" }.joined(separator: " "))
 }
 if dryFrames > 0 {
     var clear = renderer.state.weather

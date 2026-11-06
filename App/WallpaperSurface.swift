@@ -125,7 +125,9 @@ final class WallpaperSurface: NSObject, CAMetalDisplayLinkDelegate {
         view.wantsLayer = true
         metalLayer.device = device
         metalLayer.pixelFormat = wantsHDR ? .rgba16Float : .bgra8Unorm
-        metalLayer.framebufferOnly = true
+        // Not framebuffer-only: the renderer COPIES its kept frame into the
+        // drawable (it only shades the cells that changed — see Renderer).
+        metalLayer.framebufferOnly = false
         metalLayer.isOpaque = true
         // The three things that together opt a layer into EDR: the flag, an
         // extended-range colour space, and a float pixel format above.
@@ -198,6 +200,7 @@ final class WallpaperSurface: NSObject, CAMetalDisplayLinkDelegate {
         renderer.playbackOnWake = config.playbackOnWake
         renderer.playbackMaxSeconds = config.playbackMaxSeconds
         renderer.raySources = config.rays
+        renderer.requestFullRedraw()
         // The cursor arrives in global top-left points (the window list's
         // space); AppKit frames are bottom-left from the primary display.
         let primaryH = NSScreen.screens.first?.frame.height ?? frame.height
@@ -260,6 +263,9 @@ final class WallpaperSurface: NSObject, CAMetalDisplayLinkDelegate {
     /// Separate from `applyFrameRate(lowPower:)` only so callers on a timer do
     /// not have to know the current power state.
     func refreshFrameRate() { applyFrameRate(lowPower: lowPowerMode) }
+
+    /// Whole screens' worth of cells the wall may redraw per second.
+    static let redrawBudgetPerSecond: Float = 10
 
     /// Re-derive the furniture, cheaply, on a timer.
     ///
@@ -337,7 +343,24 @@ final class WallpaperSurface: NSObject, CAMetalDisplayLinkDelegate {
     func applyFrameRate(lowPower: Bool? = nil) {
         let lowPower = lowPower ?? lowPowerMode
         lowPowerMode = lowPower
-        let ceiling = Float(lowPower ? max(15, config.maxFPS / 2) : config.maxFPS)
+        var ceiling = Float(lowPower ? max(15, config.maxFPS / 2) : config.maxFPS)
+
+        // A WORK BUDGET over whatever the scene asks for. Only the cells that
+        // changed are shaded (Renderer, dirty cells), so a frame's cost is the
+        // share of the wall it redraws; the wall may redraw about ten screens'
+        // worth a second. A calm sky or a slow shimmer redraws a few per cent
+        // a frame and runs at the full rate; heavy rain, where most cells
+        // move, settles at fifteen. Asked for 5 Nov 2026 after the
+        // fans came on: "make it adaptive so it doesn't tax the CPU and GPU".
+        //
+        // Not measured GPU time: the GPU drops its clock when lightly loaded,
+        // so a frame TAKES longer exactly when it costs less, and a budget on
+        // time throttles itself to the floor. A drag is exempt while it
+        // lasts — brief, and a laggy answer to the hand is what it fixes.
+        let share = Float(max(0.02, renderer.dirtyShare))
+        if !Cursor.shared.active {
+            ceiling = min(ceiling, max(15, (Self.redrawBudgetPerSecond / share).rounded()))
+        }
 
         // Ask for the rate the SCENE needs, not a constant.
         //
@@ -458,8 +481,17 @@ final class WallpaperSurface: NSObject, CAMetalDisplayLinkDelegate {
         // rain reads as stutter however high the average is. A fixed rate is
         // the only way to get an even beat, and rain is where it shows most.
         if moving {
-            link?.preferredFrameRateRange = CAFrameRateRange(minimum: ceiling, maximum: ceiling,
-                                                             preferred: ceiling)
+            // Pinned, but at what the motion NEEDS, not always the ceiling:
+            // the hand and a lightning flash get every frame there is; music
+            // reads its beats at thirty; falling rain and snow ask for 16-30
+            // by how hard it comes down (`need`, above). Every frame shown
+            // costs the window server a full-screen composite whatever
+            // changed in it, so a frame nobody needs is pure heat.
+            let rate: Float
+            if Cursor.shared.active || w.isThundering { rate = ceiling }
+            else { rate = min(ceiling, max(need, Pulse.shared.active ? 30 : 0)) }
+            link?.preferredFrameRateRange = CAFrameRateRange(minimum: rate, maximum: rate,
+                                                             preferred: rate)
         } else {
             link?.preferredFrameRateRange = CAFrameRateRange(minimum: preferred,
                                                              maximum: hi,

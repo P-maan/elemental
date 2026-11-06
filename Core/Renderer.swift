@@ -39,6 +39,36 @@ final class ElementalRenderer {
     /// through, per cell. The full-res pass knows where the moon is but not what
     /// is in front of it; this is what tells it.
     private var auxTex: MTLTexture?
+    private var starPS: MTLRenderPipelineState!
+
+    // ---- Redraw only what changed (markDirty / collectDirty in the shader).
+    private var dirtyPS: MTLRenderPipelineState!
+    private var markDirtyCS: MTLComputePipelineState!
+    private var collectDirtyCS: MTLComputePipelineState!
+    /// The last finished frame, kept so unchanged cells need not be shaded.
+    private var frameTex: MTLTexture?
+    /// What each cell looked like when it was last DRAWN.
+    private var refTex: [MTLTexture] = []
+    private var flagTex: MTLTexture?
+    private var dirtyList: MTLBuffer!
+    /// MTLDrawPrimitivesIndirectArguments: vertexCount 6, instanceCount = dirty cells.
+    private var dirtyArgs: MTLBuffer!
+    private var lastFullRedraw: CFAbsoluteTime = 0
+    private var fullRedrawPending = true
+    /// Share of cells redrawn, smoothed (status only).
+    private(set) var dirtyShare: Double = 1
+    /// Ask for every cell to be redrawn next frame — after a setting changes.
+    func requestFullRedraw() { fullRedrawPending = true }
+    var gridCols: Int { sim.cols }
+    var gridRows: Int { sim.rows }
+    /// Off: shade every pixel every frame (the render tool's --nokept, to
+    /// compare against).
+    var keptFrames = true
+    /// Debug: the next render repeats the last frame's clock and skips the step.
+    var repeatFrame = false
+    private var lastClock: (sec: Float, dt: Float, wasIdle: Float) = (0, 0, 0)
+    private var starQuadBuf: MTLBuffer!
+    private var starQuadCount = 0
     /// Per-cell water lookup for the presentation pass.
     private var glassTex: MTLTexture?
     /// Rain rasterised per cell, so streaks can lean with the wind.
@@ -151,6 +181,8 @@ final class ElementalRenderer {
     /// in the cell, height and present passes.
     private var spectrumBuf: MTLBuffer!
     private var slowSpec = [Float](repeating: 0, count: Pulse.bandCount)
+    /// Smoothed GPU time of a frame, milliseconds (status only).
+    private(set) var gpuMs: Double = 0
     /// What each ray shows (Config.rays). Empty: the music.
     var raySources: [String] = []
     private var slowSpecAt: CFAbsoluteTime = 0
@@ -355,6 +387,25 @@ final class ElementalRenderer {
         ca.destinationRGBBlendFactor = .oneMinusSourceAlpha
         ca.destinationAlphaBlendFactor = .oneMinusSourceAlpha
         glassPS = try device.makeRenderPipelineState(descriptor: glassDesc)
+
+        // Stars: their own pass, MAX-blended over the mosaic (starFS).
+        let starDesc = MTLRenderPipelineDescriptor()
+        starDesc.vertexFunction = library.makeFunction(name: "starVS")
+        starDesc.fragmentFunction = library.makeFunction(name: "starFS")
+        let sa = starDesc.colorAttachments[0]!
+        sa.pixelFormat = colorFormat
+        sa.isBlendingEnabled = true
+        sa.rgbBlendOperation = .max
+        sa.alphaBlendOperation = .max
+        starPS = try device.makeRenderPipelineState(descriptor: starDesc)
+
+        let dirtyDesc = MTLRenderPipelineDescriptor()
+        dirtyDesc.vertexFunction = library.makeFunction(name: "dirtyVS")
+        dirtyDesc.fragmentFunction = library.makeFunction(name: "presentPass")
+        dirtyDesc.colorAttachments[0].pixelFormat = colorFormat
+        dirtyPS = try device.makeRenderPipelineState(descriptor: dirtyDesc)
+        markDirtyCS = try device.makeComputePipelineState(function: library.makeFunction(name: "markDirty")!)
+        collectDirtyCS = try device.makeComputePipelineState(function: library.makeFunction(name: "collectDirty")!)
     }
 
     private func buildBuffers() {
@@ -363,6 +414,10 @@ final class ElementalRenderer {
         spectrumBuf = device.makeBuffer(length: MemoryLayout<Float>.stride * 128, options: opt)
         breatherBuf = device.makeBuffer(length: MemoryLayout<GPUBreather>.stride * 3, options: opt)
         starBuf     = device.makeBuffer(length: MemoryLayout<GPUStar>.stride * Self.maxStars, options: opt)
+        starQuadBuf = device.makeBuffer(length: MemoryLayout<Float>.stride * 8 * Self.maxStars, options: opt)
+        dirtyArgs = device.makeBuffer(length: MemoryLayout<UInt32>.stride * 4, options: .storageModeShared)
+        let a = dirtyArgs.contents().assumingMemoryBound(to: UInt32.self)
+        a[0] = 6; a[1] = 0; a[2] = 0; a[3] = 0
         streakBuf   = device.makeBuffer(length: MemoryLayout<GPUStreak>.stride * Self.maxStreaks, options: opt)
         boltBuf     = device.makeBuffer(length: MemoryLayout<GPUBoltPt>.stride * Self.maxBolt, options: opt)
         glassBuf    = device.makeBuffer(length: MemoryLayout<GlassQuad>.stride * Self.maxGlassQuads, options: opt)
@@ -405,6 +460,29 @@ final class ElementalRenderer {
         ax.usage = [.renderTarget, .shaderRead]
         ax.storageMode = .private
         auxTex = device.makeTexture(descriptor: ax)
+
+        // References for the dirty-cell redraw, one per input presentPass
+        // reads, plus the flags; and the kept frame itself.
+        func ref(_ f: MTLPixelFormat, _ w: Int, _ h: Int) -> MTLTexture? {
+            let t = MTLTextureDescriptor.texture2DDescriptor(pixelFormat: f, width: w, height: h, mipmapped: false)
+            t.usage = [.shaderRead, .shaderWrite]
+            t.storageMode = .private
+            return device.makeTexture(descriptor: t)
+        }
+        let N = SceneSimulation.streakSub
+        refTex = [ref(.rgba16Float, sim.cols, sim.rows), ref(.r16Float, sim.cols, sim.rows),
+                  ref(.r16Float, sim.cols, sim.rows), ref(.rgba32Float, sim.cols, sim.rows),
+                  ref(.r32Float, sim.cols, sim.rows), ref(.r32Float, sim.cols * N, sim.rows * N)]
+                  .compactMap { $0 }
+        flagTex = ref(.r8Unorm, sim.cols, sim.rows)
+        dirtyList = device.makeBuffer(length: MemoryLayout<UInt32>.stride * sim.cols * sim.rows,
+                                      options: .storageModePrivate)
+        let fd = MTLTextureDescriptor.texture2DDescriptor(pixelFormat: colorFormat, width: width,
+                                                          height: height, mipmapped: false)
+        fd.usage = [.renderTarget, .shaderRead]
+        fd.storageMode = .private
+        frameTex = device.makeTexture(descriptor: fd)
+        fullRedrawPending = true
 
         let g = MTLTextureDescriptor.texture2DDescriptor(
             pixelFormat: .rgba32Float, width: sim.cols, height: sim.rows, mipmapped: false)
@@ -625,12 +703,18 @@ final class ElementalRenderer {
                 presenting drawable: MTLDrawable? = nil) {
         guard let cellTex, pixelWidth > 0 else { return }
 
-        var clock = advanceClock()
-        beginPlaybackIfNeeded(gap: Double(clock.wasIdle))
+        // Debug (render tool --verifykept): draw the SAME frame again — no
+        // time passes, nothing steps — so a full redraw can be compared with
+        // the kept one.
+        let repeating = repeatFrame
+        repeatFrame = false
+        var clock: (sec: Float, dt: Float, wasIdle: Float) = repeating ? (lastClock.sec, 0, 0) : advanceClock()
+        lastClock = clock
+        if !repeating { beginPlaybackIfNeeded(gap: Double(clock.wasIdle)) }
 
         // A replay overrides the clock: the scene runs on simulated time until
         // it has caught up with the present.
-        if playback != nil { clock = advancePlayback(dt: clock.dt, clock: clock) }
+        if playback != nil && !repeating { clock = advancePlayback(dt: clock.dt, clock: clock) }
         let sec = clock.sec
 
         // ---- ease the sky toward the last reading.
@@ -646,12 +730,13 @@ final class ElementalRenderer {
         // replay's own accelerated dt, so the weather moves at the same speed
         // as everything else the user is watching rush past.
         let wokeUp = clock.wasIdle > 1.0 && playback == nil
-        if easesTransitions {
+        if easesTransitions && !repeating {
             _state.weather = easer.advance(dt: wokeUp ? clock.wasIdle : clock.dt)
         }
 
         // Step the integrators, catching up if we have just woken.
-        if wokeUp {
+        if repeating {
+        } else if wokeUp {
             sim.fastForward(to: sec, elapsed: clock.wasIdle, state: state)
         } else {
             sim.step(dt: clock.dt, sec: sec, state: state)
@@ -690,7 +775,7 @@ final class ElementalRenderer {
         // ---- Pass H: per-cell relief height. A handful of thousand fragments,
         // so the neighbourhood analysis behind the emphasis curve is free here
         // and would not be at full resolution.
-        if let heightTex {
+        if let heightTex, !repeating {
             // How much of the newly computed height to take this frame. 1 is
             // the old behaviour: assign it. Anything less blends it into the
             // height already standing, so the blocks rise and fall into place.
@@ -722,43 +807,109 @@ final class ElementalRenderer {
             }
         }
 
-        // ---- Pass B (+C): full-res presentation
+        // ---- Pass B (+C): full-res presentation.
+        //
+        // Only the cells whose inputs changed are shaded (markDirty /
+        // collectDirty), into a kept frame that is then copied to the target —
+        // a calm sky or a slow shimmer shades a small fraction of the wall per
+        // frame instead of all eleven million pixels. Falls back to shading
+        // everything straight into the target when the target is not the kept
+        // frame's size (an export at another resolution). A first frame, or
+        // one after a resize, is a full redraw by construction.
+        let now = CFAbsoluteTimeGetCurrent()
+        let useKept = frameTex.map { $0.width == target.width && $0.height == target.height
+                                     && $0.pixelFormat == target.pixelFormat } ?? false
+                      && refTex.count == 6 && keptFrames
+        if useKept, let frameTex, let flagTex, let heightTex, let auxTex, let glassTex,
+           let streakTex, let streakFineTex {
+            let force: UInt32 = (fullRedrawPending || now - lastFullRedraw > 2) ? 1 : 0
+            if force == 1 { fullRedrawPending = false; lastFullRedraw = now }
+            if let b = cmd.makeBlitCommandEncoder() {
+                b.fill(buffer: dirtyArgs, range: 4..<8, value: 0)
+                b.endEncoding()
+            }
+            let tg = MTLSize(width: 8, height: 8, depth: 1)
+            let grid = MTLSize(width: sim.cols, height: sim.rows, depth: 1)
+            if let c = cmd.makeComputeCommandEncoder() {
+                var f = force
+                c.setComputePipelineState(markDirtyCS)
+                let inputs: [MTLTexture?] = [cellTex, heightTex, auxTex, glassTex, streakTex, streakFineTex]
+                c.setTextures(inputs + refTex + [flagTex], range: 0..<13)
+                c.setBytes(&f, length: 4, index: 0)
+                c.dispatchThreads(grid, threadsPerThreadgroup: tg)
+                c.setComputePipelineState(collectDirtyCS)
+                c.setTextures([flagTex] + inputs + refTex, range: 0..<13)
+                c.setBuffer(dirtyList, offset: 0, index: 0)
+                c.setBuffer(dirtyArgs, offset: 4, index: 1)
+                c.dispatchThreads(grid, threadsPerThreadgroup: tg)
+                c.endEncoding()
+            }
+            let kDesc = MTLRenderPassDescriptor()
+            kDesc.colorAttachments[0].texture = frameTex
+            kDesc.colorAttachments[0].loadAction = .load
+            kDesc.colorAttachments[0].storeAction = .store
+            if let e = cmd.makeRenderCommandEncoder(descriptor: kDesc) {
+                e.setRenderPipelineState(dirtyPS)
+                e.setVertexBuffer(dirtyList, offset: 0, index: 0)
+                e.setVertexBuffer(uniformBuf, offset: 0, index: 1)
+                bindPresentInputs(e)
+                e.drawPrimitives(type: .triangle, indirectBuffer: dirtyArgs, indirectBufferOffset: 0)
+                e.endEncoding()
+            }
+            if let b = cmd.makeBlitCommandEncoder() {
+                b.copy(from: frameTex, to: target)
+                b.endEncoding()
+            }
+            let cells = Double(sim.cols * sim.rows)
+            let args = dirtyArgs!
+            cmd.addCompletedHandler { [weak self] _ in
+                let n = Double(args.contents().assumingMemoryBound(to: UInt32.self)[1])
+                DispatchQueue.main.async { self?.dirtyShare += 0.1 * (n / cells - (self?.dirtyShare ?? 0)) }
+            }
+        }
+
         let bDesc = MTLRenderPassDescriptor()
         bDesc.colorAttachments[0].texture = target
-        bDesc.colorAttachments[0].loadAction = .dontCare
+        bDesc.colorAttachments[0].loadAction = useKept ? .load : .dontCare
         bDesc.colorAttachments[0].storeAction = .store
         if let e = cmd.makeRenderCommandEncoder(descriptor: bDesc) {
-            e.setRenderPipelineState(presentPS)
-            e.setFragmentBuffer(uniformBuf, offset: 0, index: 0)
-            e.setFragmentBuffer(spectrumBuf, offset: 0, index: 7)
-            e.setFragmentBuffer(starBuf,    offset: 0, index: 2)
-            e.setFragmentTexture(cellTex, index: 0)
-            e.setFragmentTexture(glassTex, index: 1)
-            e.setFragmentTexture(streakFineTex, index: 2)
-            e.setFragmentTexture(heightTex, index: 3)
-            e.setFragmentTexture(auxTex, index: 4)
-            e.drawPrimitives(type: .triangle, vertexStart: 0, vertexCount: 3)
+            if !useKept {
+                e.setRenderPipelineState(presentPS)
+                bindPresentInputs(e)
+                e.drawPrimitives(type: .triangle, vertexStart: 0, vertexCount: 3)
+            }
 
-            // Superseded: water is now drawn inside presentPass, in-theme and
-            // subdivided, rather than as smooth alpha-blended circles on top.
-            let quads: [GlassQuad] = []
-            if !quads.isEmpty {
-                let n = min(quads.count, Self.maxGlassQuads)
-                quads.withUnsafeBufferPointer { p in
-                    glassBuf.contents().copyMemory(from: p.baseAddress!,
-                                                   byteCount: n * MemoryLayout<GlassQuad>.stride)
-                }
-                e.setRenderPipelineState(glassPS)
-                e.setVertexBuffer(glassBuf, offset: 0, index: 0)
+            if starQuadCount > 0 {
+                e.setRenderPipelineState(starPS)
+                e.setVertexBuffer(starQuadBuf, offset: 0, index: 0)
                 e.setVertexBuffer(uniformBuf, offset: 0, index: 1)
-                e.drawPrimitives(type: .triangle, vertexStart: 0, vertexCount: 6, instanceCount: n)
+                e.setFragmentBuffer(uniformBuf, offset: 0, index: 0)
+                e.setFragmentBuffer(spectrumBuf, offset: 0, index: 7)
+                e.drawPrimitives(type: .triangle, vertexStart: 0, vertexCount: 6, instanceCount: starQuadCount)
             }
             e.endEncoding()
         }
 
         if let drawable { cmd.present(drawable) }
+        // GPU time per frame, smoothed — what the fans actually answer to.
+        cmd.addCompletedHandler { [weak self] cb in
+            let ms = (cb.gpuEndTime - cb.gpuStartTime) * 1000
+            guard ms > 0, ms < 1000 else { return }
+            DispatchQueue.main.async { self?.gpuMs += 0.1 * (ms - (self?.gpuMs ?? ms)) }
+        }
         cmd.commit()
         if waitForCompletion { cmd.waitUntilCompleted() }
+    }
+
+    private func bindPresentInputs(_ e: MTLRenderCommandEncoder) {
+        e.setFragmentBuffer(uniformBuf, offset: 0, index: 0)
+        e.setFragmentBuffer(spectrumBuf, offset: 0, index: 7)
+        e.setFragmentBuffer(starBuf,    offset: 0, index: 2)
+        e.setFragmentTexture(cellTex, index: 0)
+        e.setFragmentTexture(glassTex, index: 1)
+        e.setFragmentTexture(streakFineTex, index: 2)
+        e.setFragmentTexture(heightTex, index: 3)
+        e.setFragmentTexture(auxTex, index: 4)
     }
 
     // MARK: - Relief rise
@@ -969,6 +1120,7 @@ final class ElementalRenderer {
         }
 
         uniformBuf.contents().copyMemory(from: &u, byteCount: MemoryLayout<Uniforms>.stride)
+        buildStarQuads(u)
     }
 
     // ---- Per-frame uploads: only what changed, and never compressed.
@@ -1006,6 +1158,31 @@ final class ElementalRenderer {
         guard let tex = streakTex, !sim.streakCells.isEmpty else { return }
         uploadIfChanged(sim.streakCells, to: tex, width: sim.cols, height: sim.rows,
                         wasEmpty: &streakCellsEmpty) { $0 == 0 }
+    }
+
+    /// One quad per star cell for the star pass (starVS / starFS): which cell,
+    /// where in it the star sits, how bright. A few hundred stars on the CPU —
+    /// the test presentPass used to run per PIXEL against every star.
+    private func buildStarQuads(_ u: Uniforms) {
+        starQuadCount = 0
+        guard u.sunAlt < -6, let buf = starQuadBuf else { return }
+        let cols = sim.cols, rows = sim.rows
+        let W = u.pixW, H = u.pixH
+        let spx = W / Float(cols), spy = H / Float(rows)
+        let out = buf.contents().assumingMemoryBound(to: Float.self)
+        var taken = Set<Int>()
+        for (i, st) in state.astro.stars.prefix(Self.maxStars).enumerated() where st.br >= 0.30 {
+            let relAz = Float(fmod(Double(st.az - u.facingAz) + 540, 360)) - 180
+            guard abs(relAz) <= 95 else { continue }
+            let x = (0.5 + relAz / 190) * W, y = (1 - st.alt / 85) * H
+            guard x >= 0, y >= 0, y <= H * 0.82 else { continue }
+            let cx = Int(x / spx), cy = Int(y / spy)
+            guard cx < cols, cy < rows, taken.insert(cy * cols + cx).inserted else { continue }
+            let o = starQuadCount * 8
+            out[o] = Float(cx); out[o + 1] = Float(cy); out[o + 2] = x; out[o + 3] = y
+            out[o + 4] = st.br; out[o + 5] = Float(i); out[o + 6] = 0; out[o + 7] = 0
+            starQuadCount += 1
+        }
     }
 
     private func uploadGlassCells() {

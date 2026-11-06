@@ -1407,7 +1407,9 @@ fragment CellOut cellPass(VOut in [[stage_in]],
     // rises from the bottom of the wall - spatially coherent like the shimmer,
     // so it reads as the whole picture breathing on the beat, not as cells
     // flickering. Kept modest: the weather stays the picture.
-    if (U.pulse > 0.002f) {
+    // Only a MESSAGE now (Zo's notice, alert…): the music used to drive this
+    // too, and a swell over the whole wall redraws the whole wall every frame.
+    if (U.message > 0.002f) {
         float yy = y / max(1.0f, H);
         float sw = 0.55f + 0.45f * sin(x * 0.0026f + y * 0.0019f - sec * 1.9f);
         // Smaller than it was: every kind of weather now answers the music in
@@ -1417,7 +1419,7 @@ fragment CellOut cellPass(VOut in [[stage_in]],
         // the same few levels that read as a breath by day light the whole
         // night sky up like a screen.
         float nightQ = mix(0.3f, 1.0f, saturate((U.sunAlt + 6.0f) / 12.0f));
-        L += (0.45f * U.pulse + 0.2f * U.pulseMid) * (3.0f + 4.0f * yy) * sw * nightQ;
+        L += 2.5f * U.message * (3.0f + 4.0f * yy) * sw * nightQ;
     }
 
     // humidity haze
@@ -3024,13 +3026,10 @@ fragment float4 heightPass(VOut in [[stage_in]],
     // wasted work and a chance for the DDA and the occlusion to disagree.
     if (U.splayAmt > 0.001f) h *= 1.0f + cellJit(floor(p), 0.0f) * U.splayAmt * 0.55f;
 
-    // ---- MUSIC, in every scene: the wall breathes. Not a bar graph — the
-    // blocks swell together with the bass, tallest most, and the mids lift
-    // some more than others so the surface stirs rather than marching.
-    {
-        float stir = 0.5f + 0.5f * cellJit(floor(p), 3.0f);
-        h *= 1.0f + (0.07f * U.pulse + 0.06f * U.pulseMid * stir) * (0.4f + 0.6f * h);
-    }
+    // (MUSIC no longer swells the whole wall. It touched every cell's height
+    // every frame, so nothing could be left undrawn — the dirty-cell redraw
+    // saved nothing while a song played and the fans came on. The music lives
+    // in the elements instead: clouds, rain, snow, fog, rays, moon, stars.)
 
     // ---- MUSIC: THE MOON'S THUMP. On a beat its disc bulges out of the wall
     // like a speaker cone, most at the centre, and settles as the beat decays.
@@ -4314,59 +4313,8 @@ fragment float4 presentPass(VOut in [[stage_in]],
             }
         }
 
-        // ---- Stars.
-        // A star is far smaller than a cell, so a coarse cell renders it as a
-        // blob. Same mechanism, different source: the one cell holding the star
-        // breaks down, the star occupies a single sub-cell of it, and the grid
-        // resumes at full size immediately either side. Only the brighter ones,
-        // only the upper half (roomstand.py:2643).
-        //
-        // Reworked: the stars were hard to see at all. More of them (any star
-        // of useful brightness, down to the last fifth of the sky above the
-        // horizon), split FINER than anything else on the wall — up to six by
-        // six, so a star is a true point — and SIZED by brightness: a faint
-        // star is one sub-cell, a bright one a small cross, the brightest a
-        // cross with soft corners. Tinted per star, blue-white to warm, as real
-        // stars are. Their cells also stand proud of the wall (heightPass).
-        if (U.sunAlt < -6.0f && dc.depth == 1) {
-            float vis = starVisibility(U);
-            if (vis > 0.04f) {
-                for (int si = 0; si < U.starCount; ++si) {
-                    float br = stars[si].br;
-                    if (br < 0.30f) continue;
-                    float2 sp;
-                    if (!starXY(stars[si], U.facingAz, W, H, sp)) continue;
-                    if (sp.y > H * 0.82f) continue;
-                    if (!all(floor(sp / SPv) == cid)) continue;  // not this cell: resume
-                    int depth = detailDepth(1.0f, 0.05f, SP, 3.0f, 6);
-                    if (depth < 2) break;
-                    dc = splitCell(px, SPv, depth);
-                    float2 dd = abs(dc.id - floor(sp / dc.sizev));
-                    float man = dd.x + dd.y;
-                    // Its shape: core, arms for bright stars, corners for the
-                    // brightest.
-                    float shape = (man < 0.5f) ? 1.0f
-                                : (man < 1.5f && br > 0.62f) ? 0.55f * saturate((br - 0.62f) / 0.2f + 0.4f)
-                                : (dd.x < 1.5f && dd.y < 1.5f && br > 0.85f) ? 0.28f
-                                : 0.0f;
-                    if (shape > 0.0f) {
-                        float tw = 0.75f + 0.25f * sin(U.time * 1.7f + float(si) * 2.4f);
-                        // MUSIC: each star on its own band, by where it sits.
-                        float sw = fract(float(si) * 0.618034f + 0.11f);
-                        tw += U.beat * (0.35f + 0.7f * sw) + specAt(spec, sp.x / max(W, 1.0f)) * 0.4f
-                            // DRAG: tickled.
-                            + 1.4f * dragNear(U, sp, SP * 10.0f);
-                        float l = saturate((0.30f + 1.10f * vis * br * tw) * shape);
-                        float warm = fract(float(si) * 0.381966f);
-                        float3 tint = mix(float3(0.86f, 0.92f, 1.0f), float3(1.0f, 0.93f, 0.82f), warm);
-                        col = max(col, tint * l);
-                        lum = max(lum, l);
-                    }
-                    phase = cellPhase(uint(dc.id.y * U.cols * float(depth) + dc.id.x));
-                    break;
-                }
-            }
-        }
+        // ---- Stars: drawn by their own pass (starVS / starFS, at the end of
+        // this file) — see the note there for why they left this one.
     }
 
     // ---- The light is the sky's own.
@@ -4636,6 +4584,191 @@ fragment float4 glassFS(GOut in [[stage_in]]) {
         }
     }
     return float4(tint * a, a);
+}
+
+// ================================================================ STARS
+// The fine stars, drawn as THEIR OWN PASS over the finished mosaic: one quad
+// per star cell (Renderer.starQuads), max-blended. They lived inside
+// presentPass, and that alone — never mind drawing them — made every pixel of
+// a night frame about twice as slow: a block that can re-split the cell and
+// rewrite its colour, phase and depth, reachable from every fragment, costs
+// the whole shader registers and occupancy even where it never runs. Here it
+// runs on a few hundred thousand pixels and costs nothing anywhere else.
+//
+// A star cell is split finer than anything around it — up to six by six, so
+// a star is a true point — and SIZED by brightness: a faint star one sub-cell,
+// a bright one a small cross, the brightest a cross with soft corners. Tinted
+// per star, blue-white to warm. Each sub-tile is bevelled, so the points read
+// as raised tiles like the rest of the wall (and heightPass lifts the cell).
+
+struct StarQuad { float cx, cy, sx, sy, br, idx, p0, p1; };
+
+struct SOut {
+    float4 pos [[position]];
+    float2 sp  [[flat]];
+    float  br  [[flat]];
+    float  idx [[flat]];
+};
+
+vertex SOut starVS(uint vid [[vertex_id]], uint iid [[instance_id]],
+                   constant StarQuad *quads [[buffer(0)]],
+                   constant Uniforms &U     [[buffer(1)]])
+{
+    constant StarQuad &q = quads[iid];
+    const float2 corners[6] = { float2(0,0), float2(1,0), float2(0,1),
+                                float2(1,0), float2(1,1), float2(0,1) };
+    float2 SPv = float2(U.pixW / max(U.cols, 1.0f), U.pixH / max(U.rows, 1.0f));
+    float2 p = (float2(q.cx, q.cy) + corners[vid]) * SPv;
+    SOut o;
+    o.pos = float4(p.x / U.pixW * 2.0f - 1.0f, 1.0f - p.y / U.pixH * 2.0f, 0.0f, 1.0f);
+    o.sp  = float2(q.sx, q.sy);
+    o.br  = q.br;
+    o.idx = q.idx;
+    return o;
+}
+
+fragment float4 starFS(SOut in [[stage_in]],
+                       constant Uniforms &U    [[buffer(0)]],
+                       constant float    *spec [[buffer(7)]])
+{
+    float vis = starVisibility(U);
+    if (vis <= 0.04f) discard_fragment();
+    float W = U.pixW;
+    float2 SPv = float2(U.pixW / max(U.cols, 1.0f), U.pixH / max(U.rows, 1.0f));
+    float SP = min(SPv.x, SPv.y);
+    int depth = clamp(int(floor(SP / 3.0f)), 2, 6);
+    DetailCell dc = splitCell(in.pos.xy, SPv, depth);
+    float2 dd = abs(dc.id - floor(in.sp / dc.sizev));
+    float man = dd.x + dd.y, br = in.br;
+    float shape = (man < 0.5f) ? 1.0f
+                : (man < 1.5f && br > 0.62f) ? 0.55f * saturate((br - 0.62f) / 0.2f + 0.4f)
+                : (dd.x < 1.5f && dd.y < 1.5f && br > 0.85f) ? 0.28f
+                : 0.0f;
+    if (shape <= 0.0f) discard_fragment();
+    float si = in.idx;
+    float tw = 0.75f + 0.25f * sin(U.time * 1.7f + si * 2.4f);
+    // MUSIC: each star on its own band, by where it sits; a beat jumps them.
+    float sw = fract(si * 0.618034f + 0.11f);
+    tw += U.beat * (0.35f + 0.7f * sw) + specAt(spec, in.sp.x / max(W, 1.0f)) * 0.4f
+        + U.message * (0.8f + 1.6f * sw)
+        + 1.4f * dragNear(U, in.sp, SP * 10.0f);              // DRAG: tickled
+    float l = saturate((0.30f + 1.10f * vis * br * tw) * shape);
+    // A raised sub-tile: full on its face, falling off into its grout.
+    float2 uv = dc.uv;
+    float edge = min(min(uv.x, uv.y), min(1.0f - uv.x, 1.0f - uv.y));
+    float bevel = mix(0.55f, 1.0f, smoothstep(0.0f, 0.22f, edge))
+                * (1.0f + 0.15f * step(uv.x + uv.y, 0.5f));      // lit from the upper left
+    float warm = fract(si * 0.381966f);
+    float3 tint = mix(float3(0.86f, 0.92f, 1.0f), float3(1.0f, 0.93f, 0.82f), warm);
+    return float4(tint * l * bevel, 1.0f);
+}
+
+// ================================================================ DIRTY CELLS
+// Redraw only what changed. presentPass is a pure function of the per-cell
+// textures (colour, height, cloud transmission, water on the glass, falling
+// streaks) and of uniforms that drift slowly (the light), so a cell whose
+// inputs have not moved since it was last DRAWN would come out the same.
+// markDirty flags a cell whose inputs moved by more than about one level from
+// what was last drawn there — compared against the drawn reference, not the
+// last frame, so slow drift accumulates and is never lost; collectDirty grows
+// each flag by two or three cells (what presentPass reads around a cell)
+// and lists those cells for an indirect draw of presentPass over just them,
+// on top of the last finished frame. The CPU forces a full redraw every two
+// seconds and on any setting change, which keeps the slow light exact.
+
+kernel void markDirty(texture2d<float, access::read> cells   [[texture(0)]],
+                      texture2d<float, access::read> heights [[texture(1)]],
+                      texture2d<float, access::read> aux     [[texture(2)]],
+                      texture2d<float, access::read> glass   [[texture(3)]],
+                      texture2d<float, access::read> streak  [[texture(4)]],
+                      texture2d<float, access::read> fine    [[texture(5)]],
+                      texture2d<float, access::read> rCells  [[texture(6)]],
+                      texture2d<float, access::read> rHeight [[texture(7)]],
+                      texture2d<float, access::read> rAux    [[texture(8)]],
+                      texture2d<float, access::read> rGlass  [[texture(9)]],
+                      texture2d<float, access::read> rStreak [[texture(10)]],
+                      texture2d<float, access::read> rFine   [[texture(11)]],
+                      texture2d<float, access::write> flags  [[texture(12)]],
+                      constant uint &force [[buffer(0)]],
+                      uint2 g [[thread_position_in_grid]])
+{
+    if (g.x >= cells.get_width() || g.y >= cells.get_height()) return;
+    // Two strengths. Water on the glass and falling streaks are read from
+    // further away (refraction, trails) than a cell's own colour and height
+    // are (the relief raycast), so they are grown by three cells, the rest
+    // by two — measured against a full redraw (render tool --verifykept).
+    bool wide = force != 0u
+          || any(glass.read(g) != rGlass.read(g))
+          || streak.read(g).r != rStreak.read(g).r;
+    for (uint j = 0; j < 3u && !wide; ++j)
+        for (uint i = 0; i < 3u && !wide; ++i) {
+            uint2 f = g * 3u + uint2(i, j);
+            wide = fine.read(f).r != rFine.read(f).r;
+        }
+    bool near = any(abs(cells.read(g) - rCells.read(g)) > 0.006f)
+             || abs(heights.read(g).r - rHeight.read(g).r) > 0.0015f
+             || abs(aux.read(g).r - rAux.read(g).r) > 0.01f;
+    flags.write(float4(wide ? 1.0f : (near ? 0.5f : 0.0f)), g);
+}
+
+kernel void collectDirty(texture2d<float, access::read>  flags   [[texture(0)]],
+                         texture2d<float, access::read>  cells   [[texture(1)]],
+                         texture2d<float, access::read>  heights [[texture(2)]],
+                         texture2d<float, access::read>  aux     [[texture(3)]],
+                         texture2d<float, access::read>  glass   [[texture(4)]],
+                         texture2d<float, access::read>  streak  [[texture(5)]],
+                         texture2d<float, access::read>  fine    [[texture(6)]],
+                         texture2d<float, access::write> rCells  [[texture(7)]],
+                         texture2d<float, access::write> rHeight [[texture(8)]],
+                         texture2d<float, access::write> rAux    [[texture(9)]],
+                         texture2d<float, access::write> rGlass  [[texture(10)]],
+                         texture2d<float, access::write> rStreak [[texture(11)]],
+                         texture2d<float, access::write> rFine   [[texture(12)]],
+                         device uint        *list  [[buffer(0)]],
+                         device atomic_uint *count [[buffer(1)]],
+                         uint2 g [[thread_position_in_grid]])
+{
+    int W = int(flags.get_width()), H = int(flags.get_height());
+    if (int(g.x) >= W || int(g.y) >= H) return;
+    bool d = false;
+    for (int dy = -3; dy <= 3 && !d; ++dy)
+        for (int dx = -3; dx <= 3 && !d; ++dx) {
+            int2 q = clamp(int2(g) + int2(dx, dy), int2(0), int2(W - 1, H - 1));
+            float f = flags.read(uint2(q)).r;
+            bool ring = abs(dx) == 3 || abs(dy) == 3;
+            d = ring ? f > 0.75f : f > 0.25f;
+        }
+    if (!d) return;
+    uint i = atomic_fetch_add_explicit(count, 1u, memory_order_relaxed);
+    list[i] = g.y * uint(W) + g.x;
+    // This cell is about to be drawn from these inputs: they are its reference.
+    rCells.write(cells.read(g), g);
+    rHeight.write(heights.read(g), g);
+    rAux.write(aux.read(g), g);
+    rGlass.write(glass.read(g), g);
+    rStreak.write(streak.read(g), g);
+    for (uint j = 0; j < 3u; ++j)
+        for (uint k = 0; k < 3u; ++k) {
+            uint2 f = g * 3u + uint2(k, j);
+            rFine.write(fine.read(f), f);
+        }
+}
+
+/// One quad per listed cell, for presentPass drawn over just those cells.
+vertex VOut dirtyVS(uint vid [[vertex_id]], uint iid [[instance_id]],
+                    constant uint     *list [[buffer(0)]],
+                    constant Uniforms &U    [[buffer(1)]])
+{
+    const float2 corners[6] = { float2(0,0), float2(1,0), float2(0,1),
+                                float2(1,0), float2(1,1), float2(0,1) };
+    uint idx = list[iid], cols = uint(U.cols);
+    float2 cell = float2(float(idx % cols), float(idx / cols));
+    float2 SPv = float2(U.pixW / max(U.cols, 1.0f), U.pixH / max(U.rows, 1.0f));
+    float2 p = (cell + corners[vid]) * SPv;
+    VOut o;
+    o.pos = float4(p.x / U.pixW * 2.0f - 1.0f, 1.0f - p.y / U.pixH * 2.0f, 0.0f, 1.0f);
+    o.uv  = p / float2(U.pixW, U.pixH);
+    return o;
 }
 """#
 }

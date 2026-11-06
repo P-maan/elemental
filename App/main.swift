@@ -1182,6 +1182,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     var surfaceStats: [[String: Any]] {
         surfaces.map { id, s in
             ["displayID": Int(id), "fps": (s.measuredFPS * 10).rounded() / 10,
+             "gpuMs": (s.renderer.gpuMs * 100).rounded() / 100,
+             "redrawn": (s.renderer.dirtyShare * 1000).rounded() / 1000,
              "paused": s.isPaused, "visible": s.isVisible, "recoveries": s.recoveries,
              "engine": s.engineDebug.split(separator: "\n").map(String.init)]
         }
