@@ -28,7 +28,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     private var surfaces: [CGDirectDisplayID: WallpaperSurface] = [:]
     private var device: MTLDevice!
     private var statusItem: NSStatusItem?
-    private var settings: SettingsWindowController?
+    private(set) var settings: SettingsWindowController?
     /// The local HTTP endpoint. See Automation.swift.
     private(set) lazy var automation = AutomationServer(app: self)
     private var astroTimer: Timer?

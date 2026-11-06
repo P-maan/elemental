@@ -578,7 +578,11 @@ enum AutomationURL {
         case "reload":
             app.reloadScene()
         case "settings", "":
+            // elemental://settings/signals opens straight onto that page.
             app.showSettings()
+            if let name = parts.first?.lowercased(), let page = SettingsPage(rawValue: name) {
+                app.settings?.store.go(page)
+            }
         default:
             break
         }

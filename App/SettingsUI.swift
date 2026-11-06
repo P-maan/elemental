@@ -122,7 +122,7 @@ enum SettingsPage: String, CaseIterable, Identifiable {
     static let groups: [[SettingsPage]] = [
         [.general, .power],
         [.home, .look, .lock, .saver],
-        [.elements, .location],
+        [.elements, .signals, .location],
         [.automation, .about],
     ]
 }
@@ -296,12 +296,18 @@ struct SettingsRoot: View {
                 .frame(width: 236)
             SettingsDetail(store: store, pane: pane)
                 .background(RoundedRectangle(cornerRadius: 22, style: .continuous)
-                    .fill(Color(nsColor: Palette.panel)))
+                    .fill(Color(nsColor: Palette.panel).opacity(0.94)))
                 .clipShape(RoundedRectangle(cornerRadius: 22, style: .continuous))
+                .tileBevel(corner: 22)
                 .padding(.vertical, 10)
                 .padding(.trailing, 10)
         }
-        .background(Color(nsColor: Palette.sidebar))
+        // The window sits on the wall: today's sky, as the wallpaper drew it,
+        // shows through the sidebar and faintly through the panel.
+        .background(ZStack {
+            SkyBackdrop()
+            Color(nsColor: Palette.sidebar).opacity(0.66)
+        })
         .ignoresSafeArea()
     }
 }
@@ -392,7 +398,8 @@ struct SidebarRow: View {
             .padding(.horizontal, 8)
             .padding(.vertical, 5)
             .background(RoundedRectangle(cornerRadius: 9, style: .continuous)
-                .fill(Color(nsColor: Palette.raised).opacity(selected ? 1 : (hover.on ? 0.45 : 0))))
+                .fill(Color(nsColor: Palette.raised).opacity(selected ? 1 : (hover.on ? 0.45 : 0)))
+                .tileBevel(corner: 9, strength: selected ? 1 : 0))
             .contentShape(Rectangle())
         }
         .buttonStyle(.plain)
@@ -553,12 +560,14 @@ struct Badge: View {
     let tint: Color
     var size: CGFloat = 26
     var body: some View {
-        RoundedRectangle(cornerRadius: size * 0.27, style: .continuous)
+        RoundedRectangle(cornerRadius: size * 0.22, style: .continuous)
             .fill(tint.gradient)
             .frame(width: size, height: size)
+            .tileBevel(corner: size * 0.22, strength: 2.2)
             .overlay(Image(systemName: symbol)
                 .font(.system(size: size * 0.5, weight: .semibold))
-                .foregroundStyle(.white))
+                .foregroundStyle(.white)
+                .shadow(color: .black.opacity(0.25), radius: 0.5, y: 0.5))
     }
 }
 
@@ -603,6 +612,63 @@ struct RowsCard<Content: View>: View {
             .frame(maxWidth: .infinity, alignment: .leading)
             .background(RoundedRectangle(cornerRadius: 16, style: .continuous)
                 .fill(Color(nsColor: Palette.card)))
+            .tileBevel(corner: 16)
+    }
+}
+
+// MARK: - The wall's own look
+
+extension View {
+    /// A block of the mosaic: lit from the upper left like the wallpaper's own
+    /// tiles — a highlight along the top and left edges, a shade along the
+    /// bottom and right, and a hairline of grout around it.
+    func tileBevel(corner: CGFloat, strength: Double = 1) -> some View {
+        overlay(
+            RoundedRectangle(cornerRadius: corner, style: .continuous)
+                .strokeBorder(LinearGradient(colors: [.white.opacity(0.16 * strength),
+                                                      .white.opacity(0.02 * strength),
+                                                      .black.opacity(0.22 * strength)],
+                                             startPoint: .topLeading, endPoint: .bottomTrailing),
+                              lineWidth: 1)
+        )
+        .shadow(color: .black.opacity(0.18 * strength), radius: 1.5 * strength, x: 0, y: 1 * strength)
+    }
+}
+
+/// Today's sky behind the settings, as the wallpaper last drew it — the
+/// newest lock-screen still. Nothing is rendered for it; when there is no
+/// still yet, nothing is drawn.
+struct SkyBackdrop: View {
+    @StateObject private var box = Box()
+
+    final class Box: ObservableObject {
+        @Published var image: NSImage?
+        init() {
+            DispatchQueue.global(qos: .utility).async { [weak self] in
+                let fm = FileManager.default
+                let dir = Config.directory
+                let newest = (try? fm.contentsOfDirectory(at: dir, includingPropertiesForKeys: [.contentModificationDateKey]))?
+                    .filter { $0.lastPathComponent.hasPrefix("scene-") && $0.pathExtension == "png" }
+                    .max { a, b in
+                        let da = (try? a.resourceValues(forKeys: [.contentModificationDateKey]).contentModificationDate) ?? .distantPast
+                        let db = (try? b.resourceValues(forKeys: [.contentModificationDateKey]).contentModificationDate) ?? .distantPast
+                        return da < db
+                    }
+                let img = newest.flatMap { NSImage(contentsOf: $0) }
+                DispatchQueue.main.async { self?.image = img }
+            }
+        }
+    }
+
+    var body: some View {
+        GeometryReader { g in
+            if let img = box.image {
+                Image(nsImage: img).resizable().interpolation(.none)
+                    .aspectRatio(contentMode: .fill)
+                    .frame(width: g.size.width, height: g.size.height)
+                    .clipped()
+            }
+        }
     }
 }
 
@@ -777,6 +843,7 @@ struct TileCard: View {
         }
         .background(Color(nsColor: Palette.card))
         .clipShape(RoundedRectangle(cornerRadius: 16, style: .continuous))
+        .tileBevel(corner: 16)
     }
 }
 
