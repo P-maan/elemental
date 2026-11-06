@@ -1132,7 +1132,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         guard preview == nil else { return }
         var out: [String: SceneSimulation.FurnitureSnapshot] = [:]
         for s in surfaces.values {
-            if let snap = s.furnitureSnapshot(), !snap.items.isEmpty { out[s.displayKey] = snap }
+            if let snap = s.furnitureSnapshot(), !snap.items.isEmpty || snap.ground != nil { out[s.displayKey] = snap }
         }
         if out.isEmpty {
             try? FileManager.default.removeItem(at: furnitureURL)

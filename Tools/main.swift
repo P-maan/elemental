@@ -665,6 +665,23 @@ if args["dock"] != nil || args["widget"] != nil {
                            kind: .widget, wetness: Float(num("widgetwet", 1))))
     }
     renderer.surfaces = out
+    // --leaves N: N fallen leaves lying on each widget, bunched toward its
+    // left end, through the same memory a restart uses — so where they lie,
+    // and that they stay there, can be looked at. --leafdump prints the
+    // snapshot after the render.
+    if let n = args["leaves"].flatMap(Int.init) {
+        let items = out.filter { $0.kind == .widget }.map { s in
+            SceneSimulation.FurnitureMemory(
+                kind: s.kind.rawValue, cx: (s.left + s.w / 2) / W, cy: (s.top + s.h / 2) / H,
+                snow: 0, snowSpan: 0, glaze: 0, frost: 0, grime: 0,
+                lying: (0..<n).map { k in
+                    LyingLeaf(u: Float(k) / Float(max(1, n)) * 0.45, hue: Float((k * 37) % 100) / 100,
+                              age: Float(k % 8) * 2) })
+        }
+        renderer.restoreFurniture(SceneSimulation.FurnitureSnapshot(
+            saved: Date(), temperature: 8, uv: 0, wind: 0, items: items,
+            ground: [Float](repeating: 0, count: 40).enumerated().map { $0.offset > 25 ? 0.7 : 0 }))
+    }
 }
 
 // Furniture / pane switches, pinned so the harness does not inherit whatever the
@@ -1235,3 +1252,10 @@ print("""
   style     \(state.shape) / \(state.finish)   grid \(state.gridRows) rows
   weather   \(state.weather.effectiveKind)  cover \(String(format: "%.0f", state.weather.cover))% (lo \(String(format: "%.0f", state.weather.cloudLow)) mid \(String(format: "%.0f", state.weather.cloudMid)) hi \(String(format: "%.0f", state.weather.cloudHigh)))  precip \(String(format: "%.2f", state.weather.precipAmount))mm  \(state.weather.observedFrom.map { "via " + $0 } ?? "model only")
 """)
+if args["leafdump"] != nil, let snap = renderer.furnitureSnapshot() {
+    for m in snap.items {
+        let us = (m.lying ?? []).map { String(format: "%.2f", $0.u) }.joined(separator: " ")
+        print("  leaves on kind \(m.kind) at \(String(format: "%.2f", m.cx)): \(m.lying?.count ?? 0)  u: \(us)")
+    }
+    print("  ground cols with leaves: \((snap.ground ?? []).filter { $0 > 0.05 }.count)")
+}
