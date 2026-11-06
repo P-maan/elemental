@@ -1127,7 +1127,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     private var furnitureSaveTimer: Timer?
     private var furnitureURL: URL { Config.directory.appendingPathComponent("furniture.json") }
 
+    private var wearURL: URL { Config.directory.appendingPathComponent("paths.json") }
+
     private func saveFurniture() {
+        Wear.shared.save(to: wearURL)
         // A preview's snow is not real; never remember it.
         guard preview == nil else { return }
         var out: [String: SceneSimulation.FurnitureSnapshot] = [:]
@@ -1144,6 +1147,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     }
 
     private func restoreFurniture() {
+        Wear.shared.load(from: wearURL)
         let dec = JSONDecoder()
         dec.dateDecodingStrategy = .iso8601
         guard let d = try? Data(contentsOf: furnitureURL),

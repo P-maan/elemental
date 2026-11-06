@@ -669,6 +669,17 @@ if args["dock"] != nil || args["widget"] != nil {
     // left end, through the same memory a restart uses — so where they lie,
     // and that they stay there, can be looked at. --leafdump prints the
     // snapshot after the render.
+    // --path S: a path worn (strength S, 0..3) down the middle of the first
+    // widget and across the middle of the Dock, as if used for days.
+    if let st = args["path"].flatMap(Float.init) {
+        renderer.cursorFrame = CGRect(x: 0, y: 0, width: width, height: height)
+        renderer.cursorScale = 1
+        for s in out {
+            let r = CGRect(x: CGFloat(s.left + s.w * 0.12), y: CGFloat(s.top - 20),
+                           width: CGFloat(s.w * 0.14), height: CGFloat(s.h + 20))
+            Wear.shared.forcePath(r, strength: st)
+        }
+    }
     if let n = args["leaves"].flatMap(Int.init) {
         let items = out.filter { $0.kind == .widget }.map { s in
             SceneSimulation.FurnitureMemory(

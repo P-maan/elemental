@@ -193,8 +193,17 @@ final class ElementalRenderer {
     /// This surface's screen in global top-left points, and its scale, so the
     /// dragging pointer (Cursor.swift) can be placed in its pixels. Set by the
     /// host; zero means "not a desktop surface" and the pointer is ignored.
-    var cursorFrame: CGRect = .zero
-    var cursorScale: CGFloat = 2
+    var cursorFrame: CGRect = .zero { didSet { installWear() } }
+    var cursorScale: CGFloat = 2 { didSet { installWear() } }
+
+    /// The worn paths (Wear) under this surface, in its pixels.
+    private func installWear() {
+        guard cursorFrame.width > 0, cursorScale > 0 else { sim.wearSampler = nil; return }
+        let f = cursorFrame, sc = cursorScale
+        sim.wearSampler = { x, y in
+            Wear.shared.wear(at: CGPoint(x: f.minX + CGFloat(x) / sc, y: f.minY + CGFloat(y) / sc))
+        }
+    }
 
     // Scene clock. Kept in Double on the CPU and handed to the shader as a
     // Float, which stays exact for a few thousand seconds. The origin is

@@ -500,6 +500,101 @@ final class SceneSimulation {
     /// Scratch for drawing: how many leaves are already in each cell.
     private var leafStack: [UInt8] = []
 
+    // MARK: Paths
+    //
+    // Where the pointer goes most is worn (Wear): snow, water and frost thin
+    // there and lie thicker at its shoulders, and leaves are scuffed aside
+    // into the quiet spots on either side. "The places we go most dry out
+    // faster, like it creates paths."
+
+    /// Wear at a point in this surface's pixels, 0..1. Set by the renderer.
+    var wearSampler: ((Float, Float) -> Float)?
+    /// Per surface, per column from its first: how worn the top is there.
+    private var surfaceWear: [[Float]] = []
+    private var groundWear: [Float] = []
+
+    /// Re-read the wear under the furniture. Every ten seconds is plenty:
+    /// a path takes days to wear in.
+    private func refreshWear() {
+        guard let w = wearSampler, SP > 0 else { surfaceWear = []; groundWear = []; return }
+        surfaceWear = surfaces.map { s in
+            let c0 = Int(s.left / SP), c1 = max(c0, Int((s.right - 0.001) / SP))
+            guard s.kind != .menuBar, c1 - c0 < 400 else { return [] }
+            // The pointer works over the body of the thing — the icons on
+            // the Dock, the face of a widget — and its top edge with it.
+            return (c0...c1).map { c in
+                let x = (Float(c) + 0.5) * SP
+                return max(w(x, s.top + SP * 0.5), w(x, s.top + min(s.h * 0.5, SP * 3)))
+            }
+        }
+        groundWear = (0..<cols).map { c in w((Float(c) + 0.5) * SP, H - SP * 0.5) }
+    }
+
+    @inline(__always)
+    private func wearAt(_ i: Int, _ cx: Int) -> Float {
+        guard i < surfaceWear.count, i < surfaces.count, SP > 0 else { return 0 }
+        let row = surfaceWear[i]
+        let k = cx - Int(surfaces[i].left / SP)
+        return k >= 0 && k < row.count ? row[k] : 0
+    }
+
+    /// How many leaves lie in column `c` of surface `i`.
+    private func leafDepth(_ i: Int, _ c: Int) -> Int {
+        let s = surfaces[i]
+        return films[i].lying.reduce(0) { $0 + (leafCell($1, on: s) == c ? 1 : 0) }
+    }
+
+    /// Which way is less trodden from column `c` of surface `i`: -1 or 1.
+    private func quieterSide(_ i: Int, _ c: Int) -> Int {
+        let l = wearAt(i, c - 1) + wearAt(i, c - 2) * 0.5
+        let r = wearAt(i, c + 1) + wearAt(i, c + 2) * 0.5
+        return abs(l - r) < 0.01 ? (rnd() < 0.5 ? -1 : 1) : (l < r ? -1 : 1)
+    }
+
+    /// Scuff lying leaves off the paths: each on a worn spot is pushed a cell
+    /// toward the quieter side, now and then — so over a few minutes a path
+    /// opens through a pile and the leaves bank up beside it. One at the end
+    /// of the lip goes over.
+    private func scuffPaths() {
+        guard !surfaceWear.isEmpty, SP > 0 else { return }
+        for i in films.indices where i < surfaces.count && !films[i].lying.isEmpty {
+            let s = surfaces[i]
+            guard s.w > 0 else { continue }
+            let c0 = Int(s.left / SP), c1 = Int((s.right - 0.001) / SP)
+            var k = films[i].lying.count - 1
+            while k >= 0 {
+                defer { k -= 1 }
+                let c = leafCell(films[i].lying[k], on: s)
+                let w = wearAt(i, c)
+                guard w > 0.12, rnd() < w * 0.5 else { continue }
+                let dir = quieterSide(i, c)
+                // Over a heap already two deep it slides on to the first spot
+                // with room — or off the end.
+                var t = c + dir
+                while t >= c0, t <= c1, leafDepth(i, t) >= 2 { t += dir }
+                if t < c0 || t > c1 {
+                    let l = films[i].lying.remove(at: k)
+                    launchLeaf(x: dir < 0 ? s.left - SP * 0.3 : s.right + SP * 0.3,
+                               y: s.top - SP * 0.2, lift: false, age: l.age, hue: l.hue)
+                } else {
+                    films[i].lying[k].u = max(0, min(0.999, ((Float(t) + 0.2 + rnd() * 0.6) * SP - s.left) / s.w))
+                }
+            }
+        }
+        // Along the bottom the same: a worn column sheds to the quieter one.
+        guard groundWear.count == groundLeaves.count else { return }
+        var next = groundLeaves
+        for c in groundLeaves.indices where groundLeaves[c] > 0.05 && groundWear[c] > 0.12 {
+            let l = c > 0 ? groundWear[c - 1] : 9, r = c + 1 < groundWear.count ? groundWear[c + 1] : 9
+            let to = l < r ? c - 1 : c + 1
+            guard to >= 0, to < groundLeaves.count else { continue }
+            let m = groundLeaves[c] * groundWear[c] * 0.4
+            next[c] -= m; next[to] = min(1, next[to] + m)
+            groundLeafAge[to] = max(groundLeafAge[to], groundLeafAge[c] * 0.5 + groundLeafAge[to] * 0.5)
+        }
+        groundLeaves = next
+    }
+
     /// Lose each leaf with chance `p` — rotting, blowing off unseen — so a
     /// pile thins out leaf by leaf, from wherever, not from one end.
     private func thin(_ lying: inout [LyingLeaf], by p: Float) {
@@ -637,7 +732,19 @@ final class SceneSimulation {
             if c < c0 || c > c1 { if d != 0 { found = c; break } else { continue } }
             if depth(c) < 2 { found = c; break }
         }
-        guard let c = found, c >= c0, c <= c1 else { return false }
+        guard var c = found, c >= c0, c <= c1 else { return false }
+        // On a path it does not stay put: it is kicked on to the quieter
+        // side, a cell or two, as a leaf on a trodden way is.
+        let w = wearAt(i, c)
+        if w > 0.12, rnd() < w {
+            let dir = quieterSide(i, c)
+            var t = c + dir, step = 1
+            while true {
+                if t < c0 || t > c1 { return false }
+                if depth(t) < 2 && (wearAt(i, t) < w * 0.5 || step >= 3) { c = t; break }
+                t += dir; step += 1
+            }
+        }
         let cx = (Float(c) + 0.2 + rnd() * 0.6) * SP
         let u = max(0, min(0.999, (cx - s.left) / s.w))
         films[i].lying.append(LyingLeaf(u: u, hue: hue, age: age))
@@ -649,6 +756,10 @@ final class SceneSimulation {
     private func settleOnGround(x: Float, age: Float) {
         guard !groundLeaves.isEmpty else { return }
         var c = max(0, min(groundLeaves.count - 1, Int(x / SP)))
+        if c < groundWear.count, groundWear[c] > 0.12, rnd() < groundWear[c] {
+            let l = c > 0 ? groundWear[c - 1] : 9, r = c + 1 < groundWear.count ? groundWear[c + 1] : 9
+            c = max(0, min(groundLeaves.count - 1, l < r ? c - 1 : c + 1))
+        }
         if groundLeaves[c] > 0.8 {
             let a = c > 0 ? groundLeaves[c - 1] : 2, b = c + 1 < groundLeaves.count ? groundLeaves[c + 1] : 2
             if min(a, b) < groundLeaves[c] { c = a < b ? c - 1 : c + 1 }
@@ -829,6 +940,8 @@ final class SceneSimulation {
         guard leafClock >= 10 else { return }
         let day = leafClock / 86400
         leafClock = 0
+        refreshWear()
+        scuffPaths()
         let clear = leafClearPerDay * day
         for i in films.indices where !films[i].lying.isEmpty {
             for k in films[i].lying.indices { films[i].lying[k].age += day }
@@ -1112,6 +1225,7 @@ final class SceneSimulation {
                 }
             }
             films = next
+            refreshWear()
             // Whatever lay on a piece that is GONE — closed, minimised, swept
             // aside by Show Desktop — falls from where it was.
             for (j, o) in oldValue.enumerated()
@@ -3536,10 +3650,19 @@ final class SceneSimulation {
         // covered by this deposit. Zero means the whole cell, which is what
         // every caller that does not care passes.
 
+        // Which surface is being drawn, for the wear under it. Water, ice
+        // and frost thin on a path; snow does its own (below), and leaves are
+        // moved off it rather than faded.
+        var wearI = -1
         @inline(__always)
         func put(_ cx: Int, _ cy: Int, _ v: Float, _ kind: Float,
                  _ bx: Float = 0, _ by: Float = 0) {
             guard cx >= 0, cx < cols, cy >= 0, cy < rows else { return }
+            var v = v
+            if wearI >= 0, kind != Deposit.leaf, kind != Deposit.snow {
+                let w = wearAt(wearI, cx)
+                if w > 0.02 { v *= 1 - w * (kind == Deposit.glaze ? 0.5 : 0.75) }
+            }
             let a = min(1, v * strength)
             guard a > 0.02 else { return }
             let k = cy * cols + cx
@@ -3557,6 +3680,7 @@ final class SceneSimulation {
             let s = surfaces[i]
             guard marks(s.kind) else { continue }
             let f = films[i]
+            wearI = i
 
             let c0 = max(0, Int(s.left / SP))
             let c1 = min(cols - 1, Int((s.right - 0.001) / SP))
@@ -3838,8 +3962,10 @@ final class SceneSimulation {
                     let d = Int(leafStack[cx])
                     guard d < 2 else { continue }
                     leafStack[cx] += 1
+                    // One left lying on a path is trodden: flattened, soggy,
+                    // browned well past its age.
                     put(cx, lipRow - d, d == 0 ? 0.78 : 0.68, Deposit.leaf,
-                        Self.leafCode(hue: l.hue, age: l.age), 0)
+                        Self.leafCode(hue: l.hue, age: l.age + wearAt(i, cx) * 10), 0)
                 }
             }
 
@@ -3880,7 +4006,11 @@ final class SceneSimulation {
                     // flat right up to where it stops.
                     let t = half <= 0.5 ? 0 : off / half
                     let prof = loose ? 1 : sqrt(max(0, 1 - t * t))
-                    let deep = f.snow * prof * (1 - rough * g)
+                    // Trodden down on a path, banked a little higher at its
+                    // shoulders, where what was pushed aside went.
+                    let wr = wearAt(i, cx)
+                    let berm = max(0, max(wearAt(i, cx - 1), wearAt(i, cx + 1)) - wr) * 0.45
+                    let deep = f.snow * prof * (1 - rough * g) * (1 - 0.85 * wr) + f.snow * berm
                     guard deep > 0.12 else { continue }
                     let rows_ = Int(deep.rounded(.up))
                     for k in 0..<rows_ {

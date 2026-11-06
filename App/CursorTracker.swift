@@ -18,6 +18,7 @@ import AppKit
 final class CursorTracker {
     private var monitors: [Any] = []
     private var onDesktop = false
+    private var wearTimer: Timer?
 
     /// Called on the main queue for each desktop drag event, so the host can
     /// lift the frame rate while the scene is being played with.
@@ -27,7 +28,14 @@ final class CursorTracker {
         guard monitors.isEmpty else { return }
         if let m = NSEvent.addGlobalMonitorForEvents(matching: [.leftMouseDown], handler: { [weak self] _ in
             self?.onDesktop = Self.desktopUnderPointer()
+            Wear.shared.click(Self.pointer())
         }) { monitors.append(m) }
+        // Where the pointer goes, once a second, for the worn paths (Wear):
+        // one read of its position, no event stream.
+        wearTimer = Timer.scheduledTimer(withTimeInterval: 1, repeats: true) { _ in
+            Wear.shared.sample(Self.pointer())
+        }
+        wearTimer?.tolerance = 0.5
         if let m = NSEvent.addGlobalMonitorForEvents(matching: [.leftMouseDragged], handler: { [weak self] _ in
             self?.handleDrag()
         }) { monitors.append(m) }
@@ -37,6 +45,7 @@ final class CursorTracker {
     }
 
     func stop() {
+        wearTimer?.invalidate(); wearTimer = nil
         monitors.forEach { NSEvent.removeMonitor($0) }
         monitors.removeAll()
     }
@@ -45,10 +54,15 @@ final class CursorTracker {
         guard onDesktop else { return }
         // Global, top-left origin — the window list's coordinate space, which
         // is what Cursor and each surface's frame are in.
+        Cursor.shared.dragged(to: Self.pointer())
+        onDrag?()
+    }
+
+    /// The pointer in global top-left points.
+    private static func pointer() -> CGPoint {
         let m = NSEvent.mouseLocation
         let primaryH = NSScreen.screens.first?.frame.height ?? 0
-        Cursor.shared.dragged(to: CGPoint(x: m.x, y: primaryH - m.y))
-        onDrag?()
+        return CGPoint(x: m.x, y: primaryH - m.y)
     }
 
     /// True when the topmost window under the pointer belongs to the desktop:
