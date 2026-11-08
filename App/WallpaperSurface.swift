@@ -201,6 +201,9 @@ final class WallpaperSurface: NSObject, CAMetalDisplayLinkDelegate {
         renderer.playbackMaxSeconds = config.playbackMaxSeconds
         renderer.showZo = config.zoInSky
         renderer.festivals = (config.festivals, config.festivalsIndian)
+        // Festivals follow where the Mac physically is (Location Services),
+        // not the city the sky is set to, and not the Region setting.
+        renderer.festivalPlace = config.place.map { ($0.latitude, $0.longitude, $0.timeZone.flatMap(TimeZone.init(identifier:))) }
         // Hidden switch for diagnosis: `defaults write com.prakritmaan.elemental
         // keptFrames -bool NO` shades every pixel every frame.
         renderer.keptFrames = UserDefaults.standard.object(forKey: "keptFrames") as? Bool ?? true

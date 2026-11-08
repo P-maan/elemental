@@ -191,6 +191,11 @@ final class ElementalRenderer {
     var festivals: (on: Bool, indian: Bool) = (true, false) {
         didSet { sim.festivalsOn = festivals.on; sim.festivalsIndian = festivals.indian }
     }
+    /// Where this Mac physically is, for whose festivals to show.
+    var festivalPlace: (lat: Double, lon: Double, tz: TimeZone?)? {
+        get { sim.festivalPlace }
+        set { sim.festivalPlace = newValue }
+    }
     private var zoEased: Float = 0
     private var slowSpecAt: CFAbsoluteTime = 0
 

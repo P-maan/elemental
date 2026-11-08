@@ -1182,7 +1182,7 @@ struct GeneralPage: View {
                      + "Everywhere: fireworks at midnight on New Year's Eve.")
         RowsCard {
             ToggleRow(title: "Festivals",
-                      subtitle: "The festivals of the place the sky is over.",
+                      subtitle: "The festivals of where this Mac actually is, from Location Services — not the city the sky shows, and not the Region setting.",
                       isOn: store.binding(\.festivals))
             ToggleRow(title: "Indian festivals everywhere",
                       subtitle: "Add Diwali, Holi, Lohri and the rest even when the sky is not over India.",

@@ -610,14 +610,22 @@ final class SceneSimulation {
     let fest = FestivalFX()
     var festivalsOn = true
     var festivalsIndian = false
+    /// Where the Mac physically IS (Location Services), which decides whose
+    /// festivals these are — not the city the sky is drawn over, and never
+    /// the Mac's Region setting. Nil falls back to the sky's place.
+    var festivalPlace: (lat: Double, lon: Double, tz: TimeZone?)?
     private var festClock: Float = 1e9
     private func updateFestivals(dt: Float, state: SceneState) {
         festClock += dt
         if festClock > 30 {
             festClock = 0
             if festivalsOn {
-                let l = Festivals.look(at: state.astro.date, lat: Double(state.astro.latitude),
-                                       lon: Double(state.astro.longitude), indianEverywhere: festivalsIndian)
+                var cal = Calendar(identifier: .gregorian)
+                cal.timeZone = festivalPlace?.tz ?? .current
+                let l = Festivals.look(at: state.astro.date,
+                                       lat: festivalPlace?.lat ?? Double(state.astro.latitude),
+                                       lon: festivalPlace?.lon ?? Double(state.astro.longitude),
+                                       indianEverywhere: festivalsIndian, calendar: cal)
                 fest.nightLook = l.night; fest.dayLook = l.day
             } else {
                 fest.nightLook = FestivalLook(); fest.dayLook = FestivalLook()
