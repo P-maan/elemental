@@ -399,6 +399,20 @@ struct Config: Codable, Equatable {
     /// and thrown away, only while something plays; see SystemAudioMeter.
     var musicVisualizer: Bool = true
 
+    /// Keep moving with the music on battery and in Low Power (15 Nov 2026: with Low Power
+    /// set to always-on the visualiser never ran at all, and read as broken). The frame
+    /// rate comes up to thirty only while something is actually playing.
+    var musicOnBattery: Bool = true
+    /// How much each part of the scene answers, 0..1 with 0.5 as designed (so 1 is twice
+    /// that and 0 is off): sun and moon; clouds, fog and storms; rain and snow; stars;
+    /// fallen leaves; the wind. The same amounts shape how a message from Zo reads.
+    var musicSky: Double = 0.5
+    var musicClouds: Double = 0.5
+    var musicPrecip: Double = 0.5
+    var musicStars: Double = 0.5
+    var musicLeaves: Double = 0.5
+    var musicWind: Double = 0.5
+
     /// A very faint tinge of the playing song's album cover over the wall
     /// (Music or Spotify only; see NowPlaying, SongTint).
     var songTint: Bool = true
@@ -825,6 +839,10 @@ struct Config: Codable, Equatable {
         state.roughness = Float(max(0, min(1, roughness)))
         state.depthMap = Float(max(0, min(1, depthMap)))
         state.grout = Float(max(0, min(1, grout)))
+        func mus(_ v: Double) -> Float { Float(max(0, min(1, v)) * 2) }
+        state.musicSky = mus(musicSky); state.musicClouds = mus(musicClouds)
+        state.musicPrecip = mus(musicPrecip); state.musicStars = mus(musicStars)
+        state.musicLeaves = mus(musicLeaves); state.musicWind = mus(musicWind)
         state.leafMaterial = leafMaterial; state.snowMaterial = snowMaterial
         state.festivalMaterial = festivalMaterial
         state.objectVariation = Float(max(0, min(1, objectVariation)))
@@ -912,6 +930,10 @@ extension Config {
         lowPowerFPS        = max(4, min(30, c.lenient(.lowPowerFPS, d.lowPowerFPS)))
         lowPowerSmoothRain = c.lenient(.lowPowerSmoothRain, d.lowPowerSmoothRain)
         musicVisualizer    = c.lenient(.musicVisualizer, d.musicVisualizer)
+        musicOnBattery     = c.lenient(.musicOnBattery, d.musicOnBattery)
+        musicSky    = c.lenient(.musicSky, d.musicSky);       musicClouds = c.lenient(.musicClouds, d.musicClouds)
+        musicPrecip = c.lenient(.musicPrecip, d.musicPrecip); musicStars  = c.lenient(.musicStars, d.musicStars)
+        musicLeaves = c.lenient(.musicLeaves, d.musicLeaves); musicWind   = c.lenient(.musicWind, d.musicWind)
         songTint           = c.lenient(.songTint, d.songTint)
         zoInSky            = c.lenient(.zoInSky, d.zoInSky)
         festivals          = c.lenient(.festivals, d.festivals)

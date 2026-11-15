@@ -490,6 +490,7 @@ final class SceneSimulation {
     /// The wind's gusts, which is what actually strips a tree: leaves come
     /// down in flurries with the gusts and hardly at all between them.
     private var gustLeft: Float = 0          // seconds of the current gust
+    private var musicLastHit: Float = 0      // the beat / message level last step, for its rising edge
     private var nextGust: Float = 8
     /// How much the trees shed today, set each step (leafClearPerDay uses it).
     private var leafSeasonNow: Float = 0
@@ -828,6 +829,39 @@ final class SceneSimulation {
             if nextGust <= 0 {
                 gustLeft = 1.5 + rnd() * 3
                 nextGust = (wind > 25 ? 6 : wind > 12 ? 14 : 40) * (0.5 + rnd())
+            }
+        }
+        // ---- MUSIC, AND A MESSAGE: A BEAT IS A GUST (15 Nov 2026). The sky already answered
+        // the music; nothing that lies or falls did. A beat - or each hit of one of Zo's
+        // message patterns - is a puff of air: falling rain and leaves lean with it (they
+        // read gustLeft), and a few DRY lying leaves hop off where they lie and settle
+        // again. In still air they come straight back down, which is the point: the wall
+        // moves to the song without inventing a wind that is not blowing.
+        do {
+            let pb = Pulse.shared.bands()
+            let hit = max(pb.beat, Pulse.shared.message())
+            let rising = hit > 0.6 && musicLastHit <= 0.6
+            musicLastHit = hit
+            if rising {
+                if state.musicWind > 0.01 { gustLeft = max(gustLeft, 0.12 + 0.22 * state.musicWind) }
+                if state.musicLeaves > 0.01 && !wet {
+                    var n = Int(0.6 + state.musicLeaves * (0.8 + 1.6 * pb.bass) + rnd())
+                    // off the furniture first, then off the ground
+                    let withLeaves = (0..<min(films.count, surfaces.count)).filter { !films[$0].lying.isEmpty }
+                    while n > 0, let i = withLeaves.randomElement(), !films[i].lying.isEmpty {
+                        n -= 1
+                        let s = surfaces[i]
+                        let l = films[i].lying.remove(at: Int(rnd() * Float(films[i].lying.count)) % films[i].lying.count)
+                        launchLeaf(x: s.left + l.u * s.w, y: s.top - SP * 0.3, lift: true, age: l.age, hue: l.hue)
+                    }
+                    if n > 0, cols > 0 {
+                        let c = Int(rnd() * Float(cols)) % cols
+                        if groundLeaves[c] > 0.15 {
+                            launchLeaf(x: (Float(c) + 0.5) * SP, y: H - SP, lift: true, age: groundLeafAge[c])
+                            groundLeaves[c] = max(0, groundLeaves[c] - 0.18)
+                        }
+                    }
+                }
             }
         }
         // No wind, no gust: in still air lying leaves stay exactly put.

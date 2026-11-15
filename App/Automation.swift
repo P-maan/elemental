@@ -105,6 +105,13 @@ enum AutomationSchema {
         Key(name: "lowPower", type: "automatic | on | off", detail: "The Low Power preset."),
         Key(name: "lowPowerFPS", type: "int 4…30", detail: "Steady frame rate while Low Power is in force. Default 5 (about 1% CPU)."),
         Key(name: "musicVisualizer", type: "bool", detail: "Move with what this Mac is playing, only while something plays. Default true."),
+        Key(name: "musicOnBattery", type: "bool", detail: "Keep moving with music on battery and in Low Power. Default true."),
+        Key(name: "musicSky", type: "0…1", detail: "How much the sun and moon answer the music; 0.5 as designed."),
+        Key(name: "musicClouds", type: "0…1", detail: "Clouds, fog and storms."),
+        Key(name: "musicPrecip", type: "0…1", detail: "Rain and snow."),
+        Key(name: "musicStars", type: "0…1", detail: "Stars."),
+        Key(name: "musicLeaves", type: "0…1", detail: "Fallen leaves hop on the beat."),
+        Key(name: "musicWind", type: "0…1", detail: "A beat is a gust: falling rain and leaves lean with it."),
         Key(name: "songTint", type: "bool", detail: "A very faint tinge of the playing song's album cover (Music or Spotify). Default true."),
         Key(name: "festivals", type: "bool", detail: "Festivals on the wall: diyas and fireworks at Diwali, kites at Sankranti, gulal at Holi, lights at Christmas, fireworks at New Year. Default true."),
         Key(name: "festivalsIndian", type: "bool", detail: "Add the Indian festivals wherever the sky is, not only over India. Default false."),
@@ -405,6 +412,12 @@ final class AutomationServer {
                 return (200, ["ok": true, "cleared": name])
             }
             let value = (obj?["value"] as? Double) ?? r.query["value"].flatMap(Double.init) ?? 1
+            // A reminder that was not there a moment ago ARRIVES: one soft swell through the
+            // whole scene - sky, leaves, wind - the same way a beat moves it. Updates to a
+            // reminder already up stay quiet.
+            if !Signals.shared.zoSignals().contains(where: { $0.name == name }) {
+                Pulse.shared.play(value >= 0.85 ? .urgent : .notice); app.pulseStarted()
+            }
             let color = ((obj?["color"] as? String) ?? r.query["color"]).flatMap(Self.hexColor)
             Signals.shared.set("zo." + name, value: Float(value), color: color,
                                label: (obj?["label"] as? String) ?? r.query["label"],

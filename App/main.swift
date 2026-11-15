@@ -1090,7 +1090,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         }
     }
 
-    private var musicOnBattery: Bool { !onACPower || lowPowerActive }
+    private var musicOnBattery: Bool { (!onACPower || lowPowerActive) && !config.musicOnBattery }
 
     private func applyMusicState() {
         let heard = config.musicVisualizer && !asleep && CFAbsoluteTimeGetCurrent() - lastAudioAt < 10

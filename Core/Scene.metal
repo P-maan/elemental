@@ -111,6 +111,10 @@ struct Uniforms {
     // Colour 0..255, amount 0..~0.17. Mirrored by hand — trap 5.
     float tintR, tintG, tintB;
     float tintAmt;
+    // ---- a seventh block, 320 -> 336 bytes: how much each part of the scene answers the
+    // music, 0..2 (1 as it always was). Sun and moon; cloud, fog and storm; rain and snow;
+    // stars. Leaves and wind answer in the simulation. Mirrored by hand - trap 5.
+    float musSky, musCloud, musPrecip, musStars;
 };
 
 // Rain is rasterised at this multiple of the cell grid in each axis.
@@ -1696,7 +1700,7 @@ fragment CellOut cellPass(VOut in [[stage_in]],
         zoW = max(zoW, zo * ripVis * sunV * fexp(-d * invSunRip * 0.5f));
         // MUSIC, clear sky: the bass drives the ripple (above); the highs make
         // the sun's own glow glint, tight around the disc.
-        glow *= 1.0f + 0.6f * U.pulseHigh * ripVis * fexp(-d * invSunR * 2.0f);
+        glow *= 1.0f + 0.6f * U.pulseHigh * U.musSky * ripVis * fexp(-d * invSunR * 2.0f);
         L += glow * 58.0f + (rip > 0.0f ? rip * 46.0f : 0.0f);
         // MUSIC: SUN RAYS IN ASCENDING FREQUENCIES. Asked for 3 Nov 2026. A
         // sunburst whose every ray is one band of the music, the lowest
@@ -1708,7 +1712,7 @@ fragment CellOut cellPass(VOut in [[stage_in]],
         // the rays grow and shrink with the song instead of flashing a few
         // segments at a time; and the burst holds still — it used to turn,
         // which with the flashing read as something chasing round the sun.
-        if (U.pulse + U.pulseMid + U.pulseHigh > 0.01f) {
+        if (U.pulse + U.pulseMid + U.pulseHigh > 0.01f && U.musSky > 0.01f) {
             float ang = atan2(dx, -dy);                                  // 0 = up, clockwise
             float t = fract(ang / (2.0f * M_PI_F) + 1.0f);
             const float N = 24.0f;
@@ -1720,7 +1724,7 @@ fragment CellOut cellPass(VOut in [[stage_in]],
             float reach = sunDiscR * (3.0f + 16.0f * v);
             float along = smoothstep(sunDiscR * 1.2f, sunDiscR * 3.0f, d)
                         * fexp(-max(d - sunDiscR * 2.0f, 0.0f) / reach);
-            L += beam * along * v * 260.0f * ripVis * sunV * sunDim;
+            L += beam * along * v * 260.0f * ripVis * sunV * sunDim * U.musSky;
         }
         float3 sc = sunTint(sAlt, aqiF);
         float ww = min(1.0f, (glow * 1.6f + (rip > 0.0f ? rip * 0.5f : 0.0f)) * sunDim);
@@ -1807,8 +1811,8 @@ fragment CellOut cellPass(VOut in [[stage_in]],
                     twinkle += U.message * (0.8f + 1.6f * sw);
                     // Zo, on a moonless night: the stars shimmer for it.
                     if (!moonAbove) twinkle += zo * (0.5f + 1.0f * sw) * (0.6f + 0.4f * sin(sec * 2.0f + float(si)));
-                    twinkle += U.beat * (0.45f + 0.9f * sw)
-                             + specAt(spec, sp.x / max(W, 1.0f)) * 0.45f * sw
+                    twinkle += (U.beat * (0.45f + 0.9f * sw)
+                             + specAt(spec, sp.x / max(W, 1.0f)) * 0.45f * sw) * U.musStars
                              // DRAG: a star the pointer passes near is tickled.
                              + 2.0f * dragNear(U, sp, SP * 10.0f);
                     // Brighter than it was (55): the stars were hard to find.
@@ -1841,7 +1845,7 @@ fragment CellOut cellPass(VOut in [[stage_in]],
             float zoHalo = fexp(-max(dist - moonR, 0.0f) / (moonR * (0.6f + 0.9f * zo)));
             zoW = max(zoW, zo * zoHalo * seeThrough);
             L += zoHalo * zo * 7.0f * seeThrough;
-            L += halo * (0.35f * U.pulse + 0.5f * U.beat + 6.0f * U.message)
+            L += halo * ((0.35f * U.pulse + 0.5f * U.beat) * U.musSky + 6.0f * U.message)
                * (0.35f + 0.65f * U.moonIllum) * seeThrough * (1.0f - aqiF * 0.4f);
         }
         float mx = cxp - moonP.x, my = cyp - moonP.y;
@@ -1859,7 +1863,7 @@ fragment CellOut cellPass(VOut in [[stage_in]],
             float v = moonSample(mx / moonR, my / moonR);
             // MUSIC: the moon's face swells with the bass — it is the thump.
             float k = saturate(moonLitRef(U.moonIllum, moonDim) * v / 255.0f
-                               * (1.0f + 0.35f * U.pulse));
+                               * (1.0f + 0.35f * U.pulse * U.musSky));
 
             // ---- The phase is SUBTRACTED from the face, not cut out of it.
             //
@@ -2057,7 +2061,7 @@ fragment CellOut cellPass(VOut in [[stage_in]],
         float rim = highAmt * bodyLight;                            // diffuser law
         L += highAmt * (28.0f + 34.0f * skyBrAmt) + rim * 96.0f;
         // MUSIC, high cloud: the strands catch the mids, brightest along them.
-        L += highAmt * U.pulseHigh * 12.0f;
+        L += highAmt * U.pulseHigh * 12.0f * U.musCloud;
         float3 hc = mix(float3(186.0f, 198.0f, 220.0f),
                         float3(236.0f, 242.0f, 252.0f), saturate(skyBrAmt + rim));
 
@@ -2189,9 +2193,9 @@ fragment CellOut cellPass(VOut in [[stage_in]],
             float cwd = crossWindKmh(U.wind, U.windDir, U.facingAz);
             float roll = 0.5f + 0.5f * sin(cxp * 0.0035f + cyp * 0.0012f
                                            - sec * (1.4f + 0.04f * cwd));
-            L += lowAmt * (0.5f * U.pulse + 0.3f * U.pulseMid) * (6.0f + 22.0f * saturate(lowN))
+            L += lowAmt * (0.5f * U.pulse + 0.3f * U.pulseMid) * U.musCloud * (6.0f + 22.0f * saturate(lowN))
                * (0.4f + 0.6f * roll);
-            L += rim * U.pulseMid * 20.0f;
+            L += rim * U.pulseMid * 20.0f * U.musCloud;
             // Zo, overcast: the deck lights from within for it, in the same
             // rolling bands, strongest in the thick billows.
             float zl = lowAmt * zo * saturate(lowN + 0.3f) * (0.4f + 0.6f * roll);
@@ -2296,9 +2300,9 @@ fragment CellOut cellPass(VOut in [[stage_in]],
             bool snowy = (pf > 4.5f && pf < 7.5f);
             if (snowy) {
                 float sp = cellPhase(idx + uint(floor(sec * 9.0f)) * 3571u) / 6.28318f;
-                if (sp < U.pulseHigh * 0.3f) L += kx * 70.0f;
+                if (sp < U.pulseHigh * 0.3f * U.musPrecip) L += kx * 70.0f;
             } else {
-                L += kx * bright * (0.4f * U.pulseHigh + 0.6f * U.beat);
+                L += kx * bright * (0.4f * U.pulseHigh + 0.6f * U.beat) * U.musPrecip;
             }
             rc = mix(rc, float3(252.0f, 250.0f, 245.0f), saturate(bodyLight * 0.8f));
             float a = kx * alpha;
@@ -2318,7 +2322,7 @@ fragment CellOut cellPass(VOut in [[stage_in]],
                                     y * 0.0048f + sec * 0.004f) + 13.0f);
         L += fogD * (46.0f + 80.0f * bank);
         // MUSIC, fog: the banks breathe on the bass, the thick ones most.
-        L += fogD * (0.5f * U.pulse + 0.3f * U.pulseMid) * (8.0f + 24.0f * saturate(bank + 0.5f));
+        L += fogD * (0.5f * U.pulse + 0.3f * U.pulseMid) * U.musCloud * (8.0f + 24.0f * saturate(bank + 0.5f));
         float fw = fogD * 0.7f;
         if (fw > w) { w = fw; cr = 170.0f; cg = 175.0f; cb = 185.0f; }
     }
@@ -2331,7 +2335,7 @@ fragment CellOut cellPass(VOut in [[stage_in]],
     if (U.flashAmp > 0.0f) L += U.flashAmp * 130.0f;
     // MUSIC, a storm: the beat is the lightning. Codes 95-99 are thunderstorms;
     // the flash is brighter toward the top of the sky, where the cloud is.
-    if (U.code >= 95 && U.beat > 0.02f) L += U.beat * (40.0f + 70.0f * (1.0f - y / max(H, 1.0f)));
+    if (U.code >= 95 && U.beat > 0.02f) L += U.beat * U.musCloud * (40.0f + 70.0f * (1.0f - y / max(H, 1.0f)));
 
     // shooting star
     if (U.shootActive > 0.5f) {
@@ -3015,7 +3019,7 @@ fragment float4 heightPass(VOut in [[stage_in]],
         float W = U.pixW, H = U.pixH;
         float2 SPv = float2(W / max(U.cols, 1.0f), H / max(U.rows, 1.0f));
         float r = length((floor(p) + 0.5f) * SPv - moonScreen(U, W, H)) / (min(W, H) * 0.10f);
-        if (r < 1.0f) h += 0.22f * U.beat * (1.0f - r * r);
+        if (r < 1.0f) h += 0.22f * U.beat * U.musSky * (1.0f - r * r);
     }
 
     // ---- WATER AND SNOW STAND PROUD OF THE WALL. They were drawn as flat
@@ -4781,7 +4785,7 @@ fragment float4 starFS(SOut in [[stage_in]],
     float tw = planet ? 1.0f : 0.75f + 0.25f * sin(U.time * 1.7f + si * 2.4f);
     // MUSIC: each star on its own band, by where it sits; a beat jumps them.
     float sw = fract(si * 0.618034f + 0.11f);
-    tw += U.beat * (0.35f + 0.7f * sw) + specAt(spec, in.sp.x / max(W, 1.0f)) * 0.4f
+    tw += (U.beat * (0.35f + 0.7f * sw) + specAt(spec, in.sp.x / max(W, 1.0f)) * 0.4f) * U.musStars
         + U.message * (0.8f + 1.6f * sw)
         + 1.4f * dragNear(U, in.sp, SP * 10.0f);              // DRAG: tickled
     float l = saturate((0.30f + 1.10f * vis * br * tw) * shape);

@@ -126,6 +126,9 @@ struct Uniforms {
     // colour 0..255 and how much of it. Append only — trap 5.
     var tintR: Float = 255, tintG: Float = 255, tintB: Float = 255
     var tintAmt: Float = 0
+    // ---- A seventh block, 320 -> 336 bytes: how much each part of the scene answers the
+    // music, 0..2 (Scene.metal, musSky...). Append only - trap 5.
+    var musSky: Float = 1, musCloud: Float = 1, musPrecip: Float = 1, musStars: Float = 1
 }
 
 struct GPUBreather { var ax, ay, R, per, s1, s2, ph, ph2: Float }
@@ -1757,6 +1760,11 @@ struct SceneState {
     /// 4 plastic, 5 matte - and how unlike a tile it looks, 0..1.
     var leafMaterial: Int = 0, snowMaterial: Int = 0, festivalMaterial: Int = 0
     var objectVariation: Float = 0.6
+    /// How much each part of the scene answers the music (and a message): 0 not at all,
+    /// 1 as designed, 2 twice that. Sun and moon, clouds/fog/storm, rain and snow, stars,
+    /// fallen leaves, the wind.
+    var musicSky: Float = 1, musicClouds: Float = 1, musicPrecip: Float = 1, musicStars: Float = 1
+    var musicLeaves: Float = 1, musicWind: Float = 1
     /// 0 no contact shadow between blocks, 1 full.
     var shadow: Float = 1
 

@@ -1172,10 +1172,38 @@ struct GeneralPage: View {
             ToggleRow(title: "Move with music",
                       subtitle: musicSubtitle,
                       isOn: store.binding(\.musicVisualizer))
+            ToggleRow(title: "On battery and in Low Power too",
+                      subtitle: "The wall comes up to thirty frames a second only while something is playing.",
+                      isOn: store.binding(\.musicOnBattery))
             ToggleRow(title: "Album cover tint",
                       subtitle: "A very faint hint of the cover's colour while Music or Spotify plays. "
                               + "macOS asks once to let Elemental read the player.",
                       isOn: store.binding(\.songTint))
+        }
+
+        if store.config.musicVisualizer {
+            SectionTitle("What moves", info: "How much each part of the scene answers the music. The middle is as designed, "
+                         + "the left end is off. A message from Zo moves the same things by the same amounts.")
+            RowsCard {
+                let f: (Double) -> String = { $0 < 0.02 ? "off" : "\(Int(($0 * 200).rounded()))%" }
+                SliderRow(title: "Sun and moon", subtitle: "Rays on the frequencies, the moon's thump.",
+                          value: store.unit(\.musicSky), format: f)
+                RowDivider()
+                SliderRow(title: "Clouds, fog, storms", subtitle: "The deck lights from within; a beat is the lightning.",
+                          value: store.unit(\.musicClouds), format: f)
+                RowDivider()
+                SliderRow(title: "Rain and snow", subtitle: "Drops glint on the highs.",
+                          value: store.unit(\.musicPrecip), format: f)
+                RowDivider()
+                SliderRow(title: "Stars", subtitle: "Each on its own band; a beat jumps them.",
+                          value: store.unit(\.musicStars), format: f)
+                RowDivider()
+                SliderRow(title: "Leaves", subtitle: "Fallen leaves hop on the beat and settle again.",
+                          value: store.unit(\.musicLeaves), format: f)
+                RowDivider()
+                SliderRow(title: "Wind", subtitle: "A beat is a gust: what is falling leans with it.",
+                          value: store.unit(\.musicWind), format: f)
+            }
         }
 
         SectionTitle("Festivals", info: "Each place keeps its own, drawn with the wall's own tiles. India: diyas from "

@@ -1116,6 +1116,8 @@ final class ElementalRenderer {
         u.shadow = max(0, min(1, state.shadow))
         let pb = Pulse.shared.bands()
         u.pulse = pb.bass; u.pulseMid = pb.mid; u.pulseHigh = pb.high; u.beat = pb.beat
+        u.musSky = state.musicSky; u.musCloud = state.musicClouds
+        u.musPrecip = state.musicPrecip; u.musStars = state.musicStars
         u.message = Pulse.shared.message()
         let spec = Pulse.shared.spectrum()
         let sp = spectrumBuf.contents().assumingMemoryBound(to: Float.self)
