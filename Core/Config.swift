@@ -1220,3 +1220,44 @@ struct SaverHealth {
         return true
     }
 }
+
+// MARK: - A recommended setup for each material
+//
+// 15 Nov 2026, his ask: "have like a recommended setup for each material type".
+// A material is not only its shader branch - glass wants a thin bevel and its
+// refraction, brushed metal wants deep square blocks and hard light, plastic
+// wants rounded corners and soft shadow, matte wants its grout. Each set below
+// was chosen from rendered stills of the same sky. Nothing applies it behind
+// his back: it is one button under the material, and every value stays his to move.
+extension Config {
+    static func recommendedSummary(for m: MosaicMaterial) -> String {
+        switch m {
+        case .glass:   return "Thin bevels, a little grind, refraction on."
+        case .metal:   return "Square, deep blocks, brushed, hard light."
+        case .plastic: return "Rounded corners, soft shoulders and shadow."
+        default:       return "Flat tiles with their grout, gentle relief."
+        }
+    }
+
+    mutating func applyRecommendedLook() {
+        halftone = 0; shape = .square
+        switch material {
+        case .glass:
+            rounding = 0.12; roughness = 0.12; grout = 0.25; reliefDepth = 0.45; reliefRise = 0.35
+            lightIntensity = 0.85; refraction = 0.35; dispersion = 0.20; splay = 0.12; shadow = 0.8; depthMap = 0.4
+            finish = .glass
+        case .metal:
+            rounding = 0; roughness = 0.35; grout = 0.15; reliefDepth = 0.70; reliefRise = 0.50
+            lightIntensity = 1.0; refraction = 0; dispersion = 0; splay = 0.08; shadow = 1.0; depthMap = 0.2
+            finish = .glass
+        case .plastic:
+            rounding = 0.45; roughness = 0.20; grout = 0.10; reliefDepth = 0.55; reliefRise = 0.45
+            lightIntensity = 0.75; refraction = 0; dispersion = 0; splay = 0.15; shadow = 0.7; depthMap = 0.5
+            finish = .glass
+        default:
+            rounding = 0; roughness = 0; grout = 0.50; reliefDepth = 0.35; reliefRise = 0.30
+            lightIntensity = 0.60; refraction = 0; dispersion = 0; splay = 0.15; shadow = 0.6; depthMap = 0.6
+            finish = .flat
+        }
+    }
+}

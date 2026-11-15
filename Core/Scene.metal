@@ -3459,9 +3459,31 @@ inline float3 styleCell(float3 col, float2 cuv, float cellPx, float lum,
     float2 uu = (cuv - 0.5f) / max(fill, 1e-3f);
     // Normalised against the SAME outline, so the highlight cannot sit on a
     // different shape from the silhouette.
-    float rr = m / max(fill, 1e-3f);
-    float dome = sqrt(saturate(1.0f - min(rr, 1.0f) * min(rr, 1.0f)));
-    float3 n3 = normalize(float3(uu * 0.80f, dome * 0.75f + 0.30f));
+    //
+    // 15 Nov 2026 ("the materials all look horrid"): it WAS a dome, on every tile
+    // of every material - so glass, metal and plastic were the same bead with a
+    // different-sized dot of light in the same place on each, and the wall read
+    // as a panel of LEDs. A tile is not a bead. It is a FLAT face with a narrow
+    // bevel round it, and two things follow that the dome could never give:
+    //   * the light lives on the EDGES - the bevel turned to the sun is a bright
+    //     line, the one turned away is in shade - and the face itself is calm;
+    //   * no two tiles sit in quite the same plane, so each face returns a
+    //     slightly different amount of sky. That hair of tilt, fixed per tile, is
+    //     what makes a tiled wall glitter as the light moves instead of repeating.
+    float e01 = saturate((fill - m) / max(fill, 1e-3f));     // 0 on the rim, 1 at the centre
+    float2 qo = max(q, 0.0f);
+    float2 outw = (qo.x + qo.y > 1e-5f) ? normalize(qo)
+                : (q.x > q.y ? float2(1.0f, 0.0f) : float2(0.0f, 1.0f));
+    outw *= float2(cuv.x < 0.5f ? -1.0f : 1.0f, cuv.y < 0.5f ? -1.0f : 1.0f);   // points out of the tile
+    // How wide the bevel is: a knife edge on metal, a chamfer on glass, most of
+    // the way to a pillow on plastic (which is moulded, not cut).
+    float bw  = material == 1 ? 0.11f : (material == 2 ? 0.36f : 0.17f);
+    float bev = 1.0f - smoothstep(0.0f, bw, e01);            // 1 on the rim -> 0 on the face
+    float2 tilt = (float2(hash21(float2(phase * 17.3f, 0.37f)),
+                          hash21(float2(0.61f, phase * 91.7f))) - 0.5f) * 0.16f;
+    float3 n3 = normalize(float3(outw * bev * (material == 2 ? 0.85f : 1.30f)
+                                 + tilt * (1.0f - bev)
+                                 + (material == 2 ? uu * 0.22f : float2(0.0f)), 1.0f));
 
     // ---- ROUGHNESS. A perfectly smooth dome is the one thing real glass never
     // is, and its absence is what made the wall read as rendered rather than
@@ -3517,8 +3539,15 @@ inline float3 styleCell(float3 col, float2 cuv, float cellPx, float lum,
     float3 l3 = normalize(float3(lightDir, 0.30f));
     float3 hv = normalize(l3 + float3(0.0f, 0.0f, 1.0f));
     float diff = saturate(dot(n3, l3));
-    float fres = powr(1.0f - n3.z, 5.0f);
     float ln   = saturate(lum);
+    // Which way this point of the bevel faces, +1 toward the light, -1 away.
+    float2 ld2 = lightDir / max(length(lightDir), 1e-3f);
+    float lit   = dot(outw, ld2);
+    // The crest: the thin line where the bevel meets the face - where a cut edge glints.
+    float crest = smoothstep(0.10f, 0.45f, bev) * (1.0f - smoothstep(0.60f, 1.0f, bev));
+    // How far this tile's own plane leans toward the light.
+    float lean  = dot(tilt, ld2) / 0.08f;                    // about -1..1
+    float face  = 1.0f - bev;
 
     // ---- DEPTH AS A COLOUR AXIS.
     //
@@ -3569,47 +3598,62 @@ inline float3 styleCell(float3 col, float2 cuv, float cellPx, float lum,
     }
 
     if (material == 0) {
-        // GLASS. Transmissive: the body keeps its colour, the rim goes
-        // mirror-bright, and the sheen is broad because daylight is an enormous
-        // diffuse source and its reflection is not a dot.
-        col *= 1.0f + lightI * (0.55f * diff - 0.22f);
-        // Energy conserved as the lobe widens: a rough surface spreads the same
-        // reflected light over more directions, so the peak must come down as
-        // the highlight broadens. Without this, roughness reads as "brighter"
-        // rather than "softer" and the wall blows out at the top of the slider.
-        col += powr(saturate(dot(n3, hv)), 22.0f * specWide)
-             * (0.14f + 0.26f * lightI) * (0.35f + 0.65f * specWide);
-        // The rim is the last thing to go. Even ground glass keeps a bright
-        // edge, because grazing reflection survives roughness far better than
-        // face-on reflection does.
-        col += fres * (0.16f + 0.20f * lightI) * (0.55f + 0.45f * specWide);
+        // GLASS. You see THROUGH it, so the face keeps its colour and is nearly
+        // even; what says "glass" is at the edges and in what the face mirrors.
+        // Each tile a hair off plane: some return a little more sky than others.
+        col *= 1.0f + lightI * (0.05f + 0.13f * lean) * face;
+        // The sky mirrored in the face is brighter overhead than at the horizon,
+        // so every pane is a touch lighter toward its top edge.
+        col *= 1.0f + 0.10f * (0.5f - cuv.y) * face;
+        // The bevels: lit side bright, far side in its own shade.
+        col *= 1.0f + bev * (0.20f + 0.80f * lightI) * (0.50f * lit - 0.14f);
+        // The cut edge glints - a line, not a dot - and softens as the glass is ground.
+        col += crest * saturate(lit) * (0.07f + 0.30f * lightI) * (0.35f + 0.65f * specWide);
+        // The caustic. Light that went in at the lit edge comes back out as a thin
+        // bright line just inside the FAR one - the thing only a clear solid does.
+        float inner = smoothstep(bw, bw * 1.3f, e01) * (1.0f - smoothstep(bw * 1.3f, bw * 2.4f, e01));
+        col += col * inner * saturate(-lit) * (0.10f + 0.50f * lightI) * specWide;
+        // A broad sheen across the face - daylight is a huge soft source, its
+        // reflection is a band - placed by the tile's lean, so it sits somewhere
+        // different on every pane and is missing from many.
+        float along = dot(cuv - 0.5f, ld2);
+        float band = fexp(-powr(abs(along - lean * 0.30f) / (0.16f + 0.30f * (1.0f - specWide)), 2.0f));
+        col += band * face * saturate(lean * 1.5f - 0.25f) * (0.02f + 0.08f * lightI) * (0.4f + 0.6f * specWide);
 
     } else if (material == 1) {
-        // METAL. Opaque, so the body goes dark away from the light instead of
-        // staying lit by what is behind it — that darkening is most of what
-        // separates metal from glass. The highlight is tight and TINTED by the
-        // surface, because a metal reflects its own colour where a dielectric
-        // reflects white.
-        col *= 0.30f + 0.90f * diff;
+        // METAL. Opaque: nothing comes through, so the body is darker and what you
+        // see is the room in it. BRUSHED along the horizontal, which is why its
+        // highlight is a band across the tile rather than a spot - a brushed
+        // surface spreads light across the grain and not along it.
         float3 tint = col / max(dot(col, float3(0.333f)), 0.04f);
-        // Metal is where roughness reads most strongly, because this is the
-        // difference between a mirror and a brushed finish — and the exponent
-        // starts tightest here, so it has the furthest to travel.
-        col += tint * powr(saturate(dot(n3, hv)), 70.0f * specWide)
-             * (0.40f + 0.70f * lightI) * (0.30f + 0.70f * specWide);
-        col += tint * fres * (0.20f + 0.24f * lightI) * (0.55f + 0.45f * specWide);
+        // The sky in it: light from above, dark toward the floor.
+        col *= (0.50f + 0.34f * (1.0f - cuv.y)) * (1.0f + 0.22f * lean * lightI);
+        // The grain itself: fine lines that run the width of the tile.
+        float grain = vnoise(float2(cuv.x * 2.0f + phase * 7.0f, cuv.y * 70.0f + phase * 53.0f));
+        col *= 1.0f + (grain - 0.5f) * 0.14f * face;
+        // The band. Its height on the tile follows the light and the tile's lean,
+        // so down a column it steps up and down instead of lining up.
+        float bandY = (cuv.y - 0.5f) + 0.20f * ld2.y - lean * 0.22f;
+        float bandW = 0.17f + 0.24f * (1.0f - specWide);
+        float band = fexp(-powr(abs(bandY) / bandW, 2.0f));
+        col += tint * band * face * (0.05f + 0.24f * lightI) * (0.40f + 0.60f * specWide)
+             * (0.75f + 0.5f * grain);
+        // Knife-edge bevels: hard contrast, and a tinted glint where they face the light.
+        col *= 1.0f + bev * (0.25f + 0.75f * lightI) * (0.85f * lit - 0.30f);
+        col += tint * crest * saturate(lit) * (0.16f + 0.60f * lightI) * (0.35f + 0.65f * specWide);
 
     } else if (material == 2) {
-        // PLASTIC. Opaque and mostly diffuse, with one wide soft highlight that
-        // is WHITE rather than tinted — the giveaway of a dielectric — and no
-        // rim brightening to speak of, so it reads as a solid object rather than
-        // a window.
-        col *= 0.55f + 0.58f * diff;
-        // Plastic is already the softest of the three, so roughness has least
-        // to do here — it takes a satin finish to a matte one.
-        col += powr(saturate(dot(n3, hv)), 11.0f * specWide)
-             * (0.09f + 0.15f * lightI) * (0.45f + 0.55f * specWide);
-        col += fres * 0.05f * ln;
+        // PLASTIC. Moulded, not cut: a soft pillow with rounded shoulders, its
+        // colour IN it (so a little richer than the glass), and one wide white
+        // highlight - white because a dielectric reflects the light's colour,
+        // not its own - sitting off-centre toward the light.
+        float3 Wl = float3(0.2126f, 0.7152f, 0.0722f);
+        col = max(mix(float3(dot(col, Wl)), col, 1.14f), 0.0f);
+        col *= 0.80f + lightI * (0.42f * diff - 0.06f);
+        // Soft shoulders: they turn away gently, no line anywhere.
+        col *= 1.0f + bev * (0.15f + 0.45f * lightI) * (0.38f * lit - 0.16f);
+        col += powr(saturate(dot(n3, hv)), 16.0f * specWide)
+             * (0.05f + 0.16f * lightI) * (0.45f + 0.55f * specWide);
 
     } else {
         // MATTE. No surface model at all: one colour per cell, shaded only by

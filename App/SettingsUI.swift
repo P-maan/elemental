@@ -1398,6 +1398,11 @@ struct LookPage: View {
                 }
             }
             .padding(10)
+            RowDivider()
+            ButtonRow(title: "Recommended for \(LookPresets.materials.first { $0.0 == c.material }?.1 ?? "this")",
+                      subtitle: Config.recommendedSummary(for: c.material), button: "Use") {
+                store.update { $0.applyRecommendedLook() }
+            }
         }
 
         SectionTitle("Shape")
