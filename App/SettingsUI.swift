@@ -1420,7 +1420,9 @@ struct LookPage: View {
             HStack(spacing: 4) {
                 ForEach(LookPresets.materials, id: \.0) { item in
                     let m = item.0
-                    ThumbChoice(spec: Self.with(base) { $0.material = m }, caption: item.1,
+                    // Eight rows, not the wall's own seventy-eight: at thumbnail size its tiles are two pixels
+                    // wide and every material came out as the same moire of dots. A swatch has to show a TILE.
+                    ThumbChoice(spec: Self.with(base) { $0.material = m; $0.gridRows = 8 }, caption: item.1,
                                 selected: c.material == m) {
                         store.update {
                             $0.material = m
@@ -1442,7 +1444,7 @@ struct LookPage: View {
             HStack(spacing: 4) {
                 let current = LookPresets.shapeID(rounding: c.rounding, halftone: c.halftone)
                 ForEach(LookPresets.shapes, id: \.id) { sh in
-                    ThumbChoice(spec: Self.with(base) { $0.rounding = sh.rounding; $0.halftone = sh.halftone },
+                    ThumbChoice(spec: Self.with(base) { $0.rounding = sh.rounding; $0.halftone = sh.halftone; $0.gridRows = 8 },
                                 caption: sh.title, selected: current == sh.id) {
                         store.update {
                             $0.rounding = sh.rounding
