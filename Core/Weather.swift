@@ -274,7 +274,32 @@ final class WeatherService {
             w.boundaryLayer        = h("boundary_layer_height", 800)
             w.snowDepth            = h("snow_depth", 0)
             w.precipProbability    = h("precipitation_probability", 0)
+
+            // ---- THE TREND, over the next three hours (15 Nov 2026). SceneState reads
+            // coverTrend, lowTrend, pressureTrend... to draw a front BEFORE it arrives -
+            // the deck thickening, the barometer falling - and nothing here ever filled
+            // them in, so `hasTrend` was always false and that whole approach was dead.
+            func at(_ k: String, _ i: Int) -> Float? {
+                guard let a = hourly[k] as? [Any], i >= 0, i < a.count else { return nil }
+                return (a[i] as? NSNumber)?.floatValue
+            }
+            let ahead = min(idx + 3, times.count - 1)
+            if ahead > idx,
+               let c0 = at("cloud_cover", idx), let c1 = at("cloud_cover", ahead),
+               let p0 = at("pressure_msl", idx), let p1 = at("pressure_msl", ahead) {
+                let scale = 3 / Float(ahead - idx)                       // always "per three hours"
+                w.coverTrend = (c1 - c0) * scale
+                w.pressureTrend = (p1 - p0) * scale
+                if let l0 = at("cloud_cover_low", idx), let l1 = at("cloud_cover_low", ahead) { w.lowTrend = (l1 - l0) * scale }
+                if let t0 = at("temperature_2m", idx), let t1 = at("temperature_2m", ahead) { w.temperatureTrend = (t1 - t0) * scale }
+                if let k0 = at("cape", idx), let k1 = at("cape", ahead) { w.capeTrend = (k1 - k0) * scale }
+                w.hasTrend = true
+            }
         }
+        // What `precipitation` covers. Open-Meteo's `current` block says so itself
+        // ("interval", seconds - 900 here): a quarter of an hour, not an hour. Left at
+        // the default 60 every rate on the wall came out four times too light.
+        if let iv = (cur["interval"] as? NSNumber)?.floatValue, iv > 0 { w.precipWindow = iv / 60 }
 
         // ---- nowcast override
         if let mn = json["minutely_15"] as? [String: Any],
@@ -292,7 +317,27 @@ final class WeatherService {
                 if let v = slot("snowfall")      { w.snow = Float(v) }
                 if let v = slot("precipitation") {
                     w.precipitation = Float(v)
+                    w.precipWindow = 15                                  // a nowcast slot is a quarter hour
                     if w.rain == 0, w.snow == 0 { w.rain = Float(v) }
+                }
+
+                // ---- THE TIMELINE, reduced to the scalars SceneState is written around
+                // (15 Nov 2026). Its notes say "reduced to these scalars in Weather.swift"
+                // and that code was not here: nowcastSlots stayed 0, so the wall always
+                // said "nowcast unavailable", never knew rain was twenty minutes off or
+                // had just ended, and could not tell one long rain from three showers.
+                if let pr = mn["precipitation"] as? [Any] {
+                    let v: [Float?] = pr.map { ($0 as? NSNumber)?.floatValue }
+                    let wet: (Int) -> Bool = { i in i >= 0 && i < v.count && (v[i] ?? 0) >= 0.05 }
+                    w.nowcastSlots = v.compactMap { $0 }.count
+                    w.nowcastWetSlots = v.indices.filter(wet).count
+                    var runs = 0
+                    for i in v.indices where wet(i) && !wet(i - 1) { runs += 1 }
+                    w.nowcastRuns = runs
+                    if let next = (best..<v.count).first(where: wet) { w.minutesToPrecip = Float(next - best) * 15 }
+                    if let last = (0...best).reversed().first(where: wet) { w.minutesSincePrecip = Float(best - last) * 15 }
+                    w.precipNext60 = ((best + 1)...(best + 4)).reduce(0) { $0 + ($1 < v.count ? (v[$1] ?? 0) : 0) }
+                    w.precipPast60 = ((best - 4)...(best - 1)).reduce(0) { $0 + ($1 >= 0 ? (v[$1] ?? 0) : 0) }
                 }
             }
         }
