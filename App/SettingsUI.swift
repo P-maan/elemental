@@ -1182,7 +1182,7 @@ struct GeneralPage: View {
         }
 
         if store.config.musicVisualizer {
-            SectionTitle("What moves", info: "How much each part of the scene answers the music. The middle is as designed, "
+            SectionTitle("What moves", info: "Music is air moving. This is how much of it each part of the scene feels. The middle is as designed, "
                          + "the left end is off. A message from Zo moves the same things by the same amounts.")
             RowsCard {
                 let f: (Double) -> String = { $0 < 0.02 ? "off" : "\(Int(($0 * 200).rounded()))%" }
@@ -1198,10 +1198,10 @@ struct GeneralPage: View {
                 SliderRow(title: "Stars", subtitle: "Each on its own band; a beat jumps them.",
                           value: store.unit(\.musicStars), format: f)
                 RowDivider()
-                SliderRow(title: "Leaves", subtitle: "Fallen leaves hop on the beat and settle again.",
+                SliderRow(title: "Leaves", subtitle: "Only strong bass moves a lying leaf: the pile rustles and creeps; the hardest hits lift one.",
                           value: store.unit(\.musicLeaves), format: f)
                 RowDivider()
-                SliderRow(title: "Wind", subtitle: "A beat is a gust: what is falling leans with it.",
+                SliderRow(title: "Wind", subtitle: "The air the sound moves: rain and falling leaves lean with the bass, one way then back.",
                           value: store.unit(\.musicWind), format: f)
             }
         }
@@ -1585,6 +1585,12 @@ struct SurfacePage: View {
                 ToggleRow(title: "Show the scene on the lock screen",
                           subtitle: "Replaces your desktop picture with a still of the scene. macOS does not allow animation behind the password field.",
                           isOn: store.binding(\.syncLockScreen))
+                RowDivider()
+                ButtonRow(title: "Lock with the scene moving",
+                          subtitle: "Locks through the screen saver, the one way macOS lets a lock screen animate: the scene keeps moving and "
+                                  + "the password field appears when you press a key. Needs Elemental chosen as your screen saver and "
+                                  + "\"require password immediately\" on. Also in the menu bar icon (Lock Screen, Live) and as elemental://lock.",
+                          button: "Lock now") { store.app?.lockLive() }
             }
         } else {
             RowsCard {

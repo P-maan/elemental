@@ -110,8 +110,8 @@ enum AutomationSchema {
         Key(name: "musicClouds", type: "0…1", detail: "Clouds, fog and storms."),
         Key(name: "musicPrecip", type: "0…1", detail: "Rain and snow."),
         Key(name: "musicStars", type: "0…1", detail: "Stars."),
-        Key(name: "musicLeaves", type: "0…1", detail: "Fallen leaves hop on the beat."),
-        Key(name: "musicWind", type: "0…1", detail: "A beat is a gust: falling rain and leaves lean with it."),
+        Key(name: "musicLeaves", type: "0…1", detail: "How much lying leaves feel the bass: strong bass makes the pile rustle and creep."),
+        Key(name: "musicWind", type: "0…1", detail: "The air the sound moves: what is falling leans with the bass."),
         Key(name: "songTint", type: "bool", detail: "A very faint tinge of the playing song's album cover (Music or Spotify). Default true."),
         Key(name: "festivals", type: "bool", detail: "Festivals on the wall: diyas and fireworks at Diwali, kites at Sankranti, gulal at Holi, lights at Christmas, fireworks at New Year. Default true."),
         Key(name: "festivalsIndian", type: "bool", detail: "Add the Indian festivals wherever the sky is, not only over India. Default false."),
@@ -598,6 +598,9 @@ enum AutomationURL {
                                label: item("label"), seconds: item("seconds").flatMap(Double.init))
         case "reload":
             app.reloadScene()
+        case "lock":
+            // elemental://lock - lock through the screen saver, so the lock screen is the moving scene.
+            app.lockLive()
         case "settings", "":
             // elemental://settings/signals opens straight onto that page.
             app.showSettings()

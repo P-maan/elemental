@@ -491,6 +491,9 @@ final class SceneSimulation {
     /// down in flurries with the gusts and hardly at all between them.
     private var gustLeft: Float = 0          // seconds of the current gust
     private var musicLastHit: Float = 0      // the beat / message level last step, for its rising edge
+    private var musicAir: Float = 0          // the air the sound is moving right now, 0..1 (follows the bass)
+    private var musicDir: Float = 1          // which way it is pushing; turns over on each beat
+    private var musicPush: Float = 0         // signed, scaled by the Wind amount: what falling things lean with
     private var nextGust: Float = 8
     /// How much the trees shed today, set each step (leafClearPerDay uses it).
     private var leafSeasonNow: Float = 0
@@ -831,37 +834,57 @@ final class SceneSimulation {
                 nextGust = (wind > 25 ? 6 : wind > 12 ? 14 : 40) * (0.5 + rnd())
             }
         }
-        // ---- MUSIC, AND A MESSAGE: A BEAT IS A GUST (15 Nov 2026). The sky already answered
-        // the music; nothing that lies or falls did. A beat - or each hit of one of Zo's
-        // message patterns - is a puff of air: falling rain and leaves lean with it (they
-        // read gustLeft), and a few DRY lying leaves hop off where they lie and settle
-        // again. In still air they come straight back down, which is the point: the wall
-        // moves to the song without inventing a wind that is not blowing.
+        // ---- MUSIC IS AIR MOVING (15 Nov 2026, his words: "base the music on air moving ...
+        // music is a source, the source reaches the elements, which causes them to react";
+        // the first try launched leaves on every beat and "they just look like they are
+        // jumping"). So there is ONE thing: the air the sound moves. It follows the BASS -
+        // up fast, settling slower - and pushes one way then back, like a speaker cone, the
+        // direction turning over on each beat. Each element then answers that air by its own
+        // amount and its own weight:
+        //   * what is FALLING (rain, leaves in the air) leans with it, a little, always;
+        //   * a LYING leaf has friction: nothing moves until the bass is strong, then the
+        //     pile rustles and creeps a cell at a time, and only at the very top does one
+        //     lift off.
+        // A message pattern from Zo drives the same air.
         do {
             let pb = Pulse.shared.bands()
+            let drive = max(pb.bass, Pulse.shared.message())
             let hit = max(pb.beat, Pulse.shared.message())
-            let rising = hit > 0.6 && musicLastHit <= 0.6
+            if hit > 0.6 && musicLastHit <= 0.6 { musicDir = -musicDir }
             musicLastHit = hit
-            if rising {
-                if state.musicWind > 0.01 { gustLeft = max(gustLeft, 0.12 + 0.22 * state.musicWind) }
-                if state.musicLeaves > 0.01 && !wet {
-                    var n = Int(0.6 + state.musicLeaves * (0.8 + 1.6 * pb.bass) + rnd())
-                    // off the furniture first, then off the ground
-                    let withLeaves = (0..<min(films.count, surfaces.count)).filter { !films[$0].lying.isEmpty }
-                    while n > 0, let i = withLeaves.randomElement(), !films[i].lying.isEmpty {
+            musicAir += (drive - musicAir) * min(1, dt * (drive > musicAir ? 18 : 3.5))
+            musicPush = musicAir * musicDir * state.musicWind
+            // friction: below this much bass a lying leaf does not move at all
+            let hold: Float = 0.45
+            let shove = max(0, musicAir - hold) / (1 - hold) * state.musicLeaves      // 0..2
+            if shove > 0.01 && !wet {
+                for i in 0..<min(films.count, surfaces.count) where !films[i].lying.isEmpty {
+                    let sf = surfaces[i]
+                    guard sf.kind != .menuBar, sf.w > 0 else { continue }
+                    var n = Int(Float(films[i].lying.count) * shove * dt * 0.9 + rnd())
+                    let step = SP / sf.w * musicDir
+                    while n > 0, !films[i].lying.isEmpty {
                         n -= 1
-                        let s = surfaces[i]
-                        let l = films[i].lying.remove(at: Int(rnd() * Float(films[i].lying.count)) % films[i].lying.count)
-                        launchLeaf(x: s.left + l.u * s.w, y: s.top - SP * 0.3, lift: true, age: l.age, hue: l.hue)
+                        let k = Int(rnd() * Float(films[i].lying.count)) % films[i].lying.count
+                        // it rustles in place: stays on its lip, never walked off the end by a song
+                        films[i].lying[k].u = max(0, min(0.999, films[i].lying[k].u + step))
                     }
-                    if n > 0, cols > 0 {
-                        let c = Int(rnd() * Float(cols)) % cols
-                        if groundLeaves[c] > 0.15 {
-                            launchLeaf(x: (Float(c) + 0.5) * SP, y: H - SP, lift: true, age: groundLeafAge[c])
-                            groundLeaves[c] = max(0, groundLeaves[c] - 0.18)
-                        }
+                    // only the hardest hits lift one
+                    if musicAir > 0.88 && rnd() < shove * dt * 0.6 {
+                        let l = films[i].lying.remove(at: Int(rnd() * Float(films[i].lying.count)) % films[i].lying.count)
+                        launchLeaf(x: sf.left + l.u * sf.w, y: sf.top - SP * 0.3, lift: true, age: l.age, hue: l.hue)
                     }
                 }
+                // the drift along the bottom shuffles a little the same way
+                let dir = musicDir > 0 ? 1 : -1, move = shove * dt * 0.25
+                var next = groundLeaves
+                for c in 0..<cols where groundLeaves[c] > 0.05 {
+                    let to = c + dir
+                    guard to >= 0, to < cols else { continue }
+                    let m = groundLeaves[c] * move
+                    next[c] -= m; next[to] = min(1, next[to] + m)
+                }
+                groundLeaves = next
             }
         }
         // No wind, no gust: in still air lying leaves stay exactly put.
@@ -1031,7 +1054,7 @@ final class SceneSimulation {
         // every second or so; the air around it carries it with the wind.
         l.phase += dt * (5.2 + 1.5 * sin(l.hue * 9))
         let swing = cos(l.phase), edge = abs(sin(l.phase))
-        let wind = crossWind * W * 0.0016 * (gustLeft > 0 ? 1.6 : 1)
+        let wind = crossWind * W * 0.0016 * (gustLeft > 0 ? 1.6 : 1) + musicPush * W * 0.03
         l.vx += (wind + swing * SP * 2.2 - l.vx) * min(1, dt * 3)
         let terminal = H * 0.04 * (0.35 + 1.3 * edge)
         l.vy += (terminal - l.vy) * min(1, dt * 2.5)
@@ -3352,7 +3375,7 @@ final class SceneSimulation {
         // a run down the pane leans hard instead of going straight.
         // Signed: it used to be the wind's SPEED only, so every run on the
         // glass leaned right whichever way the wind blew.
-        let windPush = Self.crossWind(w, facingAz: facingAz) / 90 * (gustFront ? 3.2 : 1)
+        let windPush = Self.crossWind(w, facingAz: facingAz) / 90 * (gustFront ? 3.2 : 1) + musicPush * 0.22
         let evaporation = w.evaporationRate
         var i = drops.count - 1
         while i >= 0 {

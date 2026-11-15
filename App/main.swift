@@ -923,6 +923,24 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         }
     }
 
+    /// LOCK, LIVE (15 Nov 2026, his ask: "fix the wallpaper not being live on lock screen").
+    /// macOS will not let anything animate behind the password field of a screen that is
+    /// already locked - see LockStill.swift - and starting the saver on top of a locked
+    /// screen dismissed the lock. The order that IS supported is the other way round: the
+    /// screen saver first, and macOS locks behind it (with "require password immediately",
+    /// which is how this Mac is set). So this is a way to lock that goes through the saver:
+    /// the moving scene is what the Mac shows from the instant it locks, and the password
+    /// field arrives when a key is pressed. Menu, elemental://lock, and Settings > Lock Screen.
+    @objc func lockLive() {
+        lockLog("lockLive: starting the screen saver first")
+        let url = URL(fileURLWithPath: "/System/Library/CoreServices/ScreenSaverEngine.app")
+        let c = NSWorkspace.OpenConfiguration()
+        c.addsToRecentItems = false
+        NSWorkspace.shared.openApplication(at: url, configuration: c) { [weak self] _, err in
+            if let err { self?.lockLog("lockLive FAILED: \(err)") }
+        }
+    }
+
     private func startScreenSaverIfWanted() {
         lockLog("screenIsLocked received; animateOnLock=\(config.animateOnLock)")
         guard config.animateOnLock else { return }
@@ -1350,6 +1368,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         lowPowerAutoItem = lpAuto
         menu.addItem(.separator())
         menu.addItem(withTitle: "Settings…", action: #selector(showSettings), keyEquivalent: ",")
+            .target = self
+        menu.addItem(withTitle: "Lock Screen, Live", action: #selector(lockLive), keyEquivalent: "l")
             .target = self
         menu.addItem(withTitle: "Reload Scene", action: #selector(reload), keyEquivalent: "r")
         let upd = menu.addItem(withTitle: "Check for Updates…", action: #selector(checkForUpdates),
