@@ -226,6 +226,17 @@ struct Config: Codable, Equatable {
     /// for.
     var grout: Double = 0.35
 
+    /// What the things that lie ON the wall are made of (15 Nov 2026, his ask: "object based
+    /// materials like the leaves ... they will not be of same materials, or they will be but
+    /// they will not look the same"). 0 natural (a leaf is matte, so is snow, so is clay),
+    /// 1 the same as the tiles, 2 glass, 3 metal, 4 plastic, 5 matte.
+    var leafMaterial: Int = 0
+    var snowMaterial: Int = 0
+    var festivalMaterial: Int = 0
+    /// How unlike a tile an object looks even in the tiles' own material, 0..1: rougher,
+    /// leaning at its own angle, no grout. 0 turns that off.
+    var objectVariation: Double = 0.6
+
     /// How dark the contact shadow between blocks is, 0..1.
     ///
     /// A block lower than its neighbour sits in a trench and the light reaching
@@ -814,6 +825,9 @@ struct Config: Codable, Equatable {
         state.roughness = Float(max(0, min(1, roughness)))
         state.depthMap = Float(max(0, min(1, depthMap)))
         state.grout = Float(max(0, min(1, grout)))
+        state.leafMaterial = leafMaterial; state.snowMaterial = snowMaterial
+        state.festivalMaterial = festivalMaterial
+        state.objectVariation = Float(max(0, min(1, objectVariation)))
         state.shadow = Float(max(0, min(1, shadow)))
         state.gridRows = gridRows
         state.poster = Float(poster)
@@ -936,6 +950,10 @@ extension Config {
         roughness = c.lenient(.roughness, d.roughness)
         depthMap  = c.lenient(.depthMap,  d.depthMap)
         grout     = c.lenient(.grout,     d.grout)
+        leafMaterial     = c.lenient(.leafMaterial,     d.leafMaterial)
+        snowMaterial     = c.lenient(.snowMaterial,     d.snowMaterial)
+        festivalMaterial = c.lenient(.festivalMaterial, d.festivalMaterial)
+        objectVariation  = c.lenient(.objectVariation,  d.objectVariation)
         shadow    = c.lenient(.shadow,    d.shadow)
         showOnAllSpaces = c.lenient(.showOnAllSpaces, d.showOnAllSpaces)
         playbackOnWake     = c.lenient(.playbackOnWake, d.playbackOnWake)

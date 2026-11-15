@@ -118,7 +118,10 @@ struct Uniforms {
     /// How strongly Zo's reminder shows right now, 0..1 (Signals.glow);
     /// its colour rides in the spectrum buffer. Took what was cursorPad0.
     var zoGlow: Float = 0
-    var cursorPad1: Float = 0, cursorPad2: Float = 0
+    /// What the things lying on the wall are made of (Scene.metal, objMats / objVary):
+    /// leaves, snow and festival pieces, four bits each, and how unlike a tile they look.
+    /// Took what were cursorPad1 and cursorPad2 - the layout is unchanged.
+    var objMats: Float = 0, objVary: Float = 0
     // ---- A sixth block, 304 -> 320 bytes: the song's tinge (SongTint.swift),
     // colour 0..255 and how much of it. Append only — trap 5.
     var tintR: Float = 255, tintG: Float = 255, tintB: Float = 255
@@ -1750,6 +1753,10 @@ struct SceneState {
     var depthMap: Float = 0
     /// 0 no painted line between tiles, 1 the old fixed grout.
     var grout: Float = 0.35
+    /// What lies on the wall is made of: 0 natural, 1 same as the tiles, 2 glass, 3 metal,
+    /// 4 plastic, 5 matte - and how unlike a tile it looks, 0..1.
+    var leafMaterial: Int = 0, snowMaterial: Int = 0, festivalMaterial: Int = 0
+    var objectVariation: Float = 0.6
     /// 0 no contact shadow between blocks, 1 full.
     var shadow: Float = 1
 

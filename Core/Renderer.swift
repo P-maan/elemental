@@ -1110,6 +1110,9 @@ final class ElementalRenderer {
         u.roughness = max(0, min(1, state.roughness))
         u.depthMap = max(0, min(1, state.depthMap))
         u.grout = max(0, min(1, state.grout))
+        func m4(_ v: Int) -> Int { max(0, min(5, v)) }
+        u.objMats = Float(m4(state.leafMaterial) | (m4(state.snowMaterial) << 4) | (m4(state.festivalMaterial) << 8))
+        u.objVary = max(0, min(1, state.objectVariation))
         u.shadow = max(0, min(1, state.shadow))
         let pb = Pulse.shared.bands()
         u.pulse = pb.bass; u.pulseMid = pb.mid; u.pulseHigh = pb.high; u.beat = pb.beat

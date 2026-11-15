@@ -1071,6 +1071,10 @@ enum LookPresets {
     static let materials: [(MosaicMaterial, String)] = [
         (.glass, "Glass"), (.metal, "Metal"), (.plastic, "Plastic"), (.matte, "Matte"),
     ]
+    /// For the things lying on the wall (Config.leafMaterial and its two siblings).
+    static let objectMaterials: [(Int, String)] = [
+        (0, "Natural"), (1, "As tiles"), (2, "Glass"), (3, "Metal"), (4, "Plastic"), (5, "Matte"),
+    ]
     /// Shape presets over the two axes that make one: corner rounding, and
     /// whether size carries the tone.
     static let shapes: [(id: String, title: String, rounding: Double, halftone: Double)] = [
@@ -1498,6 +1502,23 @@ struct SurfaceFinishPage: View {
             RowDivider()
             SliderRow(title: "Shadow", subtitle: "The contact shadow where blocks meet.",
                       value: store.unit(\.shadow),
+                      format: { $0 < 0.02 ? "none" : "\(Int(($0 * 100).rounded()))%" })
+        }
+        // 15 Nov 2026: what lies on the wall need not be made of the wall.
+        SectionTitle("Objects")
+        let c = store.config
+        let opts = LookPresets.objectMaterials.map { TileOption(id: "\($0.0)", title: $0.1) }
+        TileCard(title: "Leaves", info: "Natural is matte, as a leaf is. Same as tiles makes them of the wall's own material.",
+                 options: opts, isOn: { $0 == "\(c.leafMaterial)" },
+                 tap: { id in store.update { $0.leafMaterial = Int(id) ?? 0 } })
+        TileCard(title: "Snow", options: opts, isOn: { $0 == "\(c.snowMaterial)" },
+                 tap: { id in store.update { $0.snowMaterial = Int(id) ?? 0 } })
+        TileCard(title: "Festival pieces", info: "Diyas, kites, bulbs. Their flames and lights stay light.",
+                 options: opts, isOn: { $0 == "\(c.festivalMaterial)" },
+                 tap: { id in store.update { $0.festivalMaterial = Int(id) ?? 0 } })
+        RowsCard {
+            SliderRow(title: "Character", subtitle: "How unlike a tile an object looks, even in the same material: rougher, at its own angle, no grout.",
+                      value: store.unit(\.objectVariation),
                       format: { $0 < 0.02 ? "none" : "\(Int(($0 * 100).rounded()))%" })
         }
     }

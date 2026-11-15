@@ -102,7 +102,11 @@ struct Uniforms {
     float cursorVX, cursorVY;
     float drag;
     float zoGlow;              // Zo's reminder now, 0..1 (Signals.glow); colour in spec[76..78]. Was cursorPad0.
-    float cursorPad1, cursorPad2;
+    // Things that lie ON the wall take their own material (15 Nov 2026). objMats packs three
+    // choices, four bits each: leaves, snow, festival pieces. 0 natural, 1 same as the tiles,
+    // 2 glass, 3 metal, 4 plastic, 5 matte. objVary 0..1: how unlike a tile an object looks
+    // even when it is made of the same stuff. (Were cursorPad1, cursorPad2.)
+    float objMats, objVary;
     // ---- a sixth block, 304 -> 320 bytes: the song's tinge (SongTint.swift).
     // Colour 0..255, amount 0..~0.17. Mirrored by hand — trap 5.
     float tintR, tintG, tintB;
@@ -3408,7 +3412,7 @@ inline float3 styleCell(float3 col, float2 cuv, float cellPx, float lum,
                         float halftone, float roughness, float depthMap,
                         float U_grout,
                         bool flank, float2 lightDir, float lightI,
-                        float splay, float depth, float hNorm)
+                        float splay, float depth, float hNorm, float leanMul)
 {
     // A flank is the sheared side of a block. It has no outline, no grout and no
     // surface treatment: its whole appearance is the relief lighting the caller
@@ -3480,7 +3484,7 @@ inline float3 styleCell(float3 col, float2 cuv, float cellPx, float lum,
     float bw  = material == 1 ? 0.11f : (material == 2 ? 0.36f : 0.17f);
     float bev = 1.0f - smoothstep(0.0f, bw, e01);            // 1 on the rim -> 0 on the face
     float2 tilt = (float2(hash21(float2(phase * 17.3f, 0.37f)),
-                          hash21(float2(0.61f, phase * 91.7f))) - 0.5f) * 0.16f;
+                          hash21(float2(0.61f, phase * 91.7f))) - 0.5f) * 0.16f * leanMul;
     float3 n3 = normalize(float3(outw * bev * (material == 2 ? 0.85f : 1.30f)
                                  + tilt * (1.0f - bev)
                                  + (material == 2 ? uu * 0.22f : float2(0.0f)), 1.0f));
@@ -3546,7 +3550,7 @@ inline float3 styleCell(float3 col, float2 cuv, float cellPx, float lum,
     // The crest: the thin line where the bevel meets the face - where a cut edge glints.
     float crest = smoothstep(0.10f, 0.45f, bev) * (1.0f - smoothstep(0.60f, 1.0f, bev));
     // How far this tile's own plane leans toward the light.
-    float lean  = dot(tilt, ld2) / 0.08f;                    // about -1..1
+    float lean  = clamp(dot(tilt, ld2) / 0.08f, -1.6f, 1.6f);   // about -1..1 (objects lean further)
     float face  = 1.0f - bev;
 
     // ---- DEPTH AS A COLOUR AXIS.
@@ -4554,10 +4558,33 @@ fragment float4 presentPass(VOut in [[stage_in]],
     // the light below. Rise and fall, not spin.
     // How near this block stands, 0 flush with the wall to 1 fully proud.
     float hNorm = (hmax > 1e-4f) ? saturate(rel.h / hmax) : 0.0f;
+    // ---- WHAT IS LYING THERE IS NOT A TILE. A leaf, a drift of snow, a diya: each
+    // may be its own material, and even in the tiles' material it is not cut and
+    // laid like one - it curls, it is rougher, it sits at its own angle. So an
+    // object gets its own material choice, extra roughness and a much bigger lean,
+    // by how much of the cell it covers.
+    int   matUse = U.material;
+    float roughUse = U.roughness, leanMul = 1.0f, groutUse = U.grout;
+    {
+        float4 og = glass.sample(nearestS, cid + 0.5f);
+        int ok = int(og.y + 0.5f);
+        bool glowing = ok == 15 && floor(og.z + 0.5f) >= 32768.0f;       // a flame is light, not a thing
+        if (og.x > 0.35f && (ok == 14 || ok == 6 || ok == 15) && !glowing) {
+            int packed = int(U.objMats + 0.5f);
+            int ch = ok == 14 ? (packed & 15) : (ok == 6 ? ((packed >> 4) & 15) : ((packed >> 8) & 15));
+            // natural: a leaf is matte, snow is matte, clay and paper are matte
+            if (ch == 0)      matUse = 3;
+            else if (ch >= 2) matUse = ch - 2;
+            float v = saturate(U.objVary) * saturate((og.x - 0.35f) / 0.4f);
+            roughUse = saturate(U.roughness + 0.45f * v);
+            leanMul  = 1.0f + 2.6f * v;
+            groutUse = U.grout * (1.0f - v);                              // nothing lying on a wall has grout
+        }
+    }
     col = styleCell(col, suv, dc.size, lum, phase, U.time,
-                    U.material, U.rounding, U.halftone,
-                    U.roughness, U.depthMap, U.grout,
-                    rel.flank, L, I, U.splayAmt, U.depthAmt, hNorm);
+                    matUse, U.rounding, U.halftone,
+                    roughUse, U.depthMap, groutUse,
+                    rel.flank, L, I, U.splayAmt, U.depthAmt, hNorm, leanMul);
 
     // ---- Relief shading. Front faces, side faces, and the crevices between.
     if (hmax > 0.0005f) {
