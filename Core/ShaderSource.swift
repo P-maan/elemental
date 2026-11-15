@@ -975,6 +975,30 @@ inline float starVisibility(constant Uniforms &U) {
          * (1.0f - aq * 0.45f) * (1.0f - wet) * (1.0f - fogf);
 }
 
+/// PLANETS (Star._p: 1 Venus, 2 Mars, 3 Jupiter, 4 Saturn; 0 is a star). A planet
+/// comes out in twilight, long before any star: Venus within minutes of sunset,
+/// Jupiter a little later, the fainter two with the first stars. `br` is on the
+/// stars' scale and runs past 1 for the bright ones, so it sets how early.
+inline float planetTwilight(float sunAlt, float br) {
+    float thr = mix(5.0f, 0.5f, saturate((br - 0.9f) / 0.7f));
+    return saturate((-sunAlt - thr) / 4.0f);
+}
+/// starVisibility, for a planet: the same cloud, rain, fog and haze, its own twilight.
+inline float planetVisibility(constant Uniforms &U, float br) {
+    float wet  = (U.code >= 51 && U.code <= 99) ? 0.35f : 0.0f;
+    float fogf = U.fogOn > 0.5f ? 0.45f : 0.0f;
+    float aq   = saturate((U.scAQI - 50.0f) / 200.0f);
+    return max(0.0f, 1.0f - U.covF / 0.7f) * planetTwilight(U.sunAlt, br)
+         * (1.0f - aq * 0.45f) * (1.0f - wet) * (1.0f - fogf);
+}
+/// A planet's own light. Venus and Jupiter are white like the stars; Mars is the
+/// one thing in the night sky that is plainly not, and Saturn is a shade warm.
+inline float3 planetTint(float kind) {
+    return kind > 3.5f ? float3(1.0f, 0.95f, 0.84f)
+         : (kind > 1.5f && kind < 2.5f) ? float3(1.0f, 0.74f, 0.58f)
+         : float3(0.96f, 0.97f, 1.0f);
+}
+
 // How much of the dome sits behind something you cannot see the sun through.
 //
 // Lives here rather than inline in cellPass because the rainbow needs the same
@@ -1761,15 +1785,20 @@ fragment CellOut cellPass(VOut in [[stage_in]],
 
     // stars + moon, from civil twilight onward
     if (sAlt < 0.0f) {
-        float starVis = seeThrough * seeThrough
-                      * max(0.0f, (-sAlt - 6.0f) / 14.0f) * (1.0f - aqiF * 0.55f);
-        if (starVis > 0.02f) {
+        float starBase = seeThrough * seeThrough * (1.0f - aqiF * 0.55f);
+        float starVis = starBase * max(0.0f, (-sAlt - 6.0f) / 14.0f);
+        // (starBase, not starVis, opens the loop: a planet is up in twilight, before any star.)
+        if (starBase > 0.02f) {
             for (int si = 0; si < U.starCount; ++si) {
+                float pk = stars[si]._p;
+                float sv1 = pk > 0.5f ? max(starVis, starBase * planetTwilight(sAlt, stars[si].br)) : starVis;
+                if (sv1 <= 0.02f) continue;
                 float2 sp;
                 if (!starXY(stars[si], U.facingAz, W, H, sp)) continue;
                 float ddx = (cxp - sp.x) / SP, ddy = (cyp - sp.y) / SP;
                 if (abs(ddx) < 1.4f && abs(ddy) < 1.4f) {
-                    float twinkle = 1.0f + 0.07f * sin(sec * 1.5f + dotPh * 3.14f);
+                    // A planet holds steady: it is a disc, the air cannot make it twinkle.
+                    float twinkle = pk > 0.5f ? 1.0f : 1.0f + 0.07f * sin(sec * 1.5f + dotPh * 3.14f);
                     // MUSIC: the stars SHIMMER TO THE BEAT — every one jumps on
                     // a beat, each by its own amount so the sky sparkles rather
                     // than flashing as one — and ride the highs between beats.
@@ -1784,14 +1813,17 @@ fragment CellOut cellPass(VOut in [[stage_in]],
                              // DRAG: a star the pointer passes near is tickled.
                              + 2.0f * dragNear(U, sp, SP * 10.0f);
                     // Brighter than it was (55): the stars were hard to find.
-                    float sl = starVis * stars[si].br * twinkle * seeThrough
+                    float sl = sv1 * stars[si].br * twinkle * seeThrough
                              * max(0.0f, 1.0f - sqrt(ddx * ddx + ddy * ddy));
                     L += sl * 85.0f;
                     // WHITE, not sky-tinted. A star's cell used to take the
                     // night's blue like every dark cell does, so the stars
                     // read as coloured tiles; starlight claims its own cell.
                     float sa = saturate(sl * 3.0f);
-                    if (sa > w) { w = sa; cr = 236.0f; cg = 238.0f; cb = 242.0f; }
+                    if (sa > w) {
+                        w = sa; cr = 236.0f; cg = 238.0f; cb = 242.0f;
+                        if (pk > 0.5f) { float3 pt = planetTint(pk) * 246.0f; cr = pt.x; cg = pt.y; cb = pt.z; }
+                    }
                 }
             }
         }
@@ -3032,15 +3064,17 @@ fragment float4 heightPass(VOut in [[stage_in]],
     // anything around it in the present pass; here it is also raised above
     // the dark sky's blocks, so the star catches the light as a real point.
     float sv = starVisibility(U);
-    if (sv > 0.05f) {
+    if (sv > 0.05f || U.sunAlt < -0.5f) {
         float W = U.pixW, H = U.pixH;
         float2 SPv = float2(W / max(U.cols, 1.0f), H / max(U.rows, 1.0f));
         for (int si = 0; si < U.starCount; ++si) {
             if (stars[si].br < 0.30f) continue;
+            float svi = stars[si]._p > 0.5f ? max(sv, planetVisibility(U, stars[si].br)) : sv;
+            if (svi <= 0.05f) continue;
             float2 sp;
             if (!starXY(stars[si], U.facingAz, W, H, sp)) continue;
             if (all(floor(sp / SPv) == floor(p))) {
-                h = max(h, sv * (0.55f + 0.40f * stars[si].br));
+                h = max(h, svi * (0.55f + 0.40f * min(stars[si].br, 1.0f)));
                 break;
             }
         }
@@ -4635,6 +4669,7 @@ struct SOut {
     float2 sp  [[flat]];
     float  br  [[flat]];
     float  idx [[flat]];
+    float  kind [[flat]];      // 0 a star; 1 Venus, 2 Mars, 3 Jupiter, 4 Saturn
 };
 
 vertex SOut starVS(uint vid [[vertex_id]], uint iid [[instance_id]],
@@ -4651,6 +4686,7 @@ vertex SOut starVS(uint vid [[vertex_id]], uint iid [[instance_id]],
     o.sp  = float2(q.sx, q.sy);
     o.br  = q.br;
     o.idx = q.idx;
+    o.kind = q.p0;
     return o;
 }
 
@@ -4659,6 +4695,8 @@ fragment float4 starFS(SOut in [[stage_in]],
                        constant float    *spec [[buffer(7)]])
 {
     float vis = starVisibility(U);
+    bool planet = in.kind > 0.5f;
+    if (planet) vis = max(vis, planetVisibility(U, in.br));
     if (vis <= 0.04f) discard_fragment();
     float W = U.pixW;
     float2 SPv = float2(U.pixW / max(U.cols, 1.0f), U.pixH / max(U.rows, 1.0f));
@@ -4673,7 +4711,8 @@ fragment float4 starFS(SOut in [[stage_in]],
                 : 0.0f;
     if (shape <= 0.0f) discard_fragment();
     float si = in.idx;
-    float tw = 0.75f + 0.25f * sin(U.time * 1.7f + si * 2.4f);
+    // A planet does not twinkle - that steadiness is how you tell one from a star.
+    float tw = planet ? 1.0f : 0.75f + 0.25f * sin(U.time * 1.7f + si * 2.4f);
     // MUSIC: each star on its own band, by where it sits; a beat jumps them.
     float sw = fract(si * 0.618034f + 0.11f);
     tw += U.beat * (0.35f + 0.7f * sw) + specAt(spec, in.sp.x / max(W, 1.0f)) * 0.4f
@@ -4686,7 +4725,8 @@ fragment float4 starFS(SOut in [[stage_in]],
     float bevel = mix(0.55f, 1.0f, smoothstep(0.0f, 0.22f, edge))
                 * (1.0f + 0.15f * step(uv.x + uv.y, 0.5f));      // lit from the upper left
     // White. (They were tinted per star, blue-white to warm; not liked.)
-    return float4(float3(0.96f, 0.97f, 1.0f) * l * bevel, 1.0f);
+    // The planets carry their own: Mars is red, Saturn a shade warm (planetTint).
+    return float4(planetTint(in.kind) * l * bevel, 1.0f);
 }
 
 // ================================================================ DIRTY CELLS

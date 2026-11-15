@@ -1187,13 +1187,15 @@ final class ElementalRenderer {
     /// the test presentPass used to run per PIXEL against every star.
     private func buildStarQuads(_ u: Uniforms) {
         starQuadCount = 0
-        guard u.sunAlt < -6, let buf = starQuadBuf else { return }
+        // -0.5, not -6: a planet is up in twilight. The stars still wait for -6 below.
+        guard u.sunAlt < -0.5, let buf = starQuadBuf else { return }
         let cols = sim.cols, rows = sim.rows
         let W = u.pixW, H = u.pixH
         let spx = W / Float(cols), spy = H / Float(rows)
         let out = buf.contents().assumingMemoryBound(to: Float.self)
         var taken = Set<Int>()
         for (i, st) in state.astro.stars.prefix(Self.maxStars).enumerated() where st.br >= 0.30 {
+            if st._p < 0.5 && u.sunAlt >= -6 { continue }
             let relAz = Float(fmod(Double(st.az - u.facingAz) + 540, 360)) - 180
             guard abs(relAz) <= 95 else { continue }
             let x = (0.5 + relAz / 190) * W, y = (1 - st.alt / 85) * H
@@ -1202,7 +1204,7 @@ final class ElementalRenderer {
             guard cx < cols, cy < rows, taken.insert(cy * cols + cx).inserted else { continue }
             let o = starQuadCount * 8
             out[o] = Float(cx); out[o + 1] = Float(cy); out[o + 2] = x; out[o + 3] = y
-            out[o + 4] = st.br; out[o + 5] = Float(i); out[o + 6] = 0; out[o + 7] = 0
+            out[o + 4] = st.br; out[o + 5] = Float(i); out[o + 6] = st._p; out[o + 7] = 0
             starQuadCount += 1
         }
     }

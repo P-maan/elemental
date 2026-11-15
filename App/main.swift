@@ -1216,6 +1216,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
              "gpuMs": (s.renderer.gpuMs * 100).rounded() / 100,
              "redrawn": (s.renderer.dirtyShare * 1000).rounded() / 1000,
              "paused": s.isPaused, "visible": s.isVisible, "recoveries": s.recoveries,
+             "planets": s.renderer.state.astro.planets.map {
+                 String(format: "%@ alt %.0f az %.0f mag %.1f", $0.name, $0.alt, $0.az, $0.mag) },
              "engine": s.engineDebug.split(separator: "\n").map(String.init)]
         }
     }

@@ -1260,6 +1260,7 @@ print("""
   sun       alt \(String(format: "%.1f", state.astro.sunAlt))°  az \(String(format: "%.1f", state.astro.sunAz))°
   moon      alt \(String(format: "%.1f", state.astro.moonAlt))°  az \(String(format: "%.1f", state.astro.moonAz))°  illum \(String(format: "%.0f", state.astro.moonIllum))%  phase \(String(format: "%.2f", state.astro.moonPhaseN))\(state.astro.lunarEclipse > 0.01 ? String(format: "  ECLIPSE %.2f", state.astro.lunarEclipse) : "")
   stars     \(state.astro.stars.count) above horizon and in view
+  planets   \(state.astro.planets.isEmpty ? "none up" : state.astro.planets.map { String(format: "%@ alt %.0f az %.0f mag %.1f", $0.name, $0.alt, $0.az, $0.mag) }.joined(separator: ", "))
   style     \(state.shape) / \(state.finish)   grid \(state.gridRows) rows
   weather   \(state.weather.effectiveKind)  cover \(String(format: "%.0f", state.weather.cover))% (lo \(String(format: "%.0f", state.weather.cloudLow)) mid \(String(format: "%.0f", state.weather.cloudMid)) hi \(String(format: "%.0f", state.weather.cloudHigh)))  precip \(String(format: "%.2f", state.weather.precipAmount))mm  \(state.weather.observedFrom.map { "via " + $0 } ?? "model only")
 """)
