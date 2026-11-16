@@ -508,6 +508,7 @@ final class LocationPane: Pane, NSSearchFieldDelegate, NSTableViewDataSource, NS
         table.delegate = self
         table.target = self
         table.doubleAction = #selector(rowActivated)
+        table.action = #selector(rowClicked)          // one click adds a search hit; it used to need a double click
         let col = NSTableColumn(identifier: .init("city"))
         col.width = 400
         table.addTableColumn(col)
@@ -722,7 +723,16 @@ final class LocationPane: Pane, NSSearchFieldDelegate, NSTableViewDataSource, NS
         var c = config
         c.scenePlaceName = picked
         owner?.commit(c, from: self)
+        // commit() does not sync the pane that sent it, so this pane has to take the new config
+        // itself. It did not: `config` stayed on the OLD city, and the guard above then refused the
+        // next click back to it ("already selected") - you could pick a city once and never return.
+        config = c
+        saved = c.allPlaces
         updateRemoveState()
+    }
+
+    @objc private func rowClicked() {
+        if mode == .results { rowActivated() }
     }
 
     @objc private func rowActivated() {
@@ -752,8 +762,7 @@ final class LocationPane: Pane, NSSearchFieldDelegate, NSTableViewDataSource, NS
         results = []
         statusLabel.stringValue = ""
         owner?.commit(c, from: self)
-        table.reloadData()
-        selectCurrentScene()
+        sync(c)             // the sender is skipped by commit(): without this the new city never showed in the list
     }
 
     // MARK: - Buttons
@@ -775,7 +784,7 @@ final class LocationPane: Pane, NSSearchFieldDelegate, NSTableViewDataSource, NS
         var c = config
         c.removePlace(named: saved[table.selectedRow].name)
         owner?.commit(c, from: self)
-        table.reloadData()
-        selectCurrentScene()
+        sync(c)             // same: the removed city stayed in the list, still clickable
+
     }
 }
