@@ -84,6 +84,7 @@ final class SystemAudioMeter: @unchecked Sendable {
     func update(shouldRun: Bool) {
         if shouldRun && !running { start() }
         else if !shouldRun && running { stop() }
+        else if running { refreshHoldBack() }
     }
 
     private func start() {
@@ -150,10 +151,32 @@ final class SystemAudioMeter: @unchecked Sendable {
             return
         }
         running = true
-        let lag = max(0, Self.outputLatency() - 0.06)
-        queue.async { [weak self] in self?.syncDelay = lag }
+        let lag = Self.holdBack()
+        queue.async { [weak self] in self?.syncDelay = lag; self?.heldBack = lag }
         NSLog("Elemental: music visualizer listening to system audio (in step %.0f ms later)", lag * 1000)
     }
+
+    /// What the picture itself takes from sound to screen, seconds - measured
+    /// stage by stage on 16 Nov 2026 (see the budget above `spectrumHop`).
+    static let pictureDelay = 0.045
+
+    /// How long to hold the levels back so they land with what is heard.
+    private static func holdBack() -> Double { max(0, outputLatency() - pictureDelay) }
+
+    /// The output can change while music plays (AirPods in, AirPods out). The
+    /// host calls `update` every two seconds; re-read the latency then, off
+    /// the main thread - a HAL call can stall.
+    private func refreshHoldBack() {
+        DispatchQueue.global(qos: .utility).async { [weak self] in
+            let lag = Self.holdBack()
+            self?.queue.async { self?.syncDelay = lag; self?.heldBack = lag }
+        }
+    }
+    private var heldBack: Double = 0
+    /// For status: milliseconds the levels are being held back right now.
+    var holdBackMs: Int { queue.sync { Int((heldBack * 1000).rounded()) } }
+    /// For status: analysis frames a second, and the audio buffer they come in.
+    var analysisRate: Double { queue.sync { hopRate } }
 
     private func stop() {
         teardown()
@@ -191,11 +214,28 @@ final class SystemAudioMeter: @unchecked Sendable {
     static let bandCount = 24
     private let fftN = 1024
     private lazy var fftSetup: FFTSetup = vDSP_create_fftsetup(10, FFTRadix(kFFTRadix2))!
+    /// The analysis window. A plain Hann window is symmetric: it weighs the
+    /// NEWEST audio at nearly nothing, so a kick only shows once it has moved
+    /// to the middle of the 1024 samples - about 10 ms after it happened. This
+    /// one rises like a Hann over the first 896 samples and falls over the last
+    /// 128, so the newest sound is heard at full weight ~1.3 ms after it
+    /// arrives, while the long rise keeps the low bands' frequency resolution.
+    /// Scaled to the same energy as the normalised Hann it replaces, so levels
+    /// are unchanged.
     private lazy var hann: [Float] = {
-        var w = [Float](repeating: 0, count: fftN)
-        vDSP_hann_window(&w, vDSP_Length(fftN), Int32(vDSP_HANN_NORM))
-        return w
+        let n = fftN, fall = 128, rise = n - fall
+        var w = [Float](repeating: 0, count: n)
+        for i in 0..<rise { w[i] = 0.5 - 0.5 * cos(Float.pi * Float(i) / Float(rise)) }
+        for i in 0..<fall { w[rise + i] = 0.5 + 0.5 * cos(Float.pi * Float(i + 1) / Float(fall + 1)) }
+        var ref = [Float](repeating: 0, count: n)
+        vDSP_hann_window(&ref, vDSP_Length(n), Int32(vDSP_HANN_NORM))
+        let e0 = ref.reduce(0) { $0 + $1 * $1 }, e1 = w.reduce(0) { $0 + $1 * $1 }
+        let k = (e0 / max(e1, 1e-9)).squareRoot()
+        return w.map { $0 * k }
     }()
+    /// Samples since the last analysis, and the analysis rate for status.
+    private var hopSamples = 0
+    private var hopRate: Double = 0
     private var ring = [Float](repeating: 0, count: 1024)
     private var ringPos = 0
     private var fresh = 0
@@ -241,13 +281,41 @@ final class SystemAudioMeter: @unchecked Sendable {
                 }
             }
         }
-        guard fresh >= 512 else { return }
+        // Every buffer the device hands over is analysed as it arrives (it was
+        // "every 512 samples", which with a 512-frame device is the same thing,
+        // but with a smaller buffer waited for nothing).
+        guard fresh >= 128 else { return }
+        hopSamples = fresh
         fresh = 0
         spectrumHop()
     }
 
+    //  ---- From sound to screen, in milliseconds (16 Nov 2026, "the music
+    //  response is very delayed"; measured on AirPods Pro, 30 frames a second)
+    //
+    //                                        before            now
+    //   audio buffer (512 frames)            5 avg, 11 worst   the same
+    //   analysis window (newest sample)      ~10               ~1.3
+    //   envelope attack                      ~8                ~2
+    //   thirty-a-second throttle             17 avg, 33 worst  none
+    //   main-queue hop + timer leeway        2, ±16 jitter     none
+    //   wait for the next frame              17 avg, 33 worst  the same
+    //   draw + present + compositor          ~25               the same
+    //   ------------------------------------------------------------------
+    //   the picture's own delay              ~85 avg, ~140     ~50 avg, ~75
+    //
+    //  The hold-back for the output device (AirPods report 171 ms) assumed the
+    //  picture took 60 ms and added 50 ms "for Bluetooth" on top of what the
+    //  device reports: 161 ms of waiting plus ~85 of picture = ~245 ms, against
+    //  ~171 ms for the ear - about 75 ms LATE, wobbling by a frame or two. It
+    //  now waits (reported latency - 45 ms) and nothing else.
     private func spectrumHop() {
         let n = fftN, half = n / 2
+        // Every rate below is per SECOND and turned into this hop's share, so
+        // the feel is the same whatever buffer size the device uses.
+        let dt = Float(max(64, hopSamples)) / Float(max(8000, sampleRate))
+        hopRate = Double(1 / dt)
+        func share(_ tau: Float) -> Float { 1 - exp(-dt / tau) }
         // Oldest-first copy of the ring, windowed.
         var x = [Float](repeating: 0, count: n)
         for i in 0..<n { x[i] = ring[(ringPos + i) % n] * hann[i] }
@@ -283,13 +351,14 @@ final class SystemAudioMeter: @unchecked Sendable {
         // (faster up top, where sounds are short), each against its own
         // decaying peak — but never against less than a fraction of the
         // loudest band, or a silent band would amplify its own noise.
-        let peakDecay: Float = 0.9993      // the slow peak forgets over ~15 s
+        let peakDecay: Float = exp(-dt / 15.2)      // the slow peak forgets over ~15 s
         let loudest = bandPeak.max() ?? 1e-6
         var spec = [Float](repeating: 0, count: B)
         for k in 0..<B {
             let v = bands[k]
-            let fall: Float = k < 8 ? 0.12 : (k < 16 ? 0.18 : 0.26)
-            bandEnv[k] += (v > bandEnv[k] ? 0.6 : fall) * (v - bandEnv[k])
+            // Up at once (3 ms), down as before (83 / 54 / 35 ms by band).
+            let fall: Float = share(k < 8 ? 0.083 : (k < 16 ? 0.054 : 0.035))
+            bandEnv[k] += (v > bandEnv[k] ? share(0.003) : fall) * (v - bandEnv[k])
             bandPeak[k] = max(bandEnv[k], bandPeak[k] * peakDecay, 1e-6)
             spec[k] = min(1, bandEnv[k] / max(bandPeak[k], loudest * 0.08))
         }
@@ -303,10 +372,13 @@ final class SystemAudioMeter: @unchecked Sendable {
         let now = CFAbsoluteTimeGetCurrent()
         latest = bass
 
-        // A BEAT: the bass jumping well above its half-second average.
-        bassAvg += 0.05 * (env - bassAvg)
+        // A BEAT: the bass jumping well above its recent average - judged on
+        // the RAW bass of this buffer, not the envelope, so it fires on the
+        // buffer the kick arrives in.
+        let rawBass = (bands[0] + bands[1] + bands[2] + bands[3] + bands[4] + bands[5]) / 6
+        bassAvg += share(0.208) * (rawBass - bassAvg)
         var beat = false
-        if env > bassAvg * 1.35 && env > peak * 0.30 && now - lastBeat > 0.18 {
+        if rawBass > bassAvg * 1.35 && rawBass > peak * 0.30 && now - lastBeat > 0.18 {
             beat = true
             lastBeat = now
         }
@@ -326,18 +398,20 @@ final class SystemAudioMeter: @unchecked Sendable {
         // Nothing playing: say nothing, so the wall settles.
         let total = bands.reduce(0, +)
         guard total > 1e-4 || drop else { return }
-        guard drop || beat || now - lastPost >= 1.0 / 30 else { return }
-        lastPost = now
-        let out = spec
         // In step with what is HEARD, not with what is played: the tap hears
-        // the sound before the output does, and AirPods take ~170-250 ms to
-        // play it. Held back by the output's latency less what the picture
-        // itself takes to reach the screen (~60 ms), so a beat on the wall
-        // lands on the beat in the ear.
-        DispatchQueue.main.asyncAfter(deadline: .now() + syncDelay) { [weak self] in
-            if drop { Pulse.shared.play(.drop) }
-            Pulse.shared.feedSpectrum(out, bass: bass, mid: mid, high: high, beat: beat)
-            self?.onLevel?()
+        // the sound before the output does (AirPods play it ~170 ms later). So
+        // every frame goes to Pulse now, stamped with the moment it is due -
+        // the output's latency less what the picture takes - and the renderer
+        // picks it up on the frame that moment falls in.
+        Pulse.shared.feedSpectrum(spec, bass: bass, mid: mid, high: high, beat: beat, after: syncDelay)
+        if drop {
+            DispatchQueue.main.asyncAfter(deadline: .now() + syncDelay) { Pulse.shared.play(.drop) }
+        }
+        // The host only needs telling that music is on (it lifts the frame
+        // rate); four times a second is plenty.
+        if now - lastPost >= 0.25 {
+            lastPost = now
+            DispatchQueue.main.async { [weak self] in self?.onLevel?() }
         }
     }
 
@@ -412,11 +486,10 @@ final class SystemAudioMeter: @unchecked Sendable {
                 if AudioObjectGetPropertyData(st, &la, 0, nil, &ls, &l) == noErr { frames += l }
             }
         }
-        var secs = Double(frames) / max(rate, 8000)
-        let transport = u32(kAudioDevicePropertyTransportType, kAudioObjectPropertyScopeGlobal)
-        if transport == kAudioDeviceTransportTypeBluetooth || transport == kAudioDeviceTransportTypeBluetoothLE {
-            secs += 0.05
-        }
+        // What the device reports, and nothing added: a guessed extra 50 ms
+        // "for Bluetooth" sat here and put the picture behind the ear. Early by
+        // a few milliseconds reads as in time; late by the same does not.
+        let secs = Double(frames) / max(rate, 8000)
         return min(0.5, secs)
     }
 

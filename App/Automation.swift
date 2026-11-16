@@ -470,6 +470,7 @@ final class AutomationServer {
                 "surfaces": app.surfaceStats,
                 "music": ["enabled": c.musicVisualizer, "onAC": app.onACPower,
                           "running": app.music.running, "level": (app.music.level * 100).rounded() / 100,
+                          "heldBackMs": app.music.holdBackMs, "analysisPerSecond": (app.music.analysisRate * 10).rounded() / 10,
                           "songTint": c.songTint,
                           "festivals": c.festivals,
                           "festivalsIndian": c.festivalsIndian,

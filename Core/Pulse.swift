@@ -89,11 +89,40 @@ final class Pulse: @unchecked Sendable {
 
     /// Music from the system-audio meter: every band, plus the three summaries
     /// and the beat derived from them.
-    func feedSpectrum(_ s: [Float], bass: Double, mid: Double, high: Double, beat: Bool) {
-        lock.lock()
-        for k in 0..<min(s.count, Self.bandCount) { heldSpectrum[k] = max(0, min(1, s[k])) }
-        lock.unlock()
-        feedBands(bass: bass, mid: mid, high: high, beat: beat)
+    ///
+    /// `after` holds the frame back so the picture lands with what is HEARD
+    /// (AirPods play ~170 ms after the tap hears it). 16 Nov 2026: this used to
+    /// be a `DispatchQueue.main.asyncAfter` per frame, throttled to thirty a
+    /// second - up to 33 ms of waiting, the main queue's own lateness and the
+    /// timer's leeway (a tenth of the delay, so ±16 ms of jitter on AirPods) on
+    /// top of the intended delay. Now the audio thread hands every analysis
+    /// frame straight here with the moment it is DUE, and whoever draws next
+    /// takes the newest one whose moment has come. No queue hop, no throttle,
+    /// no jitter beyond the frame itself.
+    func feedSpectrum(_ s: [Float], bass: Double, mid: Double, high: Double, beat: Bool, after: Double = 0) {
+        lock.lock(); defer { lock.unlock() }
+        let now = CFAbsoluteTimeGetCurrent()
+        lastSignal = now                       // the frame rate lifts at once, ahead of the sound
+        pending.append(Timed(due: now + max(0, after), spec: s, bass: bass, mid: mid, high: high, beat: beat))
+        if pending.count > 512 { pending.removeFirst(pending.count - 512) }   // nobody is drawing
+        drainLocked(now)
+    }
+
+    private struct Timed { let due: CFAbsoluteTime; let spec: [Float]; let bass, mid, high: Double; let beat: Bool }
+    private var pending: [Timed] = []
+
+    /// Apply every frame whose moment has come; the newest one wins, a beat
+    /// among them is kept with its own time. Call with the lock held.
+    private func drainLocked(_ now: CFAbsoluteTime) {
+        var n = 0
+        while n < pending.count, pending[n].due <= now { n += 1 }
+        guard n > 0 else { return }
+        for i in 0..<n where pending[i].beat { beatAt = pending[i].due }
+        let f = pending[n - 1]
+        for k in 0..<min(f.spec.count, Self.bandCount) { heldSpectrum[k] = max(0, min(1, f.spec[k])) }
+        held = max(0, min(1, f.bass)); heldMid = max(0, min(1, f.mid)); heldHigh = max(0, min(1, f.high))
+        heldAt = f.due; lastSignal = now
+        pending.removeFirst(n)
     }
 
     /// The spectrum for THIS frame, faded with the same hold as the level and
@@ -102,6 +131,7 @@ final class Pulse: @unchecked Sendable {
     func spectrum() -> [Float] {
         lock.lock(); defer { lock.unlock() }
         let now = CFAbsoluteTimeGetCurrent()
+        drainLocked(now)
         let fade = Float(exp(-(now - heldAt) / hold))
         let k: Float = (pattern != nil && pattern != .drop) ? 0.25 : 1
         return heldSpectrum.map { $0 * fade * k }
@@ -131,6 +161,7 @@ final class Pulse: @unchecked Sendable {
     func value() -> Float {
         lock.lock(); defer { lock.unlock() }
         let now = CFAbsoluteTimeGetCurrent()
+        drainLocked(now)
         var v = held * exp(-(now - heldAt) / hold)
         if let p = pattern {
             let t = now - patternT0
