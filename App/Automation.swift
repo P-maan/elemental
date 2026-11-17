@@ -106,6 +106,7 @@ enum AutomationSchema {
         Key(name: "lowPowerFPS", type: "int 4…30", detail: "Steady frame rate while Low Power is in force. Default 5 (about 1% CPU)."),
         Key(name: "musicVisualizer", type: "bool", detail: "Move with what this Mac is playing, only while something plays. Default true."),
         Key(name: "musicOnBattery", type: "bool", detail: "Keep moving with music on battery and in Low Power. Default true."),
+        Key(name: "musicSyncToEars", type: "bool", detail: "Hold the music back to line up with Bluetooth audio delay (AirPods ~170 ms). Default false: the picture answers instantly."),
         Key(name: "musicSky", type: "0…1", detail: "How much the sun and moon answer the music; 0.5 as designed."),
         Key(name: "musicClouds", type: "0…1", detail: "Clouds, fog and storms."),
         Key(name: "musicPrecip", type: "0…1", detail: "Rain and snow."),

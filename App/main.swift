@@ -1113,7 +1113,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     private func applyMusicState() {
         let heard = config.musicVisualizer && !asleep && CFAbsoluteTimeGetCurrent() - lastAudioAt < 10
         let battery = musicOnBattery
-        music.update(shouldRun: heard && !battery)
+        music.update(shouldRun: heard && !battery, syncToEars: config.musicSyncToEars)
         SongTint.shared.trustPlayer = battery
         nowPlaying.update(shouldRun: heard && config.songTint, economy: battery)
     }

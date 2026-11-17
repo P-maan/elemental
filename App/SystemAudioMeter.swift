@@ -81,7 +81,11 @@ final class SystemAudioMeter: @unchecked Sendable {
     // MARK: Lifecycle
 
     /// Start or stop to match what the host says should be happening.
-    func update(shouldRun: Bool) {
+    func update(shouldRun: Bool, syncToEars: Bool = false) {
+        if syncToEars != self.syncToEars {
+            self.syncToEars = syncToEars
+            if running { refreshHoldBack() }
+        }
         if shouldRun && !running { start() }
         else if !shouldRun && running { stop() }
         else if running { refreshHoldBack() }
@@ -151,7 +155,7 @@ final class SystemAudioMeter: @unchecked Sendable {
             return
         }
         running = true
-        let lag = Self.holdBack()
+        let lag = Self.holdBack(syncToEars)
         queue.async { [weak self] in self?.syncDelay = lag; self?.heldBack = lag }
         NSLog("Elemental: music visualizer listening to system audio (in step %.0f ms later)", lag * 1000)
     }
@@ -161,14 +165,17 @@ final class SystemAudioMeter: @unchecked Sendable {
     static let pictureDelay = 0.045
 
     /// How long to hold the levels back so they land with what is heard.
-    private static func holdBack() -> Double { max(0, outputLatency() - pictureDelay) }
+    private static func holdBack(_ on: Bool) -> Double { on ? max(0, outputLatency() - pictureDelay) : 0 }
+    /// Opt-in (Config.musicSyncToEars): hold the picture back to match Bluetooth audio.
+    private var syncToEars = false
 
     /// The output can change while music plays (AirPods in, AirPods out). The
     /// host calls `update` every two seconds; re-read the latency then, off
     /// the main thread - a HAL call can stall.
     private func refreshHoldBack() {
+        let on = syncToEars
         DispatchQueue.global(qos: .utility).async { [weak self] in
-            let lag = Self.holdBack()
+            let lag = Self.holdBack(on)
             self?.queue.async { self?.syncDelay = lag; self?.heldBack = lag }
         }
     }

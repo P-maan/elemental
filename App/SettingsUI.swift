@@ -1175,6 +1175,9 @@ struct GeneralPage: View {
             ToggleRow(title: "On battery and in Low Power too",
                       subtitle: "The wall comes up to thirty frames a second only while something is playing.",
                       isOn: store.binding(\.musicOnBattery))
+            ToggleRow(title: "Line up with Bluetooth delay",
+                      subtitle: "Off: the wall answers the instant the Mac hears the music. On: it waits for Bluetooth speakers and headphones, which play about a sixth of a second late.",
+                      isOn: store.binding(\.musicSyncToEars))
             ToggleRow(title: "Album cover tint",
                       subtitle: "A very faint hint of the cover's colour while Music or Spotify plays. "
                               + "macOS asks once to let Elemental read the player.",

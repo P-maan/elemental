@@ -403,6 +403,8 @@ struct Config: Codable, Equatable {
     /// set to always-on the visualiser never ran at all, and read as broken). The frame
     /// rate comes up to thirty only while something is actually playing.
     var musicOnBattery: Bool = true
+    /// Hold the music back so it lands with Bluetooth audio (AirPods play ~170 ms late). Off: the picture answers the instant the Mac hears it.
+    var musicSyncToEars: Bool = false
     /// How much each part of the scene answers, 0..1 with 0.5 as designed (so 1 is twice
     /// that and 0 is off): sun and moon; clouds, fog and storms; rain and snow; stars;
     /// fallen leaves; the wind. The same amounts shape how a message from Zo reads.
@@ -931,6 +933,7 @@ extension Config {
         lowPowerSmoothRain = c.lenient(.lowPowerSmoothRain, d.lowPowerSmoothRain)
         musicVisualizer    = c.lenient(.musicVisualizer, d.musicVisualizer)
         musicOnBattery     = c.lenient(.musicOnBattery, d.musicOnBattery)
+        musicSyncToEars    = c.lenient(.musicSyncToEars, d.musicSyncToEars)
         musicSky    = c.lenient(.musicSky, d.musicSky);       musicClouds = c.lenient(.musicClouds, d.musicClouds)
         musicPrecip = c.lenient(.musicPrecip, d.musicPrecip); musicStars  = c.lenient(.musicStars, d.musicStars)
         musicLeaves = c.lenient(.musicLeaves, d.musicLeaves); musicWind   = c.lenient(.musicWind, d.musicWind)

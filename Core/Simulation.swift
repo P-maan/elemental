@@ -852,7 +852,8 @@ final class SceneSimulation {
             let hit = max(pb.beat, Pulse.shared.message())
             if hit > 0.6 && musicLastHit <= 0.6 { musicDir = -musicDir }
             musicLastHit = hit
-            musicAir += (drive - musicAir) * min(1, dt * (drive > musicAir ? 70 : 3.5))
+            // up on the same frame, down over ~285 ms
+            musicAir = drive > musicAir ? drive : musicAir + (drive - musicAir) * min(1, dt * 3.5)
             musicPush = musicAir * musicDir * state.musicWind
             // friction: below this much bass a lying leaf does not move at all
             let hold: Float = 0.45
