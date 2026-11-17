@@ -476,7 +476,8 @@ final class WallpaperSurface: NSObject, CAMetalDisplayLinkDelegate {
         if lowPower {
             var f = Float(max(4, min(30, config.lowPowerFPS)))
             if falling && config.lowPowerSmoothRain { f = max(f, min(20, Float(config.maxFPS))) }
-            if playing { f = max(f, min(24, Float(config.maxFPS))) }
+            // 17 Nov: music at 24 left up to 42 ms between a kick and the frame showing it - "still slow on the beat".
+            if playing { f = max(f, min(30, Float(config.maxFPS))) }
             link?.preferredFrameRateRange = CAFrameRateRange(minimum: f, maximum: f,
                                                              preferred: f)
             renderer.state.lowFX = false
@@ -497,8 +498,9 @@ final class WallpaperSurface: NSObject, CAMetalDisplayLinkDelegate {
             // changed in it, so a frame nobody needs is pure heat.
             let rate: Float
             if Cursor.shared.active || w.isThundering { rate = ceiling }
-            else { rate = min(ceiling, max(need, (Pulse.shared.active || renderer.hasDebris
-                                                 || Cursor.shared.hoverActive) ? 30 : 0)) }
+            // 17 Nov: music gets every frame there is (was 30) - a kick lands on the next 16 ms frame, not 33.
+            else if Pulse.shared.active { rate = ceiling }
+            else { rate = min(ceiling, max(need, (renderer.hasDebris || Cursor.shared.hoverActive) ? 30 : 0)) }
             link?.preferredFrameRateRange = CAFrameRateRange(minimum: rate, maximum: rate,
                                                              preferred: rate)
         } else {

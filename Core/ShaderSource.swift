@@ -1705,7 +1705,7 @@ fragment CellOut cellPass(VOut in [[stage_in]],
         zoW = max(zoW, zo * ripVis * sunV * fexp(-d * invSunRip * 0.5f));
         // MUSIC, clear sky: the bass drives the ripple (above); the highs make
         // the sun's own glow glint, tight around the disc.
-        glow *= 1.0f + 0.6f * (U.pulseHigh + 0.8f * U.beat) * U.musSky * ripVis * fexp(-d * invSunR * 2.0f);
+        glow *= 1.0f + 0.6f * (U.pulseHigh + 0.35f * U.beat) * U.musSky * ripVis * fexp(-d * invSunR * 2.0f);
         L += glow * 58.0f + (rip > 0.0f ? rip * 46.0f : 0.0f);
         // MUSIC: SUN RAYS IN ASCENDING FREQUENCIES. Asked for 3 Nov 2026. A
         // sunburst whose every ray is one band of the music, the lowest
@@ -1729,7 +1729,7 @@ fragment CellOut cellPass(VOut in [[stage_in]],
             float reach = sunDiscR * (3.0f + 16.0f * v);
             float along = smoothstep(sunDiscR * 1.2f, sunDiscR * 3.0f, d)
                         * fexp(-max(d - sunDiscR * 2.0f, 0.0f) / reach);
-            L += beam * along * v * 260.0f * (1.0f + 0.8f * U.beat) * ripVis * sunV * sunDim * U.musSky;
+            L += beam * along * v * 260.0f * (1.0f + 0.3f * U.beat) * ripVis * sunV * sunDim * U.musSky;
         }
         float3 sc = sunTint(sAlt, aqiF);
         float ww = min(1.0f, (glow * 1.6f + (rip > 0.0f ? rip * 0.5f : 0.0f)) * sunDim);
@@ -2198,7 +2198,7 @@ fragment CellOut cellPass(VOut in [[stage_in]],
             float cwd = crossWindKmh(U.wind, U.windDir, U.facingAz);
             float roll = 0.5f + 0.5f * sin(cxp * 0.0035f + cyp * 0.0012f
                                            - sec * (1.4f + 0.04f * cwd));
-            L += lowAmt * (0.5f * U.pulse + 0.3f * U.pulseMid + 0.5f * U.beat) * U.musCloud * (6.0f + 22.0f * saturate(lowN))
+            L += lowAmt * (0.5f * U.pulse + 0.3f * U.pulseMid + 0.2f * U.beat) * U.musCloud * (6.0f + 22.0f * saturate(lowN))
                * (0.4f + 0.6f * roll);
             L += rim * U.pulseMid * 20.0f * U.musCloud;
             // Zo, overcast: the deck lights from within for it, in the same
@@ -2327,7 +2327,7 @@ fragment CellOut cellPass(VOut in [[stage_in]],
                                     y * 0.0048f + sec * 0.004f) + 13.0f);
         L += fogD * (46.0f + 80.0f * bank);
         // MUSIC, fog: the banks breathe on the bass, the thick ones most.
-        L += fogD * (0.5f * U.pulse + 0.3f * U.pulseMid + 0.4f * U.beat) * U.musCloud * (8.0f + 24.0f * saturate(bank + 0.5f));
+        L += fogD * (0.5f * U.pulse + 0.3f * U.pulseMid + 0.15f * U.beat) * U.musCloud * (8.0f + 24.0f * saturate(bank + 0.5f));
         float fw = fogD * 0.7f;
         if (fw > w) { w = fw; cr = 170.0f; cg = 175.0f; cb = 185.0f; }
     }
