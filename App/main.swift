@@ -1227,6 +1227,23 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         onPreviewChange?()
     }
 
+    /// The cloud inputs actually in use, for checking accuracy in one call.
+    static func cloudInputs(_ w: WeatherState) -> [String: Any] {
+        // Built one key at a time: a single mixed literal here sent the type checker into minutes.
+        var d = [String: Any]()
+        d["totalCover"] = Double(w.cover)
+        d["low"] = Double(w.cloudLow)
+        d["mid"] = Double(w.cloudMid)
+        d["high"] = Double(w.cloudHigh)
+        d["ceilingM"] = Double(w.ceiling)
+        d["visibilityM"] = Double(w.visibility)
+        d["obscuration"] = String(describing: w.obscuration)
+        d["observedFrom"] = w.observedFrom ?? "none"
+        d["cloudCombine"] = w.cloudDiag ?? "no station used (model only)"
+        d["stations"] = w.cloudStationList ?? [String]()
+        return d
+    }
+
     /// Per display: frames drawn per second right now, and whether it is paused.
     var surfaceStats: [[String: Any]] {
         surfaces.map { id, s in
@@ -1236,6 +1253,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
              "paused": s.isPaused, "visible": s.isVisible, "recoveries": s.recoveries,
              "planets": s.renderer.state.astro.planets.map {
                  String(format: "%@ alt %.0f az %.0f mag %.1f", $0.name, $0.alt, $0.az, $0.mag) },
+             "cloudInputs": Self.cloudInputs(s.renderer.state.weather),
              "engine": s.engineDebug.split(separator: "\n").map(String.init)]
         }
     }

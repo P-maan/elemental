@@ -1520,7 +1520,12 @@ fragment CellOut cellPass(VOut in [[stage_in]],
         // direction whatever the wind was doing.
         float fib = 0.5f + 1.2f * deckField(cxp, cyp, W, H, U.facingAz, 8.0f, 2.6f, 4.5f,
                                             U.windDir, max(U.wind, 12.0f), sec + 900.0f);
-        highAmt = saturate(fib * U.cloudHigh * veil * 1.25f - 0.18f);
+        // A few per cent of cirrus (METAR FEW200+, model 5-20%) is a handful of
+        // faint wisps, not a veil of streaks: the density gain ramps in over the
+        // first half of the range and is exactly 1 from 50% up, so a cirrus-
+        // covered sky is unchanged.
+        float hiGain = mix(0.3f, 1.0f, smoothstep(0.04f, 0.5f, U.cloudHigh));
+        highAmt = saturate(fib * U.cloudHigh * hiGain * veil * 1.25f - 0.18f);
         // DRAG: high cloud is a veil, and a finger through it parts it.
         highAmt *= 1.0f - 0.8f * near;
     }

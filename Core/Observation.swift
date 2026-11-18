@@ -43,6 +43,8 @@ struct Observation {
     var coverMid: Float = 0        // 6,500 – 20,000 ft
     var coverHigh: Float = 0       // above 20,000 ft
     var coverTotal: Float = 0
+    /// Every fresh station near enough to share the sky, for diagnostics.
+    var cloudStations: [String] = []
 
     /// Height of the lowest BROKEN or OVERCAST layer, metres AGL. -1 when the
     /// sky is clear or only scattered — there is no ceiling then, which is a
@@ -171,12 +173,37 @@ enum ObservationService {
         else { return nil }
 
         var best: Observation?
+        var fresh: [Observation] = []
         for row in rows {
             guard var o = decode(row) else { continue }
             o.distanceKm = haversine(lat, lon, (row["lat"] as? NSNumber)?.doubleValue ?? lat,
                                                (row["lon"] as? NSNumber)?.doubleValue ?? lon)
             guard o.isFresh else { continue }
+            fresh.append(o)
             if best == nil || o.distanceKm < best!.distanceKm { best = o }
+        }
+        // SEVERAL STATIONS, NOT ONE. The nearest field alone decided the whole sky:
+        // KCEF said FEW250 and drew cirrus although KORE, 40 km on, said CLR.
+        // Stations inside 60 km report the same synoptic sky, so their cloud is
+        // averaged with inverse-square distance weights; everything else
+        // (weather, wind, visibility) stays with the nearest one.
+        if var b = best {
+            let near = fresh.filter { $0.distanceKm <= 60 }
+            if near.count > 1 {
+                var sw: Float = 0, lo: Float = 0, mi: Float = 0, hi: Float = 0, tot: Float = 0
+                for o in near {
+                    let w = Float(1 / pow(1 + o.distanceKm / 15, 2))
+                    sw += w; lo += w * o.coverLow; mi += w * o.coverMid
+                    hi += w * o.coverHigh; tot += w * o.coverTotal
+                }
+                b.coverLow = lo / sw; b.coverMid = mi / sw; b.coverHigh = hi / sw; b.coverTotal = tot / sw
+            }
+            b.cloudStations = near.sorted { $0.distanceKm < $1.distanceKm }.map {
+                String(format: "%@ %.0fkm low %.0f mid %.0f high %.0f total %.0f  [%@]",
+                       $0.stationId, $0.distanceKm, $0.coverLow, $0.coverMid, $0.coverHigh,
+                       $0.coverTotal, $0.raw)
+            }
+            return b
         }
         return best
     }
@@ -220,10 +247,12 @@ enum ObservationService {
     /// contributes on its own, which is what the renderer wants: it draws the
     /// three decks separately and a cirrus sky must not grow a low lid.
     private static func decodeClouds(_ layers: [[String: Any]], into o: inout Observation) {
-        func pct(_ cover: String) -> Float {
+        func pct(_ cover: String, _ baseFt: Float) -> Float {
             switch cover {
             case "SKC", "CLR", "NSC", "NCD", "CAVOK": return 0
-            case "FEW": return 19            //  1–2 oktas
+            // 1-2 oktas. High FEW (FEW200+) is a few thin ice wisps: kept small so
+            // it draws as sparse faint cirrus, not as a 19% veil.
+            case "FEW": return baseFt >= 20000 ? 8 : baseFt >= 6500 ? 14 : 19
             case "SCT": return 44            //  3–4
             case "BKN": return 75            //  5–7
             case "OVC": return 100           //  8
@@ -236,10 +265,10 @@ enum ObservationService {
         var lowestFt = Float.greatestFiniteMagnitude
         for l in layers {
             let cover = (l["cover"] as? String) ?? ""
-            let p = pct(cover)
-            guard p > 0 else { continue }
             // A vertical-visibility report has no base; treat it as ground level.
             let base = (l["base"] as? NSNumber)?.floatValue ?? 0
+            let p = pct(cover, base)
+            guard p > 0 else { continue }
             lowestFt = min(lowestFt, base)
             // "Ceiling" in aviation means the lowest layer of BKN or more —
             // the height at which the sky is effectively closed over you.
@@ -373,10 +402,22 @@ extension WeatherState {
         guard o.isFresh else { return }
 
         if o.distanceKm <= Self.cloudReachKm {
-            cover     = o.coverTotal
-            cloudLow  = o.coverLow
-            cloudMid  = o.coverMid
-            cloudHigh = o.coverHigh
+            // Where the model and the stations agree (within 25 points) keep the
+            // model's finer number; where they disagree the stations win, being
+            // measurement. So model 0% high + FEW250 stays clear, and model 7%
+            // + CLR stays clear, but a model that misses an overcast is overruled.
+            func pick(_ m: Float, _ obs: Float) -> Float {
+                abs(m - obs) <= 25 ? m : obs
+            }
+            let mTotal = cover, mLo = cloudLow, mMid = cloudMid, mHi = cloudHigh
+            cloudLow  = pick(cloudLow, o.coverLow)
+            cloudMid  = pick(cloudMid, o.coverMid)
+            cloudHigh = pick(cloudHigh, o.coverHigh)
+            cover     = abs(mTotal - o.coverTotal) <= 25 ? mTotal : o.coverTotal
+            cloudDiag = String(format: "model %.0f/%.0f/%.0f tot %.0f  stations(blend) %.0f/%.0f/%.0f tot %.0f -> %.0f/%.0f/%.0f tot %.0f",
+                               mLo, mMid, mHi, mTotal, o.coverLow, o.coverMid, o.coverHigh, o.coverTotal,
+                               cloudLow, cloudMid, cloudHigh, cover)
+            cloudStationList = o.cloudStations
             visibility = o.visibility
             humidity   = o.humidity
             temperature = o.temperature

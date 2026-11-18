@@ -517,6 +517,10 @@ struct WeatherState: Equatable, Codable {
     /// When the report was taken, and by whom. Diagnostics and staleness.
     var observedAt: Date? = nil
     var observedFrom: String? = nil
+    /// Diagnostics for /v1/status: how the model and the stations were combined.
+    /// Optional so older encoded payloads still decode.
+    var cloudDiag: String? = nil
+    var cloudStationList: [String]? = nil
 
     // The METAR present-weather vocabulary already distinguishes exactly the
     // things this file is trying to derive. SHRA is a rain SHOWER — cellular,
