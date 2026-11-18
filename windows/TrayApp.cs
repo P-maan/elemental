@@ -118,7 +118,7 @@ sealed class TrayApp : ApplicationContext
     {
         if (_building || _closing) return;
         if (_windows.Count == 0) { _ = RebuildAsync(); return; }
-        if (_windows.All(w => w.IsAttached)) return;
+        if (_windows.All(w => w.IsAttached)) { DesktopAttach.EnsureHostVisible(_windows[0].Host); return; }
         // explorer restarted: the old WorkerW (and our child windows with it) is gone -> rebuild from scratch
         if (_windows.Any(w => w.IsDisposed || !w.IsHandleCreated || w.Host == IntPtr.Zero || !IsWindow(w.Host)))
         {

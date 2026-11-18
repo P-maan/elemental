@@ -17,8 +17,13 @@ static class Program
             if (EventWaitHandle.TryOpenExisting(name, out var ev)) ev.Set();
             if (quit)
             {
-                // wait for the running instance to go away so installers can replace files
-                try { mutex.WaitOne(10000); } catch (AbandonedMutexException) { }
+                // wait for the running instance to really exit (file locks!) so installers can replace/delete files
+                var me = Environment.ProcessId;
+                var sw = Stopwatch.StartNew();
+                foreach (var p in Process.GetProcessesByName("Elemental").Where(p => p.Id != me))
+                {
+                    try { p.WaitForExit(Math.Max(1000, 12000 - (int)sw.ElapsedMilliseconds)); } catch { }
+                }
             }
             return;
         }

@@ -44,9 +44,25 @@ sealed class WallpaperWindow : Form
         core.WebMessageReceived += (_, e) => { try { Message?.Invoke(this, e.WebMessageAsJson); } catch { } };
         core.NavigationCompleted += (_, e) => { PageReady = e.IsSuccess; Log.Write($"nav completed ok={e.IsSuccess} on {Monitor}"); Loaded?.Invoke(this); };
         core.ProcessFailed += (_, e) => Log.Write("webview process failed: " + e.ProcessFailedKind);
+        _ = LogPageErrorsAsync(core);
         ApplyScale();
         core.Navigate("https://elemental.local/index.html");
     }
+
+    int _errLogged;
+    async Task LogPageErrorsAsync(CoreWebView2 core)
+    {
+        try
+        {
+            await core.CallDevToolsProtocolMethodAsync("Runtime.enable", "{}");
+            core.GetDevToolsProtocolEventReceiver("Runtime.exceptionThrown").DevToolsProtocolEventReceived += (_, e) =>
+            { if (_errLogged++ < 20) Log.Write("page exception: " + Trim(e.ParameterObjectAsJson)); };
+            core.GetDevToolsProtocolEventReceiver("Runtime.consoleAPICalled").DevToolsProtocolEventReceived += (_, e) =>
+            { if (e.ParameterObjectAsJson.Contains("\"type\":\"error\"") && _errLogged++ < 20) Log.Write("page console.error: " + Trim(e.ParameterObjectAsJson)); };
+        }
+        catch (Exception ex) { Log.Write("devtools logging unavailable: " + ex.Message); }
+    }
+    static string Trim(string s) => s.Length > 400 ? s[..400] : s;
 
     void ApplyScale()
     {

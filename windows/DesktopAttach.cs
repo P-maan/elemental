@@ -63,7 +63,18 @@ static class DesktopAttach
         long ex = GetLong(hwnd, GWL_EXSTYLE);
         SetLong(hwnd, GWL_EXSTYLE, (ex | WS_EX_TOOLWINDOW | WS_EX_NOACTIVATE) & ~WS_EX_APPWINDOW);
         SetParent(hwnd, host);
+        EnsureHostVisible(host);
         return Place(hwnd, host, screenBounds);
+    }
+
+    /// <summary>After an explorer restart the WorkerW can exist but be hidden, which hides every child with it.</summary>
+    public static void EnsureHostVisible(IntPtr host)
+    {
+        if (host != IntPtr.Zero && IsWindow(host) && !IsWindowVisible(host))
+        {
+            Log.Write("host WorkerW was hidden; showing it");
+            ShowWindow(host, 4);   // SW_SHOWNOACTIVATE
+        }
     }
 
     public static bool Place(IntPtr hwnd, IntPtr host, Rectangle b)
