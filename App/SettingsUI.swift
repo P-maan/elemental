@@ -1225,6 +1225,19 @@ struct GeneralPage: View {
             RowDivider()
             SliderRow(title: "Depth", subtitle: "How strongly the wall turns with you. The middle is as designed.",
                       value: store.unit(\.headAmount), format: { $0 < 0.02 ? "off" : "\(Int(($0 * 200).rounded()))%" })
+            RowDivider()
+            SliderRow(title: "Region", subtitle: "How much of the wall turns: a patch where you are looking, up to the whole wall.",
+                      value: store.unit(\.headRegion), format: { $0 >= 0.98 ? "whole wall" : "\(Int(($0 * 100).rounded()))%" })
+            RowDivider()
+            ToggleRow(title: "Tiles in 3D", subtitle: "Blocks show their sides as you turn.", isOn: store.binding(\.headTiles))
+            RowDivider()
+            ToggleRow(title: "Glints", subtitle: "The light on the tiles swings with you.", isOn: store.binding(\.headLight))
+            RowDivider()
+            ToggleRow(title: "Shimmer", subtitle: "The drifting light slides the way you turn.", isOn: store.binding(\.headShimmer))
+            RowDivider()
+            ToggleRow(title: "Shadows", subtitle: "Tile shadows fall away from where the light now comes from.", isOn: store.binding(\.headShadows))
+            RowDivider()
+            ToggleRow(title: "Sound field", subtitle: "The music's light stays put in the room as you turn, like spatial audio.", isOn: store.binding(\.headSoundField))
         }
 
         SectionTitle("More")

@@ -132,6 +132,9 @@ struct Uniforms {
     // ---- an eighth block, 336 -> 352 bytes: his head, from AirPods/Beats (HeadTracker).
     // Radians from the resting centre; headOn 0..1. Mirrored by hand - trap 5.
     var headYaw: Float = 0, headPitch: Float = 0, headRoll: Float = 0, headOn: Float = 0
+    // ---- a ninth block, 352 -> 368 bytes: which elements follow his head (bit 1 tiles, 2 light,
+    // 4 shimmer, 8 shadows, 16 sound field) and how big the moving region is. Mirrored by hand.
+    var headMask: Float = 31, headRegion: Float = 0.35, headPad0: Float = 0, headPad1: Float = 0
 }
 
 struct GPUBreather { var ax, ay, R, per, s1, s2, ph, ph2: Float }

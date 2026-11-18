@@ -1116,6 +1116,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         music.update(shouldRun: heard && !battery, syncToEars: config.musicSyncToEars)
         // His head, from AirPods/Beats, steers the glints and the shimmer (HeadTracker).
         HeadTracker.shared.amount = Float(config.headAmount * 2)
+        ElementalRenderer.headMask = Float((config.headTiles ? 1 : 0) | (config.headLight ? 2 : 0) | (config.headShimmer ? 4 : 0)
+                                           | (config.headShadows ? 8 : 0) | (config.headSoundField ? 16 : 0))
+        ElementalRenderer.headRegion = Float(config.headRegion)
         if config.headTracking && (heard || config.headAlways) { HeadTracker.shared.start() } else { HeadTracker.shared.stop() }
         if config.deviceAlerts { DeviceAlerts.shared.start() } else { DeviceAlerts.shared.stop() }
         // His head turning lifts the frame rate while it moves and lets it fall back after.

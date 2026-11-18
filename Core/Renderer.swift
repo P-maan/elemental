@@ -21,6 +21,10 @@ final class ElementalRenderer {
     /// His head from AirPods/Beats (yaw, pitch, roll, on), set by the app (HeadTracker);
     /// nil in the screen saver and the offline renderer.
     nonisolated(unsafe) static var headSource: (() -> (Float, Float, Float, Float))?
+    /// Which elements follow his head (bits: 1 tiles, 2 light, 4 shimmer, 8 shadows, 16 sound field)
+    /// and how big the moving region is (0..1). Set by the app from Config.
+    nonisolated(unsafe) static var headMask: Float = 31
+    nonisolated(unsafe) static var headRegion: Float = 0.35
 
     let device: MTLDevice
     private let queue: MTLCommandQueue
@@ -1125,6 +1129,7 @@ final class ElementalRenderer {
         if let hd = ElementalRenderer.headSource?() {
             u.headYaw = hd.0; u.headPitch = hd.1; u.headRoll = hd.2; u.headOn = hd.3
         }
+        u.headMask = ElementalRenderer.headMask; u.headRegion = ElementalRenderer.headRegion
         let spec = Pulse.shared.spectrum()
         let sp = spectrumBuf.contents().assumingMemoryBound(to: Float.self)
         for k in 0..<32 { sp[k] = k < spec.count ? spec[k] : 0 }

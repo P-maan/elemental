@@ -122,6 +122,8 @@ struct Uniforms {
     float musSky, musCloud, musPrecip, musStars;
     // ---- an eighth block, 336 -> 352 bytes: his head, from AirPods/Beats (HeadTracker).
     float headYaw, headPitch, headRoll, headOn;
+    // ---- a ninth block, 352 -> 368 bytes: which elements follow his head, and the region size.
+    float headMask, headRegion, headPad0, headPad1;
 };
 
 // Rain is rasterised at this multiple of the cell grid in each axis.
@@ -945,6 +947,19 @@ inline float2 astroXY(float alt, float az, float facing, float W, float H) {
 // with AirPods/Beats on, the sun and the moon drift a little toward where he turns and
 // tilts his head, eased, so the light feels like it is following him. Off (and exactly
 // where the sky puts them) the moment the headphones stop reporting.
+inline bool headHas(constant Uniforms &U, int bit) { return (int(U.headMask + 0.5f) & bit) != 0 && U.headOn > 0.01f; }
+// REGIONAL (18 Nov, his: "only regional tiles move"): only the tiles where he is looking turn in
+// 3D - a soft patch centred where his head points, the rest of the wall stays flat. headRegion
+// is the patch's size (0 tiny .. 1 the whole wall).
+inline float2 headCam(constant Uniforms &U, float2 g) {
+    if (!headHas(U, 1)) return float2(0.0f);
+    float2 half = float2(U.cols, U.rows) * 0.5f;
+    float2 gaze = half + float2(-clamp(U.headYaw, -0.8f, 0.8f), -clamp(U.headPitch, -0.5f, 0.5f)) * half * 1.1f;
+    float sig = max(0.05f, U.headRegion) * max(U.cols, U.rows) * 0.45f;
+    float2 d = g - gaze;
+    float w = U.headRegion >= 0.98f ? 1.0f : exp(-dot(d, d) / (2.0f * sig * sig));
+    return float2(clamp(U.headYaw, -0.8f, 0.8f), clamp(U.headPitch, -0.5f, 0.5f)) * U.headOn * 0.55f * w;
+}
 inline float2 headFollow(constant Uniforms &U, float W, float H) {
     return float2(0.0f);    // 18 Nov, his: "don't make the sun follow me" - the sky stays true
 }
@@ -1465,7 +1480,8 @@ fragment CellOut cellPass(VOut in [[stage_in]],
         // rates that do not divide into each other keeps it from settling into
         // an obvious pulse.
         // His head moves the shimmer: the waves slide the way he turns and nods.
-        float hx = U.headOn * clamp(U.headYaw, -0.9f, 0.9f) * 900.0f, hy = U.headOn * clamp(U.headPitch, -0.6f, 0.6f) * 700.0f;
+        float hk = headHas(U, 4) ? U.headOn : 0.0f;
+        float hx = hk * clamp(U.headYaw, -0.9f, 0.9f) * 900.0f, hy = hk * clamp(U.headPitch, -0.6f, 0.6f) * 700.0f;
         float sh = sin((x + hx) * 0.0021f + (y + hy) * 0.0017f + sec * 0.80f)
                  + 0.70f * sin((x + hx) * 0.0037f - (y + hy) * 0.0029f + sec * 0.52f + 2.1f)
                  + 0.50f * sin((x + hx) * 0.0009f + (y + hy) * 0.0043f + sec * 1.27f + 4.3f);
@@ -2703,7 +2719,7 @@ fragment CellOut cellPass(VOut in [[stage_in]],
         for (int b = 0; b < 7; b++) lv += spec[96 + b] + spec[103 + b];
         if (lv > 0.002f) {
             float x01 = cxp / W, y01 = saturate(cyp / max(H, 1.0f));
-            float turn = U.headOn * clamp(U.headYaw, -0.9f, 0.9f) * 0.35f;
+            float turn = headHas(U, 16) ? U.headOn * clamp(U.headYaw, -0.9f, 0.9f) * 0.35f : 0.0f;
             float f = 0.0f;
             for (int b = 0; b < 7; b++) {
                 float lev = 0.6f * spec[96 + b] + 1.0f * spec[103 + b];
@@ -2956,7 +2972,8 @@ fragment float4 heightPass(VOut in [[stage_in]],
         float2 SPs = float2(U.pixW / max(U.cols, 1.0f), U.pixH / max(U.rows, 1.0f));
         float x = floor(p.x) * SPs.x, y = floor(p.y) * SPs.y, sec = U.time;
         // His head moves the shimmer: the waves slide the way he turns and nods.
-        float hx = U.headOn * clamp(U.headYaw, -0.9f, 0.9f) * 900.0f, hy = U.headOn * clamp(U.headPitch, -0.6f, 0.6f) * 700.0f;
+        float hk = headHas(U, 4) ? U.headOn : 0.0f;
+        float hx = hk * clamp(U.headYaw, -0.9f, 0.9f) * 900.0f, hy = hk * clamp(U.headPitch, -0.6f, 0.6f) * 700.0f;
         float sh = sin((x + hx) * 0.0021f + (y + hy) * 0.0017f + sec * 0.80f)
                  + 0.70f * sin((x + hx) * 0.0037f - (y + hy) * 0.0029f + sec * 0.52f + 2.1f)
                  + 0.50f * sin((x + hx) * 0.0009f + (y + hy) * 0.0043f + sec * 1.27f + 4.3f);
@@ -3812,8 +3829,7 @@ fragment float4 presentPass(VOut in [[stage_in]],
                              hmax, cellFull(U.splayAmt),
                              faceInset(U.rounding, U.halftone),
                              faceCorner(U.rounding), U.halftone, U.time,
-                             float2(clamp(U.headYaw, -0.8f, 0.8f), clamp(U.headPitch, -0.5f, 0.5f))
-                                 * U.headOn * 0.55f);
+                             headCam(U, px / SPv));
 
     // A flank hit lands exactly ON a cell boundary, where floor() is a coin
     // toss and the grout test would fire. Push it a quarter-cell into the block
@@ -4573,7 +4589,8 @@ fragment float4 presentPass(VOut in [[stage_in]],
     // HIS HEAD (AirPods/Beats): turning swings the light across the tiles the way a
     // glass wall catches the light as you move past it; nodding tips it up and down.
     // The sun and moon stay where they are - only the glints move with him.
-    if (U.headOn > 0.01f) {
+    float2 L0 = L;                                   // the true light, for shadows when they do not follow
+    if (headHas(U, 2)) {
         float a = clamp(U.headYaw, -0.9f, 0.9f) * 0.9f * U.headOn;
         float ca = cos(a), sa = sin(a);
         L = float2(L.x * ca - L.y * sa, L.x * sa + L.y * ca);
@@ -4719,7 +4736,7 @@ fragment float4 presentPass(VOut in [[stage_in]],
                 // light's side throws its shadow onto this block; one on the far
                 // side barely does. L already follows the sun or moon and, with
                 // AirPods/Beats, his head - so the shadows swing as he turns.
-                float toward = 0.35f + 1.1f * saturate(dot(o, L));
+                float toward = 0.35f + 1.1f * saturate(dot(o, headHas(U, 8) ? L : L0));
                 occ += saturate(dh / (hmax * 0.45f)) * (1.0f - smoothstep(0.0f, 0.6f, d)) * toward;
             }
             shade *= 1.0f - saturate(occ) * 0.55f * U.shadow;
