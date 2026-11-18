@@ -471,7 +471,7 @@ final class AutomationServer {
                 "surfaces": app.surfaceStats,
                 "music": ["enabled": c.musicVisualizer, "onAC": app.onACPower,
                           "running": app.music.running, "level": (app.music.level * 100).rounded() / 100,
-                          "heldBackMs": app.music.holdBackMs, "analysisPerSecond": (app.music.analysisRate * 10).rounded() / 10,
+                          "heldBackMs": app.music.holdBackMs, "bands7": Self.bands7Status(), "head": HeadTracker.shared.report, "analysisPerSecond": (app.music.analysisRate * 10).rounded() / 10,
                           "songTint": c.songTint,
                           "festivals": c.festivals,
                           "festivalsIndian": c.festivalsIndian,
@@ -739,5 +739,21 @@ enum ZoBridge {
         var diff: UInt8 = 0
         for (a, b) in zip(want.utf8, got.utf8) { diff |= a ^ b }
         return diff == 0
+    }
+}
+
+
+extension AutomationServer {
+    /// The seven listening bands for /v1/status: level, hit, pan, width each.
+    static func bands7Status() -> [[String: Any]] {
+        let b = Pulse.shared.bands7()
+        let names = ["sub", "bass", "lowMid", "mid", "highMid", "presence", "brilliance"]
+        func r(_ v: Float) -> Double { (Double(v) * 100).rounded() / 100 }
+        return (0..<7).map { i -> [String: Any] in
+            var d = [String: Any]()
+            d["band"] = names[i]
+            d["level"] = r(b[i]); d["hit"] = r(b[7 + i]); d["pan"] = r(b[14 + i]); d["width"] = r(b[21 + i])
+            return d
+        }
     }
 }

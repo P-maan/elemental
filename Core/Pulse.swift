@@ -99,16 +99,19 @@ final class Pulse: @unchecked Sendable {
     /// frame straight here with the moment it is DUE, and whoever draws next
     /// takes the newest one whose moment has come. No queue hop, no throttle,
     /// no jitter beyond the frame itself.
-    func feedSpectrum(_ s: [Float], bass: Double, mid: Double, high: Double, beat: Bool, after: Double = 0) {
+    func feedSpectrum(_ s: [Float], bass: Double, mid: Double, high: Double, beat: Bool, after: Double = 0,
+                      bands7: [Float] = []) {
         lock.lock(); defer { lock.unlock() }
         let now = CFAbsoluteTimeGetCurrent()
         lastSignal = now                       // the frame rate lifts at once, ahead of the sound
-        pending.append(Timed(due: now + max(0, after), spec: s, bass: bass, mid: mid, high: high, beat: beat))
+        pending.append(Timed(due: now + max(0, after), spec: s, bass: bass, mid: mid, high: high, beat: beat, b7: bands7))
         if pending.count > 512 { pending.removeFirst(pending.count - 512) }   // nobody is drawing
         drainLocked(now)
     }
 
-    private struct Timed { let due: CFAbsoluteTime; let spec: [Float]; let bass, mid, high: Double; let beat: Bool }
+    private struct Timed { let due: CFAbsoluteTime; let spec: [Float]; let bass, mid, high: Double; let beat: Bool; let b7: [Float] }
+    /// The seven listening bands (passive, active, pan, width - 7 each), newest due frame.
+    private var heldB7 = [Float](repeating: 0, count: 28)
     private var pending: [Timed] = []
 
     /// Apply every frame whose moment has come; the newest one wins, a beat
@@ -120,6 +123,7 @@ final class Pulse: @unchecked Sendable {
         for i in 0..<n where pending[i].beat { beatAt = pending[i].due }
         let f = pending[n - 1]
         for k in 0..<min(f.spec.count, Self.bandCount) { heldSpectrum[k] = max(0, min(1, f.spec[k])) }
+        if f.b7.count == 28 { heldB7 = f.b7 }
         held = max(0, min(1, f.bass)); heldMid = max(0, min(1, f.mid)); heldHigh = max(0, min(1, f.high))
         heldAt = f.due; lastSignal = now
         pending.removeFirst(n)
@@ -140,6 +144,19 @@ final class Pulse: @unchecked Sendable {
     /// Everything the shader reads, for THIS frame. A message pattern replaces
     /// the bass while it plays and quiets the music's other bands, so it reads
     /// as itself.
+    /// 28 floats: passive 0..6, active 7..13 (both faded like the spectrum when the
+    /// sound stops), pan 14..20 and width 21..27 (as they are).
+    func bands7() -> [Float] {
+        lock.lock(); defer { lock.unlock() }
+        let now = CFAbsoluteTimeGetCurrent()
+        drainLocked(now)
+        let fade = Float(exp(-(now - heldAt) / hold))
+        let k: Float = (pattern != nil && pattern != .drop) ? 0.25 : 1
+        var o = heldB7
+        for i in 0..<14 { o[i] = max(0, min(1, o[i] * fade * k)) }
+        return o
+    }
+
     func bands() -> (bass: Float, mid: Float, high: Float, beat: Float) {
         let bass = value()
         lock.lock(); defer { lock.unlock() }

@@ -244,6 +244,18 @@ final class SystemAudioMeter: @unchecked Sendable {
     private var hopSamples = 0
     private var hopRate: Double = 0
     private var ring = [Float](repeating: 0, count: 1024)
+    /// 17 Nov: the two ears kept apart too, so the sky can show WHERE a sound sits.
+    private var ringL = [Float](repeating: 0, count: 1024)
+    private var ringR = [Float](repeating: 0, count: 1024)
+    /// Seven listening bands (sub, bass, low-mid, mid, high-mid, presence, brilliance):
+    /// passive level, active onset, pan (-1 left .. +1 right) and stereo width.
+    static let bands7Hz: [Float] = [20, 60, 250, 500, 2000, 4000, 8000, 20000]
+    private var b7Env = [Float](repeating: 0, count: 7)
+    private var b7Peak = [Float](repeating: 1e-6, count: 7)
+    private var b7Avg = [Float](repeating: 0, count: 7)
+    private var b7Act = [Float](repeating: 0, count: 7)
+    private var b7Pan = [Float](repeating: 0, count: 7)
+    private var b7Wid = [Float](repeating: 0, count: 7)
     private var ringPos = 0
     private var fresh = 0
     private var bandEnv = [Float](repeating: 0, count: SystemAudioMeter.bandCount)
@@ -262,32 +274,28 @@ final class SystemAudioMeter: @unchecked Sendable {
         // Mono, into the ring: interleaved buffers are averaged across their
         // channels; non-interleaved ones arrive as one buffer per channel and
         // are each added at half weight, which is a mono mix in either case.
+        // Left and right kept apart (17 Nov, "show from which direction in the
+        // headphones the sound comes"); the mono ring is their average, exactly
+        // the mix it always was. Interleaved: channel 0 and 1 of each frame.
+        // Non-interleaved: buffer 0 is left, buffer 1 right. Mono: both the same.
         let bufs = abl.count
-        for buf in abl {
-            guard let data = buf.mData else { continue }
-            let ch = max(1, Int(buf.mNumberChannels))
-            let frames = Int(buf.mDataByteSize) / MemoryLayout<Float>.size / ch
-            let p = data.assumingMemoryBound(to: Float.self)
-            let w = 1 / Float(ch * max(1, bufs))
-            for f in 0..<frames {
-                var m: Float = 0
-                for c in 0..<ch { m += p[f * ch + c] }
-                if bufs > 1 && buf.mData != abl[0].mData {
-                    // a later channel buffer: add onto the samples just written.
-                    // Only the last ring's worth survived the first channel;
-                    // adding older ones would wrap and pile onto it.
-                    if f < frames - fftN { continue }
-                    // Floored modulo: a large buffer runs the offset far below
-                    // zero, and Swift's % keeps the sign.
-                    let at = ((ringPos - frames + f) % fftN + fftN) % fftN
-                    ring[at] += m * w
-                } else {
-                    ring[ringPos] = m * w
-                    ringPos = (ringPos + 1) % fftN
-                    fresh += 1
-                }
-            }
+        guard bufs > 0, let d0 = abl[0].mData else { return }
+        let ch0 = max(1, Int(abl[0].mNumberChannels))
+        let frames = Int(abl[0].mDataByteSize) / MemoryLayout<Float>.size / ch0
+        let p0 = d0.assumingMemoryBound(to: Float.self)
+        var pR: UnsafeMutablePointer<Float>? = nil
+        if bufs > 1, let d1 = abl[1].mData { pR = d1.assumingMemoryBound(to: Float.self) }
+        let start = max(0, frames - fftN)              // only the last ring's worth can survive
+        for f in start..<frames {
+            let l: Float, r: Float
+            if ch0 >= 2 { l = p0[f * ch0]; r = p0[f * ch0 + 1] }
+            else if let pR { l = p0[f]; r = pR[f] }
+            else { l = p0[f]; r = l }
+            ring[ringPos] = 0.5 * (l + r)
+            ringL[ringPos] = l; ringR[ringPos] = r
+            ringPos = (ringPos + 1) % fftN
         }
+        fresh += frames
         // Every buffer the device hands over is analysed as it arrives (it was
         // "every 512 samples", which with a 512-frame device is the same thing,
         // but with a smaller buffer waited for nothing).
@@ -316,6 +324,69 @@ final class SystemAudioMeter: @unchecked Sendable {
     //  device reports: 161 ms of waiting plus ~85 of picture = ~245 ms, against
     //  ~171 ms for the ear - about 75 ms LATE, wobbling by a frame or two. It
     //  now waits (reported latency - 45 ms) and nothing else.
+    /// Seven bands with direction. One FFT per ear (two 1024-point FFTs, ~94 a second:
+    /// well under a millisecond), then per band: the PASSIVE level (up at once, down
+    /// over ~200 ms, against its own slow peak like the 24 bands), the ACTIVE onset
+    /// (the band leaping above its own last ~250 ms, decaying over ~120 ms), the PAN
+    /// from the two ears' energy and the WIDTH from how alike they are (identical =
+    /// a centred mono sound, unrelated = wide). Returns 28 floats: 7 each.
+    private func stereoBands(dt: Float, share: (Float) -> Float) -> [Float] {
+        let n = fftN, half = n / 2
+        func fft(_ src: [Float]) -> ([Float], [Float]) {
+            var x = [Float](repeating: 0, count: n)
+            for i in 0..<n { x[i] = src[(ringPos + i) % n] * hann[i] }
+            var re = [Float](repeating: 0, count: half), im = [Float](repeating: 0, count: half)
+            re.withUnsafeMutableBufferPointer { rp in
+                im.withUnsafeMutableBufferPointer { ip in
+                    var split = DSPSplitComplex(realp: rp.baseAddress!, imagp: ip.baseAddress!)
+                    x.withUnsafeBufferPointer { xp in
+                        xp.baseAddress!.withMemoryRebound(to: DSPComplex.self, capacity: half) {
+                            vDSP_ctoz($0, 2, &split, 1, vDSP_Length(half))
+                        }
+                    }
+                    vDSP_fft_zrip(fftSetup, &split, 1, 10, FFTDirection(FFT_FORWARD))
+                }
+            }
+            return (re, im)
+        }
+        let (lr, li) = fft(ringL), (rr, ri) = fft(ringR)
+        let binHz = Float(sampleRate) / Float(n)
+        var out = [Float](repeating: 0, count: 28)
+        let peakDecay: Float = exp(-dt / 15.2)
+        let loudest = b7Peak.max() ?? 1e-6
+        for b in 0..<7 {
+            let i0 = max(1, Int(Self.bands7Hz[b] / binHz)), i1 = max(i0 + 1, min(half, Int(Self.bands7Hz[b + 1] / binHz) + 1))
+            var eL: Float = 0, eR: Float = 0, cr: Float = 0
+            for i in i0..<i1 {
+                eL += lr[i] * lr[i] + li[i] * li[i]
+                eR += rr[i] * rr[i] + ri[i] * ri[i]
+                cr += lr[i] * rr[i] + li[i] * ri[i]
+            }
+            let a = ((eL + eR) / Float(i1 - i0)).squareRoot()
+            // passive
+            b7Env[b] += (a > b7Env[b] ? share(0.003) : share(b < 3 ? 0.20 : 0.14)) * (a - b7Env[b])
+            b7Peak[b] = max(b7Env[b], b7Peak[b] * peakDecay, 1e-6)
+            let passive = min(1, b7Env[b] / max(b7Peak[b], loudest * 0.08))
+            // active: a leap above its own recent average, judged on this hop's raw level
+            let onset = b7Avg[b] > 1e-7 && a > b7Peak[b] * 0.2 ? max(0, min(1, (a / b7Avg[b] - 1.3) / 1.5)) : 0
+            b7Avg[b] += share(0.25) * (a - b7Avg[b])
+            b7Act[b] = max(onset, b7Act[b] * exp(-dt / 0.12))
+            // direction: only where the band is actually sounding
+            let e = eL + eR
+            if e > 1e-9 && passive > 0.05 {
+                let pan = max(-1, min(1, (eR - eL) / e))
+                let coh = cr / max((eL * eR).squareRoot(), 1e-12)
+                let wid = max(0, min(1, 1 - coh))
+                b7Pan[b] += share(0.04) * (pan - b7Pan[b])
+                b7Wid[b] += share(0.12) * (wid - b7Wid[b])
+            } else {
+                b7Pan[b] += share(0.6) * (0 - b7Pan[b])
+            }
+            out[b] = passive; out[7 + b] = b7Act[b]; out[14 + b] = b7Pan[b]; out[21 + b] = b7Wid[b]
+        }
+        return out
+    }
+
     private func spectrumHop() {
         let n = fftN, half = n / 2
         // Every rate below is per SECOND and turned into this hop's share, so
@@ -370,6 +441,8 @@ final class SystemAudioMeter: @unchecked Sendable {
             spec[k] = min(1, bandEnv[k] / max(bandPeak[k], loudest * 0.08))
         }
 
+        let b7 = stereoBands(dt: dt, share: share)
+
         func mean(_ r: Range<Int>) -> Float { r.reduce(0) { $0 + spec[$1] } / Float(r.count) }
         let bass = Double(mean(0..<6)), mid = Double(mean(6..<15)), high = Double(mean(15..<B))
         let bassEnv = (bandEnv[0] + bandEnv[1] + bandEnv[2] + bandEnv[3] + bandEnv[4] + bandEnv[5]) / 6
@@ -410,7 +483,7 @@ final class SystemAudioMeter: @unchecked Sendable {
         // every frame goes to Pulse now, stamped with the moment it is due -
         // the output's latency less what the picture takes - and the renderer
         // picks it up on the frame that moment falls in.
-        Pulse.shared.feedSpectrum(spec, bass: bass, mid: mid, high: high, beat: beat, after: syncDelay)
+        Pulse.shared.feedSpectrum(spec, bass: bass, mid: mid, high: high, beat: beat, after: syncDelay, bands7: b7)
         if drop {
             DispatchQueue.main.asyncAfter(deadline: .now() + syncDelay) { Pulse.shared.play(.drop) }
         }

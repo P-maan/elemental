@@ -1114,6 +1114,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         let heard = config.musicVisualizer && !asleep && CFAbsoluteTimeGetCurrent() - lastAudioAt < 10
         let battery = musicOnBattery
         music.update(shouldRun: heard && !battery, syncToEars: config.musicSyncToEars)
+        // His head, from AirPods/Beats, steers the glints and the shimmer (HeadTracker).
+        if heard && !battery { HeadTracker.shared.start() } else { HeadTracker.shared.stop() }
+        if ElementalRenderer.headSource == nil {
+            ElementalRenderer.headSource = { let h = HeadTracker.shared.state(); return (h.yaw, h.pitch, h.roll, h.on) }
+        }
         SongTint.shared.trustPlayer = battery
         nowPlaying.update(shouldRun: heard && config.songTint, economy: battery)
     }

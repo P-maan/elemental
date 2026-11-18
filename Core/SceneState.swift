@@ -129,6 +129,9 @@ struct Uniforms {
     // ---- A seventh block, 320 -> 336 bytes: how much each part of the scene answers the
     // music, 0..2 (Scene.metal, musSky...). Append only - trap 5.
     var musSky: Float = 1, musCloud: Float = 1, musPrecip: Float = 1, musStars: Float = 1
+    // ---- an eighth block, 336 -> 352 bytes: his head, from AirPods/Beats (HeadTracker).
+    // Radians from the resting centre; headOn 0..1. Mirrored by hand - trap 5.
+    var headYaw: Float = 0, headPitch: Float = 0, headRoll: Float = 0, headOn: Float = 0
 }
 
 struct GPUBreather { var ax, ay, R, per, s1, s2, ph, ph2: Float }

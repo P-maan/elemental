@@ -18,6 +18,9 @@ import QuartzCore
 import simd
 
 final class ElementalRenderer {
+    /// His head from AirPods/Beats (yaw, pitch, roll, on), set by the app (HeadTracker);
+    /// nil in the screen saver and the offline renderer.
+    nonisolated(unsafe) static var headSource: (() -> (Float, Float, Float, Float))?
 
     let device: MTLDevice
     private let queue: MTLCommandQueue
@@ -1119,6 +1122,9 @@ final class ElementalRenderer {
         u.musSky = state.musicSky; u.musCloud = state.musicClouds
         u.musPrecip = state.musicPrecip; u.musStars = state.musicStars
         u.message = Pulse.shared.message()
+        if let hd = ElementalRenderer.headSource?() {
+            u.headYaw = hd.0; u.headPitch = hd.1; u.headRoll = hd.2; u.headOn = hd.3
+        }
         let spec = Pulse.shared.spectrum()
         let sp = spectrumBuf.contents().assumingMemoryBound(to: Float.self)
         for k in 0..<32 { sp[k] = k < spec.count ? spec[k] : 0 }
@@ -1133,6 +1139,10 @@ final class ElementalRenderer {
             slowSpec[k] = target > slowSpec[k] ? target : slowSpec[k] + ease * (target - slowSpec[k])
             sp[32 + k] = slowSpec[k]
         }
+        // Slots 96..123: the seven listening bands - passive 96.., active 103..,
+        // pan 110.., width 117.. (Pulse.bands7; the shader's mP/mA read them).
+        let b7 = Pulse.shared.bands7()
+        for i in 0..<28 { sp[96 + i] = i < b7.count ? b7[i] : 0 }
         // Zo's reminder showing now (Signals.glow): strength in the uniform,
         // colour in slots 76..78.
         let zo: (value: Float, rgb: SIMD3<Float>) = showZo ? Signals.shared.glow() : (0, SIMD3<Float>(1, 1, 1))
