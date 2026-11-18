@@ -324,6 +324,12 @@ struct Config: Codable, Equatable {
     var hdr: Bool = false
     /// Calendar events and Reminders from this Mac glow in the sky (DeviceAlerts). 18 Nov.
     var deviceAlerts: Bool = true
+    /// AirPods/Beats head tracking (HeadTracker): the wall seen in 3D from where his head is.
+    var headTracking: Bool = true
+    /// Track the head even with no music playing (headphones on for a call, say).
+    var headAlways: Bool = false
+    /// How strong the 3D is, 0..1; 0.5 as designed.
+    var headAmount: Double = 0.5
 
     /// Desktop widget rectangles, as fractions of the screen. Water lands on
     /// these the way it lands on the dock. macOS will not tell us where widgets
@@ -921,6 +927,9 @@ extension Config {
         motionSpeed        = c.lenient(.motionSpeed, d.motionSpeed)
         hdr                = c.lenient(.hdr, d.hdr)
         deviceAlerts       = c.lenient(.deviceAlerts, d.deviceAlerts)
+        headTracking       = c.lenient(.headTracking, d.headTracking)
+        headAlways         = c.lenient(.headAlways, d.headAlways)
+        headAmount         = max(0, min(1, c.lenient(.headAmount, d.headAmount)))
         widgets            = c.lenient(.widgets, d.widgets)
         dockRect           = try? c.decodeIfPresent(WidgetRect.self, forKey: .dockRect)
         wetDock            = c.lenient(.wetDock, d.wetDock)

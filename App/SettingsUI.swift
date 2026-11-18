@@ -1212,6 +1212,55 @@ struct GeneralPage: View {
             }
         }
 
+        SectionTitle("Head tracking", info: "With AirPods or Beats that track your head, the wall of tiles is seen from where "
+                     + "you are: turn and the blocks show their sides, the glints and shadows swing. The sky itself stays true.")
+        RowsCard {
+            ToggleRow(title: "Use head tracking",
+                      subtitle: "Reads your headphones' motion while music plays. Nothing is recorded.",
+                      isOn: store.binding(\.headTracking))
+            RowDivider()
+            ToggleRow(title: "Also without music",
+                      subtitle: "Keep the 3D on whenever the headphones are on, not only while something plays.",
+                      isOn: store.binding(\.headAlways))
+            RowDivider()
+            SliderRow(title: "Depth", subtitle: "How strongly the wall turns with you. The middle is as designed.",
+                      value: store.unit(\.headAmount), format: { $0 < 0.02 ? "off" : "\(Int(($0 * 200).rounded()))%" })
+        }
+
+        SectionTitle("More")
+        RowsCard {
+            ToggleRow(title: "HDR highlights",
+                      subtitle: "Lets the sun, lightning and shooting stars go brighter than white. macOS allows a little on the desktop and the full range on the lock screen and screen saver. Takes effect next launch.",
+                      isOn: store.binding(\.hdr))
+            RowDivider()
+            ToggleRow(title: "Live weather", subtitle: "Real observations from nearby airports on top of the forecast.",
+                      isOn: store.binding(\.liveWeather))
+            RowDivider()
+            ToggleRow(title: "On every Space", subtitle: "The wallpaper follows you to every desktop.",
+                      isOn: store.binding(\.showOnAllSpaces))
+            RowDivider()
+            ToggleRow(title: "Replay the night when you wake", subtitle: "A quick catch-up of the sky you missed while the Mac slept.",
+                      isOn: store.binding(\.playbackOnWake))
+            RowDivider()
+            ToggleRow(title: "Moving on the lock screen", subtitle: "Keep the scene alive behind the login window.",
+                      isOn: store.binding(\.animateOnLock))
+            RowDivider()
+            ToggleRow(title: "Low Power on battery", subtitle: "Switch to the low-power frame rate whenever you unplug.",
+                      isOn: store.binding(\.lowPowerOnBattery))
+            RowDivider()
+            ToggleRow(title: "Rain on the Dock", subtitle: "Water and snow collect along the Dock.",
+                      isOn: store.binding(\.wetDock))
+            RowDivider()
+            ToggleRow(title: "Rain on widgets", subtitle: "Water and snow settle on top of your widgets and windows.",
+                      isOn: store.binding(\.wetWidgets))
+            RowDivider()
+            SliderRow(title: "Water on the glass", subtitle: "How much rain runs down the screen.",
+                      value: store.unit(\.paneWaterAmount), format: { "\(Int(($0 * 100).rounded()))%" })
+            RowDivider()
+            ToggleRow(title: "Automation", subtitle: "Let Zo and other apps on this Mac change settings through the local API.",
+                      isOn: store.binding(\.automationEnabled))
+        }
+
         SectionTitle("Festivals", info: "Each place keeps its own, drawn with the wall's own tiles. India: diyas from "
                      + "Dhanteras to Bhai Dooj with fireworks building to Diwali night; bonfires at Lohri, Holika Dahan and "
                      + "Dussehra; kites at Makar Sankranti and on 15 August; gulal at Holi; lights at Navratri and Christmas. "

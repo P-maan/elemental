@@ -435,7 +435,7 @@ final class WallpaperSurface: NSObject, CAMetalDisplayLinkDelegate {
         // So is a drag on the desktop: at six frames a second the clouds
         // parting under the pointer arrive in visible jumps, a beat behind it.
         let playing = Pulse.shared.active || Cursor.shared.active || Cursor.shared.hoverActive
-            || renderer.hasDebris
+            || renderer.hasDebris || HeadTracker.shared.isMoving     // a turning head needs every frame
         let moving = w.isPrecipitating || w.isThundering || w.wind > 30 || playing
         let hi = moving ? ceiling : min(ceiling, preferred + 4)
 

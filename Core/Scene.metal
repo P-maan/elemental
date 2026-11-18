@@ -941,9 +941,7 @@ inline float2 astroXY(float alt, float az, float facing, float W, float H) {
 // tilts his head, eased, so the light feels like it is following him. Off (and exactly
 // where the sky puts them) the moment the headphones stop reporting.
 inline float2 headFollow(constant Uniforms &U, float W, float H) {
-    if (U.headOn < 0.01f) return float2(0.0f);
-    return float2(-clamp(U.headYaw, -0.9f, 0.9f) * W * 0.09f,
-                  -clamp(U.headPitch, -0.6f, 0.6f) * H * 0.09f) * U.headOn;
+    return float2(0.0f);    // 18 Nov, his: "don't make the sun follow me" - the sky stays true
 }
 inline float2 sunScreen(constant Uniforms &U, float W, float H) {
     float2 p = astroXY(U.sunAlt, U.sunAz, U.facingAz, W, H) + headFollow(U, W, H);
@@ -3274,7 +3272,7 @@ inline float faceInset(float rounding, float halftone) {
 inline Relief castRelief(texture2d<float> heights, texture2d<float> cells,
                          sampler s, float2 g, float cols, float rows, float hmax,
                          float full, float wIn, float cfrac,
-                         float halftone, float time)
+                         float halftone, float time, float2 cam = float2(0.0f))
 {
     Relief r;
     r.g = g; r.cell = floor(g); r.h = 0.0f; r.z = 0.0f;
@@ -3290,6 +3288,10 @@ inline Relief castRelief(texture2d<float> heights, texture2d<float> cells,
     float2 ctr  = float2(cols, rows) * 0.5f;
     float2 x    = (g - ctr) / max(ctr, float2(0.5f));
     float2 lean = ctr * sin(M_PI_F * x) / (M_PI_F * max(max(cols, rows) * RELIEF_CAMD, 1.0f));
+    // HIS HEAD, IN 3D (18 Nov): the eye moves with his head, so the whole wall of blocks
+    // is seen from where he is - turn right and every block shows its left side, look up
+    // and their undersides. `cam` is the eye's shift in cells, the same for every block.
+    lean += cam;
     r.lean = lean;
 
     float2 p   = g - lean * hmax;          // where the ray enters the layer
@@ -3804,7 +3806,9 @@ fragment float4 presentPass(VOut in [[stage_in]],
     Relief rel  = castRelief(heights, cells, nearestS, px / SPv, U.cols, U.rows,
                              hmax, cellFull(U.splayAmt),
                              faceInset(U.rounding, U.halftone),
-                             faceCorner(U.rounding), U.halftone, U.time);
+                             faceCorner(U.rounding), U.halftone, U.time,
+                             float2(clamp(U.headYaw, -0.8f, 0.8f), clamp(U.headPitch, -0.5f, 0.5f))
+                                 * U.headOn * 0.55f);
 
     // A flank hit lands exactly ON a cell boundary, where floor() is a coin
     // toss and the grout test would fire. Push it a quarter-cell into the block

@@ -1115,10 +1115,24 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         let battery = musicOnBattery
         music.update(shouldRun: heard && !battery, syncToEars: config.musicSyncToEars)
         // His head, from AirPods/Beats, steers the glints and the shimmer (HeadTracker).
-        if heard && !battery { HeadTracker.shared.start() } else { HeadTracker.shared.stop() }
+        HeadTracker.shared.amount = Float(config.headAmount * 2)
+        if config.headTracking && (heard || config.headAlways) { HeadTracker.shared.start() } else { HeadTracker.shared.stop() }
         if config.deviceAlerts { DeviceAlerts.shared.start() } else { DeviceAlerts.shared.stop() }
+        // His head turning lifts the frame rate while it moves and lets it fall back after.
+        if headWatch == nil {
+            var was = false
+            headWatch = Timer.scheduledTimer(withTimeInterval: 0.2, repeats: true) { [weak self] _ in
+                MainActor.assumeIsolated {
+                    let now = HeadTracker.shared.isMoving
+                    if now != was { was = now; self?.surfaces.values.forEach { $0.refreshFrameRate() } }
+                }
+            }
+        }
         if ElementalRenderer.headSource == nil {
-            ElementalRenderer.headSource = { let h = HeadTracker.shared.state(); return (h.yaw, h.pitch, h.roll, h.on) }
+            ElementalRenderer.headSource = {
+                let h = HeadTracker.shared.state()
+                return (h.yaw, h.pitch, h.roll, h.on * HeadTracker.shared.amount)
+            }
         }
         SongTint.shared.trustPlayer = battery
         nowPlaying.update(shouldRun: heard && config.songTint, economy: battery)
@@ -1210,6 +1224,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     // MARK: Pulse — see Core/Pulse.swift
 
     private var pulseTimer: Timer?
+    private var headWatch: Timer?
     /// A pulse needs frames: lift every surface to its motion rate while one is
     /// running, and hand the energy back two seconds after the last signal.
     func pulseStarted() {

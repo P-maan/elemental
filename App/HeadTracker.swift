@@ -19,6 +19,8 @@ final class HeadTracker: @unchecked Sendable {
     private var lastSample: CFAbsoluteTime = 0
     private(set) var started = false
     private(set) var status = "off"
+    /// Strength from the setting, 0..2 (1 = as designed).
+    var amount: Float = 1
 
     func start() {
         guard !started else { return }
@@ -61,12 +63,37 @@ final class HeadTracker: @unchecked Sendable {
 
     /// Yaw/pitch/roll in radians relative to the resting centre, and how present
     /// the headphones are (fades to 0 within a second of the data stopping).
+    // 18 Nov, his: "the head tracking is getting stuck - make it really smooth". The headphones
+    // report ~25 times a second and the wall draws at its own rate, so each frame read a value
+    // that jumped in steps. Every read now eases toward the latest pose with a critically damped
+    // spring (~90 ms), so the picture glides between reports whatever the frame rate.
+    private var sYaw: Double = 0, sPitch: Double = 0, sRoll: Double = 0
+    private var vYaw: Double = 0, vPitch: Double = 0, vRoll: Double = 0
+    private var sOn: Double = 0, lastRead: CFAbsoluteTime = 0
+    /// How fast the head is turning (rad/s), for the frame rate.
+    private(set) var speed: Double = 0
+
     func state() -> (yaw: Float, pitch: Float, roll: Float, on: Float) {
         lock.lock(); defer { lock.unlock() }
-        let age = CFAbsoluteTimeGetCurrent() - lastAt
-        let on = lastAt == 0 ? 0 : Float(max(0, min(1, 1.5 - age)))
-        return (Float(yaw), Float(pitch), Float(roll), on)
+        let now = CFAbsoluteTimeGetCurrent()
+        let dt = min(0.1, max(0.001, now - (lastRead == 0 ? now : lastRead)))
+        lastRead = now
+        let age = now - lastAt
+        let onTarget = lastAt == 0 ? 0 : max(0, min(1, 1.5 - age))
+        // Two gentle low-pass stages in a row (unconditionally stable at any frame rate, no
+        // overshoot): together they glide like a damped spring, settling in ~120 ms.
+        let k = 1 - exp(-dt / 0.045)
+        func ease(_ x: inout Double, _ m: inout Double, _ target: Double) {
+            m += (target - m) * k
+            x += (m - x) * k
+        }
+        let py = sYaw, pp = sPitch
+        ease(&sYaw, &vYaw, yaw); ease(&sPitch, &vPitch, pitch); ease(&sRoll, &vRoll, roll)
+        sOn += (onTarget - sOn) * (1 - exp(-dt / 0.25))
+        speed = (abs(sYaw - py) + abs(sPitch - pp)) / dt
+        return (Float(sYaw), Float(sPitch), Float(sRoll), Float(sOn))
     }
+    var isMoving: Bool { lock.lock(); defer { lock.unlock() }; return speed > 0.15 && sOn > 0.2 }
 
     var report: [String: Any] {
         let s = state()
