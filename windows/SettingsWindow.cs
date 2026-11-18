@@ -17,7 +17,7 @@ sealed class SettingsWindow : Form
         Text = "Elemental Settings";
         Icon = icon;
         StartPosition = FormStartPosition.CenterScreen;
-        ClientSize = new Size(560, 700);
+        ClientSize = new Size(560 * DeviceDpi / 96, 700 * DeviceDpi / 96);
         MinimumSize = new Size(420, 400);
         Controls.Add(_wv);
     }
@@ -49,5 +49,5 @@ sealed class SettingsWindow : Form
         _ = _wv.CoreWebView2.ExecuteScriptAsync("window.elementalSettingsInit&&window.elementalSettingsInit(" + o.ToJsonString() + ")");
     }
 
-    public void Refresh() { if (_wv.CoreWebView2 != null) Push(); }
+    public void RefreshInit() { if (_wv.CoreWebView2 != null) Push(); }
 }

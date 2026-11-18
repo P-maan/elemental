@@ -52,7 +52,7 @@ sealed class WallpaperWindow : Form
     {
         try
         {
-            var c = _wv.CoreWebView2Controller; if (c == null) return;
+            var c = typeof(WebView2).GetField("_coreWebView2Controller", System.Reflection.BindingFlags.NonPublic | System.Reflection.BindingFlags.Instance)?.GetValue(_wv) as CoreWebView2Controller; if (c == null) { Log.Write("no controller for scale"); return; }
             var m = MonitorFromPoint(new POINT { X = Monitor.X + 1, Y = Monitor.Y + 1 }, 2);
             if (GetDpiForMonitor(m, 0, out var dx, out _) == 0 && dx > 0)
             {
@@ -75,6 +75,12 @@ sealed class WallpaperWindow : Form
     public bool IsAttached => IsHandleCreated && Host != IntPtr.Zero && IsWindow(Host) && GetParent(Handle) == Host;
 
     public void Reposition() { if (IsHandleCreated && Host != IntPtr.Zero) DesktopAttach.Place(Handle, Host, Monitor); }
+
+    /// <summary>Hide/show the WebView2 composition (hidden = no GPU/compositor work).</summary>
+    public void SetWebViewVisible(bool v)
+    {
+        try { if (_wv.CoreWebView2 != null && _wv.Visible != v) _wv.Visible = v; } catch (Exception e) { Log.Write("visible failed: " + e.Message); }
+    }
 
     public void Run(string script)
     {

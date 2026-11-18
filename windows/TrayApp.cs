@@ -45,6 +45,7 @@ sealed class TrayApp : ApplicationContext
         _tray = new NotifyIcon { Icon = _icon, Text = "Elemental", ContextMenuStrip = menu, Visible = true };
         _tray.DoubleClick += (_, _) => OpenSettings();
         _startItem.Checked = SettingsStore.StartWithWindowsEnabled();
+        Log.Write("tray created visible=" + _tray.Visible + " menu=" + string.Join(" | ", menu.Items.Cast<ToolStripItem>().Select(i => i.Text)));
 
         _msgWin = new MsgWindow(this);
         SystemEvents.DisplaySettingsChanged += OnDisplayChanged;
@@ -80,8 +81,9 @@ sealed class TrayApp : ApplicationContext
         }
         PollState();
         _poll.Start(); _watchdog.Start();
-        await RefreshLocationAsync();
         await RebuildAsync();
+        await RefreshLocationAsync();
+        ApplyAll();
         if (openSettings) OpenSettings();
     }
 
@@ -95,6 +97,7 @@ sealed class TrayApp : ApplicationContext
             foreach (var w in _windows) { try { w.Close(); w.Dispose(); } catch { } }
             _windows.Clear();
             var host = DesktopAttach.FindHost();
+            if (host == IntPtr.Zero) { Log.Write("rebuild: desktop host not found yet, will retry"); return; }
             Log.Write($"rebuild: {Screen.AllScreens.Length} monitors, host={host:X}");
             foreach (var s in Screen.AllScreens)
             {
@@ -103,7 +106,7 @@ sealed class TrayApp : ApplicationContext
                 w.Message += OnPageMessage;
                 _windows.Add(w);
                 w.Show();
-                if (host != IntPtr.Zero) w.AttachTo(host);
+                w.AttachTo(host);
                 await w.InitAsync(_env, _webFolder);
             }
         }
@@ -116,6 +119,13 @@ sealed class TrayApp : ApplicationContext
         if (_building || _closing) return;
         if (_windows.Count == 0) { _ = RebuildAsync(); return; }
         if (_windows.All(w => w.IsAttached)) return;
+        // explorer restarted: the old WorkerW (and our child windows with it) is gone -> rebuild from scratch
+        if (_windows.Any(w => w.IsDisposed || !w.IsHandleCreated || w.Host == IntPtr.Zero || !IsWindow(w.Host)))
+        {
+            Log.Write("watchdog: host gone, rebuilding");
+            _ = RebuildAsync();
+            return;
+        }
         var host = DesktopAttach.FindHost();
         if (host == IntPtr.Zero) return;
         Log.Write("watchdog: re-attaching");
@@ -179,9 +189,12 @@ sealed class TrayApp : ApplicationContext
         catch { return false; }
     }
 
+    public void TogglePause() => SetUserPaused(!_userPaused);
+
     void SetUserPaused(bool p)
     {
         _userPaused = p;
+        Log.Write("user paused=" + p);
         _pauseItem.Text = p ? "Resume" : "Pause";
         _tray.Text = p ? "Elemental (paused)" : "Elemental";
         ApplyAll();
@@ -202,7 +215,14 @@ sealed class TrayApp : ApplicationContext
         return o.ToJsonString();
     }
 
-    void ApplyTo(WallpaperWindow w) => w.Run("window.elementalApply&&window.elementalApply(" + BuildPayload() + ")");
+    void ApplyTo(WallpaperWindow w)
+    {
+        bool hide = _locked || _fullscreen;   // user Pause keeps the last frame on screen
+        if (!hide) w.SetWebViewVisible(true);
+        w.Run(BuildScript());
+        if (hide) w.SetWebViewVisible(false);
+    }
+    string BuildScript() => ("window.elementalApply&&window.elementalApply(" + BuildPayload() + ")");
     void ApplyAll() { foreach (var w in _windows) ApplyTo(w); }
 
     async Task RefreshLocationAsync()
@@ -236,7 +256,7 @@ sealed class TrayApp : ApplicationContext
         _store.Merge(patch);
         if (patch["startWithWindows"] is JsonValue v && v.TryGetValue<bool>(out var sw)) SettingsStore.SetStartWithWindows(sw);
         _startItem.Checked = SettingsStore.StartWithWindowsEnabled();
-        _ = RefreshLocationAsync().ContinueWith(_ => _ui.Post(__ => { ApplyAll(); _settings?.Refresh(); }, null));
+        _ = RefreshLocationAsync().ContinueWith(_ => _ui.Post(__ => { ApplyAll(); _settings?.RefreshInit(); }, null));
         ApplyAll();
     }
 
@@ -253,11 +273,13 @@ sealed class TrayApp : ApplicationContext
     public void OpenSettings()
     {
         if (_env == null) return;
-        if (_settings != null && !_settings.IsDisposed) { _settings.Activate(); _settings.Show(); return; }
+        if (_settings != null && !_settings.IsDisposed) { _settings.TopMost = true; _settings.Show(); _settings.Activate(); _settings.TopMost = false; return; }
         _settings = new SettingsWindow(_store, SaveSettings, _icon);
         _settings.FormClosed += (_, _) => _settings = null;
+        _settings.TopMost = true;      // come to front even when launched from the background
         _settings.Show();
         _settings.Activate();
+        _settings.TopMost = false;
         _ = _settings.InitAsync(_env, _webFolder);
     }
 
