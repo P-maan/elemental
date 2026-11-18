@@ -1,0 +1,21 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Elemental</title>
+<style>
+  html,body{margin:0;height:100%;overflow:hidden;background:#05060a;cursor:none}
+  #scene{position:fixed;inset:0;width:100%;height:100%;z-index:0;image-rendering:auto;display:block}
+  #fgfx{position:fixed;inset:0;width:100%;height:100%;z-index:2;pointer-events:none;display:none}
+</style>
+</head>
+<body>
+<canvas id="scene"></canvas>
+<canvas id="fgfx"></canvas>
+<script src="prelude.js"></script>
+<script src="scene-core.js"></script>
+<script src="scene-fx.js"></script>
+<script src="elemental.js"></script>
+</body>
+</html>
