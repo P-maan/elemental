@@ -286,7 +286,7 @@ build_app() {
   swift_build "$APP/Contents/MacOS/Elemental" \
     "${CORE[@]}" App/*.swift \
     -framework AppKit -framework Metal -framework QuartzCore \
-    -framework CoreLocation -framework CoreMotion -framework ImageIO -framework UniformTypeIdentifiers
+    -framework CoreLocation -framework CoreMotion -framework EventKit -framework ImageIO -framework UniformTypeIdentifiers
   sign_bundle "$APP"
   notarize_bundle "$APP"
 }

@@ -1116,6 +1116,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         music.update(shouldRun: heard && !battery, syncToEars: config.musicSyncToEars)
         // His head, from AirPods/Beats, steers the glints and the shimmer (HeadTracker).
         if heard && !battery { HeadTracker.shared.start() } else { HeadTracker.shared.stop() }
+        if config.deviceAlerts { DeviceAlerts.shared.start() } else { DeviceAlerts.shared.stop() }
         if ElementalRenderer.headSource == nil {
             ElementalRenderer.headSource = { let h = HeadTracker.shared.state(); return (h.yaw, h.pitch, h.roll, h.on) }
         }

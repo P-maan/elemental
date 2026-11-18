@@ -936,8 +936,17 @@ inline float2 astroXY(float alt, float az, float facing, float W, float H) {
 // Played with by the pointer (Cursor.swift): the SUN IS DRAWN TOWARD YOU — it
 // leans a tenth of the way to a cursor dragging near it — and the MOON IS SHY,
 // sliding a little away from one that comes close.
+// HIS HEAD, 3D (18 Nov, "make the head tracking feel 3D, like the sun is following you"):
+// with AirPods/Beats on, the sun and the moon drift a little toward where he turns and
+// tilts his head, eased, so the light feels like it is following him. Off (and exactly
+// where the sky puts them) the moment the headphones stop reporting.
+inline float2 headFollow(constant Uniforms &U, float W, float H) {
+    if (U.headOn < 0.01f) return float2(0.0f);
+    return float2(-clamp(U.headYaw, -0.9f, 0.9f) * W * 0.09f,
+                  -clamp(U.headPitch, -0.6f, 0.6f) * H * 0.09f) * U.headOn;
+}
 inline float2 sunScreen(constant Uniforms &U, float W, float H) {
-    float2 p = astroXY(U.sunAlt, U.sunAz, U.facingAz, W, H);
+    float2 p = astroXY(U.sunAlt, U.sunAz, U.facingAz, W, H) + headFollow(U, W, H);
     if (U.drag > 0.002f) {
         float2 c = float2(U.cursorX, U.cursorY);
         p += (c - p) * 0.10f * U.drag * smoothstep(H * 1.2f, 0.0f, length(c - p));
@@ -945,7 +954,7 @@ inline float2 sunScreen(constant Uniforms &U, float W, float H) {
     return p;
 }
 inline float2 moonScreen(constant Uniforms &U, float W, float H) {
-    float2 p = astroXY(U.moonAlt, U.moonAz, U.facingAz, W, H);
+    float2 p = astroXY(U.moonAlt, U.moonAz, U.facingAz, W, H) + headFollow(U, W, H);
     if (U.drag > 0.002f) {
         float2 c = float2(U.cursorX, U.cursorY);
         float2 d = p - c;

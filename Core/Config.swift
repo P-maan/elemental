@@ -322,6 +322,8 @@ struct Config: Codable, Equatable {
     /// it by asking, measuring, and reporting that it was refused, rather than
     /// by pretending. See `WallpaperSurface.refreshHeadroom`.
     var hdr: Bool = false
+    /// Calendar events and Reminders from this Mac glow in the sky (DeviceAlerts). 18 Nov.
+    var deviceAlerts: Bool = true
 
     /// Desktop widget rectangles, as fractions of the screen. Water lands on
     /// these the way it lands on the dock. macOS will not tell us where widgets
@@ -918,6 +920,7 @@ extension Config {
         maxFPS             = c.lenient(.maxFPS, d.maxFPS)
         motionSpeed        = c.lenient(.motionSpeed, d.motionSpeed)
         hdr                = c.lenient(.hdr, d.hdr)
+        deviceAlerts       = c.lenient(.deviceAlerts, d.deviceAlerts)
         widgets            = c.lenient(.widgets, d.widgets)
         dockRect           = try? c.decodeIfPresent(WidgetRect.self, forKey: .dockRect)
         wetDock            = c.lenient(.wetDock, d.wetDock)
