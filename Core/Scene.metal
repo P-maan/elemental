@@ -948,8 +948,8 @@ inline bool headHas(constant Uniforms &U, int bit) { return (int(U.headMask + 0.
 // is the patch's size (0 tiny .. 1 the whole wall).
 inline float2 headCam(constant Uniforms &U, float2 g) {
     if (!headHas(U, 1)) return float2(0.0f);
-    float2 half = float2(U.cols, U.rows) * 0.5f;
-    float2 gaze = half + float2(-clamp(U.headYaw, -0.8f, 0.8f), -clamp(U.headPitch, -0.5f, 0.5f)) * half * 1.1f;
+    float2 hw = float2(U.cols, U.rows) * 0.5f;
+    float2 gaze = hw + float2(-clamp(U.headYaw, -0.8f, 0.8f), -clamp(U.headPitch, -0.5f, 0.5f)) * hw * 1.1f;
     float sig = max(0.05f, U.headRegion) * max(U.cols, U.rows) * 0.45f;
     float2 d = g - gaze;
     float w = U.headRegion >= 0.98f ? 1.0f : exp(-dot(d, d) / (2.0f * sig * sig));
