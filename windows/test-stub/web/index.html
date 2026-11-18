@@ -1,0 +1,17 @@
+<!doctype html><meta charset="utf-8"><title>stub</title>
+<style>html,body{margin:0;height:100%;overflow:hidden;background:#06203a}canvas{display:block;width:100%;height:100%}</style>
+<canvas id=c></canvas>
+<script>
+const c=document.getElementById('c'),g=c.getContext('2d');let paused=false,t=0,st={};
+function size(){c.width=innerWidth*devicePixelRatio;c.height=innerHeight*devicePixelRatio}
+addEventListener('resize',size);size();
+window.elementalApply=function(p){paused=!!p.paused;st=p;
+ window.chrome.webview.postMessage({type:'applied',paused:paused,onBattery:p.onBattery,loc:p.location,keys:Object.keys(p.settings||{})});};
+function draw(){requestAnimationFrame(draw);if(paused)return;t+=0.02;
+ const w=c.width,h=c.height;const gr=g.createLinearGradient(0,0,w,h);gr.addColorStop(0,'#0b3d91');gr.addColorStop(1,'#d4145a');
+ g.fillStyle=gr;g.fillRect(0,0,w,h);
+ for(let i=0;i<60;i++){const x=(i*97%w),y=h/2+Math.sin(t+i)*h/3;g.fillStyle='hsl('+(i*6)+',90%,60%)';g.beginPath();g.arc((x+t*50*i/10)%w,y,30+i%20,0,7);g.fill()}
+ g.fillStyle='#fff';g.font=(h/10)+'px sans-serif';g.fillText('ELEMENTAL STUB '+(paused?'PAUSED':'LIVE'),w/10,h/2)}
+draw();
+window.chrome.webview.postMessage({type:'needLocation'});
+</script>

@@ -1,0 +1,3 @@
+<!doctype html><meta charset="utf-8"><title>Settings stub</title><body style="font:16px sans-serif;padding:20px">
+<h2>Settings stub</h2><pre id=o></pre><button onclick="chrome.webview.postMessage({type:'saveSettings',settings:{material:'metal',rows:50}})">Save</button>
+<script>window.elementalSettingsInit=s=>{document.getElementById('o').textContent=JSON.stringify(s,null,1)}</script>
