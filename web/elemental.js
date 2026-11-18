@@ -100,7 +100,7 @@ function elApplySettings(S, first){
   if(typeof WS.gridRows==="number"){ GRID_ROWS=Math.max(12,Math.min(200,Math.round(WS.gridRows))); GRID_K=GRID_ROWS/36; }
   if(!first){
     if(GRID_ROWS!==prevRows||WS.material!==prevMat||STYLE!==prevStyle||RES!==prevRes) resizeScene();
-    if(CURRENT.lat!==prevLat||CURRENT.lon!==prevLon){ updateAstro(elNow()); elLoadWeather(); }
+    if(CURRENT.lat!==prevLat||CURRENT.lon!==prevLon){ elSnapHeading(); elLoadWeather(); }
     else updateAstro(elNow());
   }
   elPause(!!S.paused);
@@ -133,8 +133,9 @@ function elFrame(tnow){
 }
 
 /* ---------------- boot ---------------- */
+function elSnapHeading(){ updateAstro(elNow()); if(HEADING_DYNAMIC){ FACING_AZ=headingTarget(); updateAstro(elNow()); } }
 elApplySettings(__ELSET, true);
-updateAstro(elNow());
+elSnapHeading();
 resizeScene();
 let _rzT=0; window.addEventListener("resize",()=>{ clearTimeout(_rzT); _rzT=setTimeout(resizeScene,120); });
 setInterval(()=>{ if(!EL.paused){ updateAstro(elNow()); if(EL.wx){ const d=(astroNow.sunAlt>-0.833)?1:0; if(d!==scDay) elApplyWx(EL.wx); } } }, 60*1000);
@@ -142,3 +143,7 @@ initFgFx(); try{ _snowRestore(); _leafRestore(); }catch(_){}
 elLoadWeather();
 EL.paused=true; elPause(!!__ELSET.paused);
 document.addEventListener("visibilitychange",()=>{ if(!document.hidden && !__ELSET.paused){ updateAstro(elNow()); } });
+// WebView2 hosts may also post {type:"elemental-settings", settings} or {type:"elemental-pause", paused}.
+try{ if(window.chrome&&window.chrome.webview) window.chrome.webview.addEventListener("message",e=>{ const d=e.data||{};
+  if(d.type==="elemental-settings"&&d.settings) window.elementalApply(d.settings);
+  else if(d.type==="elemental-pause") elPause(!!d.paused); }); }catch(_){}
