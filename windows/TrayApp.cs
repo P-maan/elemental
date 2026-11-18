@@ -201,18 +201,58 @@ sealed class TrayApp : ApplicationContext
     }
 
     // ---------- page contract ----------
+    string _metar = "";
+    DateTime _metarAt = DateTime.MinValue;
+
+    /// <summary>Flat settings object per the web contract (ELEMENTAL_SETTINGS / elementalApply).</summary>
     string BuildPayload()
     {
-        var settings = (JsonObject)_store.Current.DeepClone();
-        settings["startWithWindows"] = SettingsStore.StartWithWindowsEnabled();
-        var o = new JsonObject
+        var o = (JsonObject)_store.Current.DeepClone();
+        o.Remove("startWithWindows");
+        if (o["gridRows"] is null && o["rows"] is JsonNode rw) o["gridRows"] = rw.DeepClone();
+        if (_location is JsonObject l)
         {
-            ["settings"] = settings,
-            ["location"] = _location?.DeepClone(),
-            ["paused"] = Paused,
-            ["onBattery"] = _onBattery,
-        };
+            if (l["lat"] is JsonNode la) o["lat"] = la.DeepClone();
+            if (l["lon"] is JsonNode lo) o["lon"] = lo.DeepClone();
+        }
+        double? bf = _store.GetNumber("batteryFps"), mf = _store.GetNumber("maxFps");
+        if (_onBattery) o["maxFps"] = bf ?? 15; else if (mf != null) o["maxFps"] = mf;
+        if (_metar.Length > 0) o["metar"] = _metar;
+        o["paused"] = Paused;
         return o.ToJsonString();
+    }
+
+    static readonly HttpClient _http = new() { Timeout = TimeSpan.FromSeconds(10) };
+    async Task RefreshMetarAsync()
+    {
+        try
+        {
+            Log.Write("metar: refresh, location=" + (_location?.ToJsonString() ?? "null"));
+            if (_location is not JsonObject l || l["lat"] is null || l["lon"] is null) return;
+            if (DateTime.UtcNow - _metarAt < TimeSpan.FromMinutes(10)) return;
+            double lat = (double)l["lat"]!, lon = (double)l["lon"]!;
+            var inv = System.Globalization.CultureInfo.InvariantCulture;
+            string bbox = string.Join(",", (lat - 1).ToString(inv), (lon - 1.4).ToString(inv), (lat + 1).ToString(inv), (lon + 1.4).ToString(inv));
+            var req = new HttpRequestMessage(HttpMethod.Get, "https://aviationweather.gov/api/data/metar?format=json&bbox=" + bbox);
+            req.Headers.UserAgent.ParseAdd("ElementalWindows/0.1");
+            var txt = await (await _http.SendAsync(req)).Content.ReadAsStringAsync();
+            _metarAt = DateTime.UtcNow;
+            if (JsonNode.Parse(txt) is not JsonArray arr) return;
+            string best = ""; double bd = 1e9;
+            foreach (var m in arr)
+            {
+                try
+                {
+                    double d = Math.Sqrt(Math.Pow(((double)m!["lat"]! - lat) * 111, 2) + Math.Pow(((double)m["lon"]! - lon) * 111 * Math.Cos(lat * Math.PI / 180), 2));
+                    var raw = (string?)m["rawOb"] ?? "";
+                    if (d < bd && raw.Length > 0) { bd = d; best = raw; }
+                }
+                catch { }
+            }
+            _metar = bd <= 60 ? best : "";
+            Log.Write($"metar nearest {bd:F0} km used={_metar.Length > 0}");
+        }
+        catch (Exception e) { Log.Write("metar failed: " + e.Message); }
     }
 
     void ApplyTo(WallpaperWindow w)
@@ -222,12 +262,13 @@ sealed class TrayApp : ApplicationContext
         w.Run(BuildScript());
         if (hide) w.SetWebViewVisible(false);
     }
-    string BuildScript() => ("window.elementalApply&&window.elementalApply(" + BuildPayload() + ")");
+    string BuildScript() { var p = BuildPayload(); return "window.elementalApply&&window.elementalApply(" + p + ");window.elementalPause&&window.elementalPause(" + (Paused ? "true" : "false") + ")"; }
     void ApplyAll() { foreach (var w in _windows) ApplyTo(w); }
 
     async Task RefreshLocationAsync()
     {
         try { _location = await LocationService.Resolve(_store); } catch (Exception e) { Log.Write("location failed: " + e.Message); }
+        await RefreshMetarAsync();
     }
 
     void OnPageMessage(WallpaperWindow w, string json)
@@ -241,6 +282,7 @@ sealed class TrayApp : ApplicationContext
                     _ = RefreshLocationAsync().ContinueWith(_ => _ui.Post(__ => ApplyAll(), null));
                     break;
                 case "setSettings":
+                case "elemental-settings":
                     if (m["settings"] is JsonObject s) SaveSettings(s);
                     break;
                 default:
@@ -253,7 +295,9 @@ sealed class TrayApp : ApplicationContext
 
     void SaveSettings(JsonObject patch)
     {
+        if (patch["lat"] != null && patch["lon"] != null && patch["useWindowsLocation"] == null) patch["useWindowsLocation"] = false;
         _store.Merge(patch);
+        _metarAt = DateTime.MinValue;
         if (patch["startWithWindows"] is JsonValue v && v.TryGetValue<bool>(out var sw)) SettingsStore.SetStartWithWindows(sw);
         _startItem.Checked = SettingsStore.StartWithWindowsEnabled();
         _ = RefreshLocationAsync().ContinueWith(_ => _ui.Post(__ => { ApplyAll(); _settings?.RefreshInit(); }, null));

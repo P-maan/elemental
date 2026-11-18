@@ -292,6 +292,20 @@ traps that have each cost real time — the Metal shader compiles at *runtime*, 
 a syntax error passes `build.sh` completely clean and only appears as "no Metal
 device / pipeline build failed" when something renders.
 
+## Elemental for Windows
+
+A separate, smaller Windows port (v0.1) lives in `web/` and `windows/`. It does not run the Metal renderer.
+`web/` is a standalone browser version of the same sky (real sun, moon and planets, open-meteo weather,
+mosaic tiles, rain, snow, leaves, festivals) with no server and no personal data. `windows/` is a .NET 8
+tray app that hosts it in WebView2 behind the desktop icons on every monitor (the WorkerW technique), pauses on
+battery low-fps and when a full-screen app is in front, and restores your wallpaper on quit.
+
+- Settings (tray, Settings...) are saved to `%APPDATA%\Elemental\settings.json`: material, style, grid rows,
+  planets, leaves, festivals, star brightness, fps limits, location (Windows location, or lat/lon).
+- Not in it yet: music reaction, head tracking, the screen saver, the Mac settings window.
+- Build the installer on Windows with the .NET 8 SDK and Inno Setup 6 (`windows/build-installer.ps1`), or from a
+  Mac with a Windows VM (`windows/vm-build.sh`). Download the installer from the `win-v0.1` release.
+
 ## Licence
 
 MIT. See [LICENSE](LICENSE).

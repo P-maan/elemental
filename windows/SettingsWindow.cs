@@ -33,7 +33,7 @@ sealed class SettingsWindow : Form
         {
             try
             {
-                if (JsonNode.Parse(e.WebMessageAsJson) is JsonObject m && (string?)m["type"] == "saveSettings" && m["settings"] is JsonObject s)
+                if (JsonNode.Parse(e.WebMessageAsJson) is JsonObject m && ((string?)m["type"] is "saveSettings" or "elemental-settings") && m["settings"] is JsonObject s)
                     _onSave(s);
             }
             catch (Exception ex) { Log.Write("settings msg failed: " + ex.Message); }
@@ -46,7 +46,9 @@ sealed class SettingsWindow : Form
     {
         var o = (JsonObject)_store.Current.DeepClone();
         o["startWithWindows"] = SettingsStore.StartWithWindowsEnabled();
-        _ = _wv.CoreWebView2.ExecuteScriptAsync("window.elementalSettingsInit&&window.elementalSettingsInit(" + o.ToJsonString() + ")");
+        var js = o.ToJsonString();
+        _ = _wv.CoreWebView2.ExecuteScriptAsync("window.ELEMENTAL_SETTINGS=" + js + ";window.elementalSettingsInit&&window.elementalSettingsInit(" + js + ")");
+        _wv.CoreWebView2.PostWebMessageAsJson("{\"type\":\"elemental-settings\",\"settings\":" + js + "}");
     }
 
     public void RefreshInit() { if (_wv.CoreWebView2 != null) Push(); }
