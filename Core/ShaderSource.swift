@@ -985,8 +985,10 @@ inline float mWeight(constant float *spec, int b, float x01) {
     float d = x01 - c;
     return 0.35f + 0.65f * exp(-d * d / (2.0f * s * s));
 }
-inline float mP(constant float *spec, int b, float x01) { return spec[96 + b] * mWeight(spec, b, x01); }
-inline float mA(constant float *spec, int b, float x01) { return spec[103 + b] * mWeight(spec, b, x01); }
+// VOLUME: quiet music answers softly, loud music fully and a little more (slot 124, 0..1).
+inline float mVol(constant float *spec) { return mix(0.30f, 1.20f, spec[124]); }
+inline float mP(constant float *spec, int b, float x01) { return spec[96 + b] * mWeight(spec, b, x01) * mVol(spec); }
+inline float mA(constant float *spec, int b, float x01) { return spec[103 + b] * mWeight(spec, b, x01) * mVol(spec); }
 
 /// How near the dragging pointer is, 0..1 times how alive the drag is, for a
 /// reach of `R` pixels — the falloff every drag reaction shares.
@@ -2705,7 +2707,7 @@ fragment CellOut cellPass(VOut in [[stage_in]],
                 float dx = x01 - cx, dy = y01 - cy;
                 f += lev * exp(-dx * dx / (2.0f * sx * sx) - dy * dy / (2.0f * sy * sy));
             }
-            g *= 1.0f + min(f, 1.5f) * 0.05f * U.musSky * 2.0f;
+            g *= 1.0f + min(f, 1.5f) * 0.05f * mVol(spec) * U.musSky * 2.0f;
         }
     }
 
@@ -4700,7 +4702,12 @@ fragment float4 presentPass(VOut in [[stage_in]],
                 if (dh <= 0.0f) continue;
                 float2 e = 0.5f - o * (cuv - 0.5f);   // distance to that edge
                 float  d = (k < 2) ? e.x : e.y;
-                occ += saturate(dh / (hmax * 0.45f)) * (1.0f - smoothstep(0.0f, 0.6f, d));
+                // CAST, not just contact (17 Nov): a neighbour standing on the
+                // light's side throws its shadow onto this block; one on the far
+                // side barely does. L already follows the sun or moon and, with
+                // AirPods/Beats, his head - so the shadows swing as he turns.
+                float toward = 0.35f + 1.1f * saturate(dot(o, L));
+                occ += saturate(dh / (hmax * 0.45f)) * (1.0f - smoothstep(0.0f, 0.6f, d)) * toward;
             }
             shade *= 1.0f - saturate(occ) * 0.55f * U.shadow;
             // Splay tips the front face, so a wall of blocks catches the light

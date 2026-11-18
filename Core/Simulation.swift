@@ -850,11 +850,30 @@ final class SceneSimulation {
             let pb = Pulse.shared.bands()
             let drive = max(pb.bass, Pulse.shared.message())
             let hit = max(pb.beat, Pulse.shared.message())
-            if hit > 0.6 && musicLastHit <= 0.6 { musicDir = -musicDir }
+            // WHERE the low end sits decides which way the air goes (17 Nov, "the sound
+            // space can move the snow and rain"): bass panned left pushes left. A
+            // centred bass keeps the old speaker-cone flip on each beat.
+            let b7 = Pulse.shared.bands7()
+            let lowPan = b7.count > 16 ? (b7[14] * b7[0] + b7[15] * b7[1]) / max(b7[0] + b7[1], 0.05) : 0
+            let loud = b7.count > 28 ? b7[28] : 0
+            let rising = hit > 0.6 && musicLastHit <= 0.6
+            if abs(lowPan) > 0.15 { musicDir = lowPan > 0 ? 1 : -1 }
+            else if rising { musicDir = -musicDir }
             musicLastHit = hit
+            // LOUD (17 Nov, "when it gets loud"): a hard hit at real volume shakes the
+            // widgets and windows like a jolt - a little water and snow comes off their
+            // tops, more the louder it is. Nothing happens at a normal listening level.
+            if rising && loud > 0.75 && SP > 0 {
+                let k = min(0.35, (loud - 0.75) * 1.4 * max(0.3, state.musicWind * 2))
+                for i in films.indices where i < surfaces.count {
+                    var f = films[i]
+                    if f.wet + f.lip + f.snow > 0.05 { release(&f, from: surfaces[i], share: k) }
+                    films[i] = f
+                }
+            }
             // up on the same frame, down over ~285 ms
             musicAir = drive > musicAir ? drive : musicAir + (drive - musicAir) * min(1, dt * 3.5)
-            musicPush = musicAir * musicDir * state.musicWind
+            musicPush = musicAir * musicDir * state.musicWind * (0.5 + 0.8 * loud)
             // friction: below this much bass a lying leaf does not move at all
             let hold: Float = 0.45
             let shove = max(0, musicAir - hold) / (1 - hold) * state.musicLeaves      // 0..2

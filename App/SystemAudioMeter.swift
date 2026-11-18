@@ -256,6 +256,7 @@ final class SystemAudioMeter: @unchecked Sendable {
     private var b7Act = [Float](repeating: 0, count: 7)
     private var b7Pan = [Float](repeating: 0, count: 7)
     private var b7Wid = [Float](repeating: 0, count: 7)
+    private var loudEnv: Float = 0
     private var ringPos = 0
     private var fresh = 0
     private var bandEnv = [Float](repeating: 0, count: SystemAudioMeter.bandCount)
@@ -351,7 +352,7 @@ final class SystemAudioMeter: @unchecked Sendable {
         }
         let (lr, li) = fft(ringL), (rr, ri) = fft(ringR)
         let binHz = Float(sampleRate) / Float(n)
-        var out = [Float](repeating: 0, count: 28)
+        var out = [Float](repeating: 0, count: 29)
         let peakDecay: Float = exp(-dt / 15.2)
         let loudest = b7Peak.max() ?? 1e-6
         for b in 0..<7 {
@@ -384,6 +385,17 @@ final class SystemAudioMeter: @unchecked Sendable {
             }
             out[b] = passive; out[7 + b] = b7Act[b]; out[14 + b] = b7Pan[b]; out[21 + b] = b7Wid[b]
         }
+        // VOLUME (17 Nov, "add volume intensity support"): how loud it really is, not
+        // against its own peak - every band above is normalised, so quiet and loud
+        // music otherwise look alike. RMS of the newest ~10 ms in dBFS: -48 dB is 0,
+        // -12 dB is 1. Up at once, down over ~300 ms.
+        var rms: Float = 0
+        let m = min(n, max(64, hopSamples))
+        for i in 0..<m { let v = ring[(ringPos - 1 - i + n) % n]; rms += v * v }
+        let db = 10 * log10(max(rms / Float(m), 1e-12))
+        let loud = max(0, min(1, (db + 48) / 36))
+        loudEnv += (loud > loudEnv ? share(0.003) : share(0.30)) * (loud - loudEnv)
+        out[28] = loudEnv
         return out
     }
 

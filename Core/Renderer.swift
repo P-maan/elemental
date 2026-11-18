@@ -1142,7 +1142,7 @@ final class ElementalRenderer {
         // Slots 96..123: the seven listening bands - passive 96.., active 103..,
         // pan 110.., width 117.. (Pulse.bands7; the shader's mP/mA read them).
         let b7 = Pulse.shared.bands7()
-        for i in 0..<28 { sp[96 + i] = i < b7.count ? b7[i] : 0 }
+        for i in 0..<29 { sp[96 + i] = i < b7.count ? b7[i] : 0 }      // 124 = loudness
         // Zo's reminder showing now (Signals.glow): strength in the uniform,
         // colour in slots 76..78.
         let zo: (value: Float, rgb: SIMD3<Float>) = showZo ? Signals.shared.glow() : (0, SIMD3<Float>(1, 1, 1))

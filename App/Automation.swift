@@ -753,6 +753,7 @@ extension AutomationServer {
             var d = [String: Any]()
             d["band"] = names[i]
             d["level"] = r(b[i]); d["hit"] = r(b[7 + i]); d["pan"] = r(b[14 + i]); d["width"] = r(b[21 + i])
+            d["loudness"] = r(b.count > 28 ? b[28] : 0)
             return d
         }
     }

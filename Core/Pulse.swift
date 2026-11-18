@@ -111,7 +111,7 @@ final class Pulse: @unchecked Sendable {
 
     private struct Timed { let due: CFAbsoluteTime; let spec: [Float]; let bass, mid, high: Double; let beat: Bool; let b7: [Float] }
     /// The seven listening bands (passive, active, pan, width - 7 each), newest due frame.
-    private var heldB7 = [Float](repeating: 0, count: 28)
+    private var heldB7 = [Float](repeating: 0, count: 29)
     private var pending: [Timed] = []
 
     /// Apply every frame whose moment has come; the newest one wins, a beat
@@ -123,7 +123,7 @@ final class Pulse: @unchecked Sendable {
         for i in 0..<n where pending[i].beat { beatAt = pending[i].due }
         let f = pending[n - 1]
         for k in 0..<min(f.spec.count, Self.bandCount) { heldSpectrum[k] = max(0, min(1, f.spec[k])) }
-        if f.b7.count == 28 { heldB7 = f.b7 }
+        if f.b7.count == 29 { heldB7 = f.b7 }
         held = max(0, min(1, f.bass)); heldMid = max(0, min(1, f.mid)); heldHigh = max(0, min(1, f.high))
         heldAt = f.due; lastSignal = now
         pending.removeFirst(n)
@@ -154,6 +154,7 @@ final class Pulse: @unchecked Sendable {
         let k: Float = (pattern != nil && pattern != .drop) ? 0.25 : 1
         var o = heldB7
         for i in 0..<14 { o[i] = max(0, min(1, o[i] * fade * k)) }
+        o[28] = max(0, min(1, o[28] * fade))
         return o
     }
 
