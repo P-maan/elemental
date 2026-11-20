@@ -94,6 +94,16 @@ final class HeadTracker: @unchecked Sendable {
         return (Float(sYaw), Float(sPitch), Float(sRoll), Float(sOn))
     }
     var isMoving: Bool { lock.lock(); defer { lock.unlock() }; return speed > 0.15 && sOn > 0.2 }
+    /// Turned well away from the screen (more than ~35 degrees, or looking far down) for 2 s.
+    private var awaySince: CFAbsoluteTime?
+    var lookingAway: Bool {
+        lock.lock(); defer { lock.unlock() }
+        let now = CFAbsoluteTimeGetCurrent()
+        let live = lastAt > 0 && now - lastAt < 1.5
+        let away = live && (abs(yaw) > 0.6 || pitch < -0.7)
+        if away { if awaySince == nil { awaySince = now } } else { awaySince = nil }
+        return away && now - (awaySince ?? now) > 2
+    }
 
     var report: [String: Any] {
         let s = state()

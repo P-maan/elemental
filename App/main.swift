@@ -1119,6 +1119,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         ElementalRenderer.headMask = Float((config.headTiles ? 1 : 0) | (config.headLight ? 2 : 0) | (config.headShimmer ? 4 : 0)
                                            | (config.headShadows ? 8 : 0) | (config.headSoundField ? 16 : 0))
         ElementalRenderer.headRegion = Float(config.headRegion)
+        ElementalRenderer.hdrBoost = config.hdr ? Float(config.hdrBoost) : 0
         if config.headTracking && (heard || config.headAlways) { HeadTracker.shared.start() } else { HeadTracker.shared.stop() }
         if config.deviceAlerts { DeviceAlerts.shared.start() } else { DeviceAlerts.shared.stop() }
         // His head turning lifts the frame rate while it moves and lets it fall back after.
@@ -1126,7 +1127,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
             var was = false
             headWatch = Timer.scheduledTimer(withTimeInterval: 0.2, repeats: true) { [weak self] _ in
                 MainActor.assumeIsolated {
-                    let now = HeadTracker.shared.isMoving
+                    let now = HeadTracker.shared.isMoving || HeadTracker.shared.lookingAway
                     if now != was { was = now; self?.surfaces.values.forEach { $0.refreshFrameRate() } }
                 }
             }

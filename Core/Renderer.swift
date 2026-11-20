@@ -25,6 +25,10 @@ final class ElementalRenderer {
     /// and how big the moving region is (0..1). Set by the app from Config.
     nonisolated(unsafe) static var headMask: Float = 31
     nonisolated(unsafe) static var headRegion: Float = 0.35
+    /// HDR brightness 0..1 (Config.hdrBoost); the shader lifts the brightest sky past white by it.
+    nonisolated(unsafe) static var hdrBoost: Float = 0.5
+    /// Low Power: drop the effects that redraw the whole wall every frame.
+    var economy = false
 
     let device: MTLDevice
     private let queue: MTLCommandQueue
@@ -1130,6 +1134,8 @@ final class ElementalRenderer {
             u.headYaw = hd.0; u.headPitch = hd.1; u.headRoll = hd.2; u.headOn = hd.3
         }
         u.headMask = ElementalRenderer.headMask; u.headRegion = ElementalRenderer.headRegion
+        u.headPad0 = ElementalRenderer.hdrBoost
+        if economy { u.headOn = 0 }
         let spec = Pulse.shared.spectrum()
         let sp = spectrumBuf.contents().assumingMemoryBound(to: Float.self)
         for k in 0..<32 { sp[k] = k < spec.count ? spec[k] : 0 }
@@ -1147,7 +1153,10 @@ final class ElementalRenderer {
         // Slots 96..123: the seven listening bands - passive 96.., active 103..,
         // pan 110.., width 117.. (Pulse.bands7; the shader's mP/mA read them).
         let b7 = Pulse.shared.bands7()
-        for i in 0..<29 { sp[96 + i] = i < b7.count ? b7[i] : 0 }      // 124 = loudness
+        // 20 Nov, Low Power: the sound field and the sub-bass breath touch EVERY cell every frame, which
+        // made the whole wall redraw at every frame and the laptop crawl. In economy they are off; the
+        // music still reaches the sun, clouds, rain and stars through the older, local reactions.
+        for i in 0..<29 { sp[96 + i] = (i < b7.count && !economy) ? b7[i] : 0 }      // 124 = loudness
         // Zo's reminder showing now (Signals.glow): strength in the uniform,
         // colour in slots 76..78.
         let zo: (value: Float, rgb: SIMD3<Float>) = showZo ? Signals.shared.glow() : (0, SIMD3<Float>(1, 1, 1))

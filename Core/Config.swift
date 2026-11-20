@@ -338,6 +338,8 @@ struct Config: Codable, Equatable {
     var headShadows: Bool = true
     var headSoundField: Bool = true
     var headRegion: Double = 0.35
+    /// How far past white the brightest sky goes with HDR on (0..1). 20 Nov.
+    var hdrBoost: Double = 0.5
 
     /// Desktop widget rectangles, as fractions of the screen. Water lands on
     /// these the way it lands on the dock. macOS will not tell us where widgets
@@ -944,6 +946,7 @@ extension Config {
         headShadows        = c.lenient(.headShadows, d.headShadows)
         headSoundField     = c.lenient(.headSoundField, d.headSoundField)
         headRegion         = max(0, min(1, c.lenient(.headRegion, d.headRegion)))
+        hdrBoost           = max(0, min(1, c.lenient(.hdrBoost, d.hdrBoost)))
         widgets            = c.lenient(.widgets, d.widgets)
         dockRect           = try? c.decodeIfPresent(WidgetRect.self, forKey: .dockRect)
         wetDock            = c.lenient(.wetDock, d.wetDock)

@@ -1246,6 +1246,9 @@ struct GeneralPage: View {
                       subtitle: "Lets the sun, lightning and shooting stars go brighter than white. macOS allows a little on the desktop and the full range on the lock screen and screen saver. Takes effect next launch.",
                       isOn: store.binding(\.hdr))
             RowDivider()
+            SliderRow(title: "HDR brightness", subtitle: "How far past white the brightest part of the sky goes, music or not.",
+                      value: store.unit(\.hdrBoost))
+            RowDivider()
             ToggleRow(title: "Live weather", subtitle: "Real observations from nearby airports on top of the forecast.",
                       isOn: store.binding(\.liveWeather))
             RowDivider()

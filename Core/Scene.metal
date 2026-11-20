@@ -2432,6 +2432,11 @@ fragment CellOut cellPass(VOut in [[stage_in]],
     // of the pass, and only up to the headroom the display is granting this
     // instant. See the return.
     float overWhite = max(0.0f, max(R0, max(G0, B0)) - 255.0f);
+    // 20 Nov, his: "I want HDR also when not playing music". The excess above used to come only from
+    // the sun's disc, the moon and flashes - so most of the time there was nothing to light beyond
+    // white. With HDR on, the brightest part of the sky itself (its top 20%) now also rises past
+    // white, by the HDR brightness setting (headPad0, 0..1). An SDR display is unchanged.
+    overWhite += U.headPad0 * max(0.0f, max(R0, max(G0, B0)) - 205.0f) * 2.2f;
 
     R0 = clamp(R0, 6.0f, 255.0f); G0 = clamp(G0, 8.0f, 255.0f); B0 = clamp(B0, 12.0f, 255.0f);
     float lum = (R0 + G0 + B0) * 0.333f;

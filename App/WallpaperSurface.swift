@@ -350,6 +350,7 @@ final class WallpaperSurface: NSObject, CAMetalDisplayLinkDelegate {
     func applyFrameRate(lowPower: Bool? = nil) {
         let lowPower = lowPower ?? lowPowerMode
         lowPowerMode = lowPower
+        renderer.economy = lowPower
         var ceiling = Float(lowPower ? max(15, config.maxFPS / 2) : config.maxFPS)
 
         // A WORK BUDGET over whatever the scene asks for. Only the cells that
@@ -369,6 +370,13 @@ final class WallpaperSurface: NSObject, CAMetalDisplayLinkDelegate {
             ceiling = min(ceiling, max(15, (Self.redrawBudgetPerSecond / share).rounded()))
         }
 
+        // HEAD TRACKING, useful (20 Nov): turned well away from the screen for a few seconds means
+        // nobody is looking - the wall all but stops drawing until he looks back.
+        if HeadTracker.shared.lookingAway {
+            link?.preferredFrameRateRange = CAFrameRateRange(minimum: 2, maximum: 3, preferred: 2)
+            renderer.state.lowFX = false
+            return
+        }
         // Ask for the rate the SCENE needs, not a constant.
         //
         // This requested `config.maxFPS` — 30 by default — every frame of every
@@ -477,7 +485,11 @@ final class WallpaperSurface: NSObject, CAMetalDisplayLinkDelegate {
             var f = Float(max(4, min(30, config.lowPowerFPS)))
             if falling && config.lowPowerSmoothRain { f = max(f, min(20, Float(config.maxFPS))) }
             // 17 Nov, his: "keep music on battery efficient" - 24 on Low Power; full rate is for AC only.
-            if playing { f = max(f, min(24, Float(config.maxFPS))) }
+            // 20 Nov, his: "in Low Power this is really slow and hanging my laptop". Music on Low Power
+            // gets 15, and a turning head nothing extra (head 3D is off in economy).
+            if playing && (Pulse.shared.active || Cursor.shared.active) { f = max(f, min(15, Float(config.maxFPS))) }
+            // Looking away from the screen (head tracking): barely draw at all.
+            if HeadTracker.shared.lookingAway { f = 2 }
             link?.preferredFrameRateRange = CAFrameRateRange(minimum: f, maximum: f,
                                                              preferred: f)
             renderer.state.lowFX = false
@@ -547,7 +559,7 @@ final class WallpaperSurface: NSObject, CAMetalDisplayLinkDelegate {
     var onUnrecoverable: ((WallpaperSurface) -> Void)?
 
     private func checkAlive() {
-        guard !paused, isVisible || config.renderWhenOccluded else {
+        guard !paused, isVisible || (config.renderWhenOccluded && !lowPowerMode) else {
             lastFrameAt = CACurrentMediaTime()
             return
         }
@@ -584,7 +596,8 @@ final class WallpaperSurface: NSObject, CAMetalDisplayLinkDelegate {
 
     @objc private func occlusionChanged() {
         let visible = window.occlusionState.contains(.visible)
-        if visible || config.renderWhenOccluded { resume() } else { pause() }
+        // Behind windows only when it is asked for AND not on Low Power.
+        if visible || (config.renderWhenOccluded && !lowPowerMode) { resume() } else { pause() }
     }
 
     var isVisible: Bool { window.occlusionState.contains(.visible) }
