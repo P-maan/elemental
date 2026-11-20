@@ -1134,8 +1134,8 @@ final class ElementalRenderer {
             u.headYaw = hd.0; u.headPitch = hd.1; u.headRoll = hd.2; u.headOn = hd.3
         }
         u.headMask = ElementalRenderer.headMask; u.headRegion = ElementalRenderer.headRegion
-        u.headPad0 = ElementalRenderer.hdrBoost
-        if economy { u.headOn = 0 }
+        // Low Power (20 Nov, his): head tracking stays, HDR goes.
+        u.headPad0 = economy ? 0 : ElementalRenderer.hdrBoost
         let spec = Pulse.shared.spectrum()
         let sp = spectrumBuf.contents().assumingMemoryBound(to: Float.self)
         for k in 0..<32 { sp[k] = k < spec.count ? spec[k] : 0 }

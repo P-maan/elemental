@@ -958,7 +958,8 @@ inline float2 headCam(constant Uniforms &U, float2 g) {
     float sig = max(0.05f, U.headRegion) * max(U.cols, U.rows) * 0.45f;
     float2 d = g - gaze;
     float w = U.headRegion >= 0.98f ? 1.0f : exp(-dot(d, d) / (2.0f * sig * sig));
-    return float2(clamp(U.headYaw, -0.8f, 0.8f), clamp(U.headPitch, -0.5f, 0.5f)) * U.headOn * 0.55f * w;
+    // 20 Nov, his: "make it more noticeable, I can barely see it" - about 2.5x the tilt it had.
+    return float2(clamp(U.headYaw, -0.8f, 0.8f), clamp(U.headPitch, -0.5f, 0.5f)) * U.headOn * 1.4f * w;
 }
 inline float2 headFollow(constant Uniforms &U, float W, float H) {
     return float2(0.0f);    // 18 Nov, his: "don't make the sun follow me" - the sky stays true
@@ -1481,7 +1482,7 @@ fragment CellOut cellPass(VOut in [[stage_in]],
         // an obvious pulse.
         // His head moves the shimmer: the waves slide the way he turns and nods.
         float hk = headHas(U, 4) ? U.headOn : 0.0f;
-        float hx = hk * clamp(U.headYaw, -0.9f, 0.9f) * 900.0f, hy = hk * clamp(U.headPitch, -0.6f, 0.6f) * 700.0f;
+        float hx = hk * clamp(U.headYaw, -0.9f, 0.9f) * 2200.0f, hy = hk * clamp(U.headPitch, -0.6f, 0.6f) * 1700.0f;
         float sh = sin((x + hx) * 0.0021f + (y + hy) * 0.0017f + sec * 0.80f)
                  + 0.70f * sin((x + hx) * 0.0037f - (y + hy) * 0.0029f + sec * 0.52f + 2.1f)
                  + 0.50f * sin((x + hx) * 0.0009f + (y + hy) * 0.0043f + sec * 1.27f + 4.3f);
@@ -2978,7 +2979,7 @@ fragment float4 heightPass(VOut in [[stage_in]],
         float x = floor(p.x) * SPs.x, y = floor(p.y) * SPs.y, sec = U.time;
         // His head moves the shimmer: the waves slide the way he turns and nods.
         float hk = headHas(U, 4) ? U.headOn : 0.0f;
-        float hx = hk * clamp(U.headYaw, -0.9f, 0.9f) * 900.0f, hy = hk * clamp(U.headPitch, -0.6f, 0.6f) * 700.0f;
+        float hx = hk * clamp(U.headYaw, -0.9f, 0.9f) * 2200.0f, hy = hk * clamp(U.headPitch, -0.6f, 0.6f) * 1700.0f;
         float sh = sin((x + hx) * 0.0021f + (y + hy) * 0.0017f + sec * 0.80f)
                  + 0.70f * sin((x + hx) * 0.0037f - (y + hy) * 0.0029f + sec * 0.52f + 2.1f)
                  + 0.50f * sin((x + hx) * 0.0009f + (y + hy) * 0.0043f + sec * 1.27f + 4.3f);
@@ -4596,10 +4597,10 @@ fragment float4 presentPass(VOut in [[stage_in]],
     // The sun and moon stay where they are - only the glints move with him.
     float2 L0 = L;                                   // the true light, for shadows when they do not follow
     if (headHas(U, 2)) {
-        float a = clamp(U.headYaw, -0.9f, 0.9f) * 0.9f * U.headOn;
+        float a = clamp(U.headYaw, -0.9f, 0.9f) * 1.6f * U.headOn;
         float ca = cos(a), sa = sin(a);
         L = float2(L.x * ca - L.y * sa, L.x * sa + L.y * ca);
-        L.y += clamp(U.headPitch, -0.6f, 0.6f) * 0.8f * U.headOn;
+        L.y += clamp(U.headPitch, -0.6f, 0.6f) * 1.4f * U.headOn;
         L = L / max(length(L), 1e-4f);
     }
 

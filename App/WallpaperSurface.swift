@@ -488,6 +488,8 @@ final class WallpaperSurface: NSObject, CAMetalDisplayLinkDelegate {
             // 20 Nov, his: "in Low Power this is really slow and hanging my laptop". Music on Low Power
             // gets 15, and a turning head nothing extra (head 3D is off in economy).
             if playing && (Pulse.shared.active || Cursor.shared.active) { f = max(f, min(15, Float(config.maxFPS))) }
+            // A turning head gets 20 so the 3D glides, then it drops straight back.
+            if HeadTracker.shared.isMoving { f = max(f, min(20, Float(config.maxFPS))) }
             // Looking away from the screen (head tracking): barely draw at all.
             if HeadTracker.shared.lookingAway { f = 2 }
             link?.preferredFrameRateRange = CAFrameRateRange(minimum: f, maximum: f,

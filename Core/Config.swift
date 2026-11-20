@@ -337,7 +337,7 @@ struct Config: Codable, Equatable {
     var headShimmer: Bool = true
     var headShadows: Bool = true
     var headSoundField: Bool = true
-    var headRegion: Double = 0.35
+    var headRegion: Double = 0.55
     /// How far past white the brightest sky goes with HDR on (0..1). 20 Nov.
     var hdrBoost: Double = 0.5
 
